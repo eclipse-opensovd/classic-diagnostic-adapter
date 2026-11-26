@@ -11,6 +11,9 @@
 
 # Path to the directory containing flash files.
 # flash_files_path = "."
+# Default functional class used to resolve the flash services (0x34, 0x36, 0x37)
+# when the client does not provide `flashClass`. Compared case-insensitively.
+# flash_functional_class_default = "flash_download_upload"
 
 # Optional CAN bus transport configuration.
 # When enabled, the adapter can communicate with ECUs over CAN bus.
@@ -472,7 +475,10 @@
 # diagnostic request arrives while initialization is still pending.
 # deferred_retry_after_seconds = 30
 # Controls when diagnostic transport network activation begins:
-# - "Always": whole-vehicle communication initializes eagerly at startup (default).
+# - "Always": whole-vehicle communication initializes eagerly at startup,
+#   always with a full VIR discovery (default).
+# - "WhenNotPersisted": like "Always", but a persisted topology (see
+#   `ecu_list_persistence`) is reused instead of a VIR discovery.
 # - "OnDemand": HTTP/SOVD starts first. The first qualifying ECU diagnostic
 #   request, or an explicit `activate()` call, triggers initialization.
 # - "Disabled": HTTP/SOVD starts first. The default communication plugin
@@ -486,6 +492,12 @@
 # - "Deferred": leave communication deferred even if the update displaced
 #   an enabled runtime. The transport stays down until triggered.
 # post_update_mode = "Enabled"
+# Handling of spontaneous vehicle announcements (VAMs):
+# - "Always": connect announced gateways and detect their ECUs (default).
+# - "PersistedOnly": only while a persisted topology exists; like "Never"
+#   while `ecu_list_persistence` is disabled.
+# - "Never": do not listen for spontaneous announcements.
+# vam_handling_mode = "Always"
 # Controls whether enabling communication also runs whole-vehicle variant
 # detection:
 # - "Always": the registered detector runs as the last stage of every
@@ -494,6 +506,17 @@
 #   only, so variant-dependent surfaces report not-ready until detection is
 #   triggered explicitly.
 # variant_detection = "Always"
+
+# Persistence of the detected ECU/gateway topology.
+[communication.ecu_list_persistence]
+# When `true`, the detected topology is persisted after every detection
+# run and `last_seen` timestamps are written back at shutdown. With
+# `init_mode = "WhenNotPersisted"` (or `OnDemand`/`Disabled` once
+# triggered), a persisted topology is reused instead of a full
+# VIR/VAM discovery. When `false` (default), the persisted
+# topology is never read or written. Requires `DoIP` (`doip.enabled =
+# true`); without `DoIP` it behaves as `false`.
+# enabled = false
 
 [components.additional_fields.x-sovd2uds-can-ecus.CAN]
 # ignore_case = true
@@ -699,6 +722,25 @@
 # The alive check is only sent when no diagnostic communication has occurred
 # for this duration. Set to 0 to disable the alive check.
 # alive_check_interval_secs = 1800
+# Whether the SOVD operation `/apps/sovd2uds/operations/doip-connect-ecu` is offered,
+# which connects an ECU directly to a given IP address instead of discovering it
+# via VIR/VAM. Intended for ECU development, disabled by default.
+# Only available in builds with the `doip-direct-connect` feature. If set
+# without that feature, an error is logged and the operation remains unavailable.
+# direct_connect_enabled = false
+# How gateways are discovered on the network, once communication has been
+# initialized (independent of `communication.init_mode`):
+# - `Disabled`: no VIR, VAMs are ignored and persisted gateways are not
+#   reconnected. ECUs are only connected through an explicit direct-connect
+#   request.
+# - `VamOnly`: no VIR, neither at startup nor as a fallback. VAMs are handled
+#   as `communication.vam_handling_mode` allows. Persisted gateways are
+#   reconnected by unicast; one that cannot be connected is reported
+#   unreachable.
+# - `Full`: broadcast a VIR on startup and handle VAMs as
+#   `communication.vam_handling_mode` allows. A persisted gateway that cannot
+#   be reached at its persisted address is searched by VIR.
+# discovery = "Full"
 # Whether the `DoIP` transport is enabled.
 # When `false`, CDA skips `DoIP` initialization entirely (useful for
 # CAN-only or DoIP-less test setups).
@@ -722,6 +764,18 @@
 # tester_subnet = "255.255.0.0"
 # TLS port for secure `DoIP` communication.
 # tls_port = 3496
+# Local UDP port the vehicle identification request (VIR) is sent from and
+# the responses are received on. Either a port (`0` lets the operating
+# system choose) or an inclusive range `"start-end"` from which a free port
+# is picked. ISO 13400-2 requires a port within `"49152-65535"` (default).
+# Setting it to `gateway_port` restores the legacy behavior of sending the
+# VIR from the discovery port. Spontaneous VAMs are always received on
+# `gateway_port`. A single port is retried 3 times, 200 ms apart, a range
+# tries each of its ports once. If no port can be bound, an error is logged
+# and no VIR is sent; `DoIP` communication is still enabled and gateways are
+# connected by VAMs or directly. The VIR search of the persisted reconnect
+# uses this setting as well.
+# vir_source_port = "49152-65535"
 
 # [ecu.FLXC1000.com_params.can.functional_id]
 # name = "CP_CanFuncReqId"
@@ -808,6 +862,9 @@
 
 # Lock priority behavior and limits.
 [locks]
+# Whether an active vehicle lock must exist before ECU or functional-group locks
+# can be acquired.
+# lock_acquisition_policy = "unrestricted"
 # Default used when `x-sovd2uds-isexclusive` is omitted.
 # lock_exclusivity_policy = "exclusive_by_default"
 # Number of lifecycle events buffered for ordered best-effort delivery.
@@ -886,10 +943,15 @@
 # Default: 50MB. Axum's built-in limit is 2MB which is too low for MDD files.
 # upload_body_limit_bytes = 52428800
 
-# SOVD HTTP server bind settings.
+# SOVD HTTP server settings.
 [server]
 # IP address the server listens on.
 # address = "0.0.0.0"
+# Encoding of binary data (e.g. `ByteField` parameters) in SOVD JSON
+# requests and responses: `"base64"` (SOVD standard) or `"hex"`
+# (`"0x01 0xAB"`). Clients can override it per request with the
+# `x-sovd2uds-binary-encoding` query parameter.
+# binary_encoding = "base64"
 # TCP port the server listens on.
 # port = 20002
 # transport = "tcp"

@@ -12,6 +12,78 @@
  */
 
 pub mod sovd2uds {
+    /// Capability document of the `sovd2uds` app, `GET /vehicle/v15/apps/sovd2uds`.
+    /// Each link property names a resource of the app.
+    pub mod get {
+        #[derive(serde::Serialize, schemars::JsonSchema)]
+        pub struct Response {
+            pub id: String,
+            pub name: String,
+            #[serde(rename = "bulk-data")]
+            pub bulk_data: String,
+            pub data: String,
+            /// Only present if the app serves at least one operation (Table 53, C1).
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub operations: Option<String>,
+            #[schemars(skip)]
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub schema: Option<schemars::Schema>,
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::Response;
+
+            #[test]
+            fn capability_document_has_id_name_and_links_without_items() {
+                let response = Response {
+                    id: "sovd2uds".to_owned(),
+                    name: "sovd2uds".to_owned(),
+                    bulk_data: "http://host/vehicle/v15/apps/sovd2uds/bulk-data".to_owned(),
+                    data: "http://host/vehicle/v15/apps/sovd2uds/data".to_owned(),
+                    operations: Some("http://host/vehicle/v15/apps/sovd2uds/operations".to_owned()),
+                    schema: None,
+                };
+                let value = serde_json::to_value(&response).unwrap();
+                let object = value.as_object().unwrap();
+
+                assert_eq!(object.get("id").and_then(|v| v.as_str()), Some("sovd2uds"));
+                assert_eq!(
+                    object.get("name").and_then(|v| v.as_str()),
+                    Some("sovd2uds")
+                );
+                assert_eq!(
+                    object.get("bulk-data").and_then(|v| v.as_str()),
+                    Some("http://host/vehicle/v15/apps/sovd2uds/bulk-data")
+                );
+                assert_eq!(
+                    object.get("data").and_then(|v| v.as_str()),
+                    Some("http://host/vehicle/v15/apps/sovd2uds/data")
+                );
+                assert_eq!(
+                    object.get("operations").and_then(|v| v.as_str()),
+                    Some("http://host/vehicle/v15/apps/sovd2uds/operations")
+                );
+                assert!(!object.contains_key("items"));
+                assert!(!object.contains_key("schema"));
+            }
+
+            #[test]
+            fn operations_link_is_omitted_without_operations() {
+                let response = Response {
+                    id: "sovd2uds".to_owned(),
+                    name: "sovd2uds".to_owned(),
+                    bulk_data: String::new(),
+                    data: String::new(),
+                    operations: None,
+                    schema: None,
+                };
+                let value = serde_json::to_value(&response).unwrap();
+                assert!(!value.as_object().unwrap().contains_key("operations"));
+            }
+        }
+    }
+
     pub mod bulk_data {
         pub use cda_interfaces::runtime_update_api::{
             BulkDataCreated, BulkDataCreatedList, BulkDataDeleted, BulkDataList,
@@ -29,6 +101,72 @@ pub mod sovd2uds {
     }
 
     pub mod operations {
+        /// Operation to connect an ECU's `DoIP` entity directly to an IP address,
+        /// instead of waiting for it to be discovered via VIR/VAM.
+        ///
+        /// Preliminary: this is expected to move into the topology plugin.
+        pub mod doip_connect_ecu {
+            fn default_protocol_version() -> u8 {
+                // ISO 13400-2:2012
+                0x02
+            }
+
+            /// The operation-specific parameters of an execution.
+            #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+            pub struct ExecutionParameters {
+                /// Identifier of the ECU to connect, as used in `/components/{ecu}`.
+                pub ecu: String,
+                /// IP address of the `DoIP` entity of the ECU.
+                pub ip: String,
+                /// Raw `DoIP` protocol version byte, defaults to `0x02` (ISO 13400-2:2012).
+                #[serde(default = "default_protocol_version")]
+                pub protocol_version: u8,
+            }
+
+            /// Request body for an execution.
+            ///
+            /// Follows the standard operations convention of wrapping the
+            /// operation-specific inputs in a `parameters` field.
+            #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+            #[schemars(rename = "DoipConnectEcuRequest")]
+            pub struct ExecutionRequest {
+                pub parameters: ExecutionParameters,
+            }
+
+            /// Operation-specific values reported for a finished execution.
+            #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+            pub struct ExecutionResponseParameters {
+                /// The ECU that was connected.
+                pub ecu: String,
+                /// The IP address the ECU was connected to.
+                pub ip: String,
+            }
+
+            /// Response body of the synchronous execution.
+            #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+            #[schemars(rename = "DoipConnectEcuResponse")]
+            pub struct ExecutionResponse {
+                pub parameters: ExecutionResponseParameters,
+                #[schemars(skip)]
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                pub schema: Option<schemars::Schema>,
+            }
+
+            #[cfg(test)]
+            mod tests {
+                use super::ExecutionRequest;
+
+                #[test]
+                fn protocol_version_defaults_to_iso_13400_2012() {
+                    let request: ExecutionRequest = serde_json::from_value(serde_json::json!({
+                        "parameters": { "ecu": "my_ecu", "ip": "10.0.0.5" }
+                    }))
+                    .unwrap();
+                    assert_eq!(request.parameters.protocol_version, 0x02);
+                }
+            }
+        }
+
         pub mod runtimefilesupdate {
             pub use cda_interfaces::runtime_update_api::{
                 ExecutionMode, ExecutionStatus, UpdateExecution,
@@ -158,6 +296,10 @@ pub mod sovd2uds {
                 pub logical_address: String,
                 /// ECU link '\<ecu>\_on\_\<protocol>'
                 pub logical_link: String,
+                /// Time of the last reply of the ECU (RFC 3339, UTC).
+                /// Absent if the ECU was never contacted.
+                #[serde(skip_serializing_if = "Option::is_none", default)]
+                pub last_seen: Option<String>,
             }
 
             #[derive(Serialize, Deserialize)]

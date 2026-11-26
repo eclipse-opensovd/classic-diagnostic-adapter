@@ -11,7 +11,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{option::Option, sync::Arc, time::SystemTime};
+use std::{
+    option::Option,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use axum::{
     Json,
@@ -23,15 +27,16 @@ use cda_interfaces::{
     lock_priority_api::{
         LockLifecycleEvent, LockPriorityPolicy, LockRequest, LockScope, LockSnapshot,
     },
+    util::{is_rfc3339_representable, system_time_to_rfc3339},
 };
 use cda_plugin_security::{Claims, SecurityPlugin};
-use chrono::{DateTime, SecondsFormat, Utc};
 use tokio::{sync::oneshot, time::Instant};
 
 use super::super::{
-    AcquisitionGuard, ActiveLock, ApiError, DefunctLock, ErrorWrapper, LockCleanupFnHelper,
-    LockCoverage, LockState, Locks, PendingPreemption, ScopeKey, StateError, TransitionReservation,
-    active_snapshot, create_lock, map_state_error, rollback_preemption, validate_claim,
+    AcquisitionGuard, ActiveLock, ApiError, DefunctLock, ErrorWrapper, EvaluatedMetadata,
+    LockCleanupFnHelper, LockCoverage, LockState, Locks, PendingPreemption, ScopeKey, StateError,
+    TransitionReservation, active_snapshot, create_lock, map_state_error, rollback_preemption,
+    validate_claim,
 };
 use crate::sovd::locks::cleanup::{run_cleanups, take_cleanups};
 
@@ -60,14 +65,16 @@ fn validated_expiration_duration(lock_expiration: u64) -> Result<SystemTime, Api
             "Lock expiration must be greater than zero".to_owned(),
         ));
     }
-    let seconds = i64::try_from(lock_expiration)
-        .map_err(|_| ApiError::BadRequest("Lock expiration is too large".to_owned()))?;
-    let duration = chrono::TimeDelta::try_seconds(seconds)
-        .ok_or_else(|| ApiError::BadRequest("Lock expiration is too large".to_owned()))?;
-    let expiration = Utc::now()
-        .checked_add_signed(duration)
-        .ok_or_else(|| ApiError::BadRequest("Lock expiration is too large".to_owned()))?;
-    Ok(SystemTime::from(expiration))
+    let too_large = || ApiError::BadRequest("Lock expiration is too large".to_owned());
+    let expiration = SystemTime::now()
+        .checked_add(Duration::from_secs(lock_expiration))
+        .ok_or_else(too_large)?;
+    // Reject what `system_time_to_rfc3339` would clamp, so the reported expiration
+    // matches the stored one.
+    if !is_rfc3339_representable(expiration) {
+        return Err(too_large());
+    }
+    Ok(expiration)
 }
 
 #[tracing::instrument(
@@ -380,7 +387,7 @@ pub(crate) async fn post_handler<T: UdsEcu + Clone>(
     // Own transaction guards in a detached task so request cancellation cannot
     // interrupt commit, rollback, or reservation release.
     cda_interfaces::spawn_named!("lock-acquisition", async move {
-        let result = match create_lock(&uds, request, &locks, coverage, security_plugin).await {
+        let result = match create_lock(&uds, request, &locks, coverage).await {
             Ok((new_lock, cleanup, tester_present)) => {
                 let expiration_target = match Locks::expiration_target(&new_lock) {
                     Ok(target) => target,
@@ -461,11 +468,13 @@ async fn renew_existing_lock(
     let existing_id = existing.id.clone();
     let evaluation_id = context.acquisition.evaluation_id.clone();
     let policy = Arc::clone(&context.acquisition.policy);
+    let metadata = context.acquisition.renewal_metadata.take();
     let result = renew_lock(
         &context.acquisition.reservation,
         &existing_id,
         request.expires_at,
         existing,
+        metadata,
     )
     .await;
     context.acquisition.finish();
@@ -571,7 +580,7 @@ pub(crate) async fn put_handler(
         }
         .into_response();
     }
-    let result = renew_lock(&reservation, lock_id, expires_at, active).await;
+    let result = renew_lock(&reservation, lock_id, expires_at, active, None).await;
     reservation.finish();
     match result {
         Ok(lock) => {
@@ -597,17 +606,23 @@ async fn renew_lock(
     lock_id: &str,
     expires_at: SystemTime,
     active: ActiveLock,
+    metadata: Option<EvaluatedMetadata>,
 ) -> Result<LockSnapshot, ApiError> {
     let now = SystemTime::now();
     Locks::expiration_target_at(expires_at, now)?;
+    let renewed_metadata = metadata.as_ref().map_or_else(
+        || active.metadata.clone(),
+        |metadata| metadata.as_map().clone(),
+    );
     reservation
         .write_store()
         .await
         .state
-        .renew(lock_id, expires_at, now)
+        .renew(lock_id, expires_at, now, metadata)
         .map_err(|error| map_state_error(&error))?;
     let renewed = ActiveLock {
         expires_at,
+        metadata: renewed_metadata,
         ..active
     };
     Ok(active_snapshot(&renewed))
@@ -726,8 +741,7 @@ fn lock_details_schema(include_schema: bool) -> Option<schemars::Schema> {
 
 fn active_to_sovd(lock: &ActiveLock, claims: &impl Claims) -> sovd_interfaces::locking::Lock {
     let mut response = sovd_lock(&lock.id, lock.exclusive);
-    response.lock_expiration =
-        Some(DateTime::<Utc>::from(lock.expires_at).to_rfc3339_opts(SecondsFormat::Secs, true));
+    response.lock_expiration = Some(system_time_to_rfc3339(lock.expires_at));
     response.owned = lock.principal.subject == claims.sub();
     response
 }
@@ -738,9 +752,7 @@ fn defunct_to_sovd(
     claims: &impl Claims,
 ) -> sovd_interfaces::locking::Lock {
     let mut response = lock.to_sovd_lock(claims);
-    response.lock_expiration = Some(
-        DateTime::<Utc>::from(lock.original_expires_at).to_rfc3339_opts(SecondsFormat::Secs, true),
-    );
+    response.lock_expiration = Some(system_time_to_rfc3339(lock.original_expires_at));
     response.x_sovd2uds_current_holder = Some(state.current_holder(lock).to_owned());
     response
 }
@@ -750,8 +762,7 @@ fn active_details(
     claims: &impl Claims,
 ) -> sovd_interfaces::locking::id::get::Response {
     sovd_interfaces::locking::id::get::Response {
-        lock_expiration: DateTime::<Utc>::from(lock.expires_at)
-            .to_rfc3339_opts(SecondsFormat::Secs, true),
+        lock_expiration: system_time_to_rfc3339(lock.expires_at),
         owned: lock.principal.subject == claims.sub(),
         x_sovd2uds_isexclusive: lock.exclusive,
         x_sovd2uds_broken_by: None,

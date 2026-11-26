@@ -45,10 +45,19 @@ pub enum ApiError {
     BadRequest(String),
     #[error("Forbidden: {}", .0.as_ref().map(|m| format!(": {m}")).unwrap_or_default())]
     Forbidden(Option<String>),
+    /// Forbidden because a plugin denied sending the request.
+    #[error("Forbidden: {message}")]
+    RequestNotAllowed {
+        message: String,
+        /// Returned in the `parameters` of the response, e.g. why the request was denied.
+        parameters: HashMap<String, serde_json::Value>,
+    },
     #[error("Not Found: {}", .0.as_ref().map(|m| format!(": {m}")).unwrap_or_default())]
     NotFound(Option<String>),
     #[error("Internal Server Error: {}", .0.as_ref().map(|m| format!(": {m}")).unwrap_or_default())]
     InternalServerError(Option<String>),
+    #[error("SOVD server misconfigured: {0}")]
+    SovdServerMisconfigured(String),
     #[error("Conflict: {0}")]
     Conflict(String),
     #[error("Required lock is missing: {0}")]
@@ -102,12 +111,15 @@ impl ApiError {
     pub fn error_and_vendor_code(&self) -> (ErrorCode, Option<VendorErrorCode>) {
         match &self {
             ApiError::NotResponding(_) => (ErrorCode::NotResponding, None),
+            ApiError::SovdServerMisconfigured(_) => (ErrorCode::SovdServerMisconfigured, None),
             ApiError::NotFound(_) => (ErrorCode::VendorSpecific, Some(VendorErrorCode::NotFound)),
             ApiError::BadRequest(_) => (
                 ErrorCode::InvalidResponseContent,
                 Some(VendorErrorCode::BadRequest),
             ),
-            ApiError::Forbidden(_) => (ErrorCode::InsufficientAccessRights, None),
+            ApiError::Forbidden(_) | ApiError::RequestNotAllowed { .. } => {
+                (ErrorCode::InsufficientAccessRights, None)
+            }
             ApiError::LockRequired(_) => (
                 ErrorCode::VendorSpecific,
                 Some(VendorErrorCode::LockRequired),
@@ -147,6 +159,9 @@ impl From<DiagServiceError> for ApiError {
             DiagServiceError::EcuOffline(_)
             | DiagServiceError::Timeout
             | DiagServiceError::NoResponse(_) => ApiError::NotResponding(value.to_string()),
+            DiagServiceError::InvalidConfiguration(message) => {
+                ApiError::SovdServerMisconfigured(message)
+            }
             DiagServiceError::InvalidDatabase(_)
             | DiagServiceError::VariantDetectionError(_)
             | DiagServiceError::ResourceError(_)
@@ -155,7 +170,6 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::InvalidAddress(_)
             | DiagServiceError::UnexpectedResponse(_)
             | DiagServiceError::DataError(_)
-            | DiagServiceError::InvalidConfiguration(_)
             | DiagServiceError::InvalidSecurityPlugin => {
                 ApiError::InternalServerError(Some(value.to_string()))
             }
@@ -188,6 +202,14 @@ impl From<DiagServiceError> for ApiError {
                 vendor_code: Some(VendorErrorCode::CommunicationNotReady),
             },
             DiagServiceError::AccessDenied(_) => ApiError::Forbidden(Some(value.to_string())),
+            DiagServiceError::RequestNotAllowed {
+                message,
+                parameters,
+            } => ApiError::RequestNotAllowed {
+                message: format!("Request not allowed: {message}"),
+                parameters,
+            },
+            DiagServiceError::Conflict(message) => ApiError::Conflict(message),
         }
     }
 }
@@ -278,6 +300,9 @@ pub enum VendorErrorCode {
     /// ECU communication is not currently available. Retry after the interval
     /// given in the `Retry-After` header.
     CommunicationNotReady,
+    /// A flash transfer was aborted for a reason other than a negative response or a
+    /// missing response of the ECU, e.g. a failed request or reading the flash file.
+    DataTransferFailed,
     /// Indicates that something went terribly wrong and safe operation cannot be guaranteed at
     /// this point. The application still tries to serve requests in the best effort,
     /// but correctness may be affected by this error.
@@ -289,6 +314,10 @@ impl OperationOutput for ErrorWrapper {
 }
 
 impl IntoResponse for ErrorWrapper {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keeping the exhaustive HTTP error mapping together makes it easier to audit"
+    )]
     fn into_response(self) -> Response {
         let schema = error_response_schema(self.include_schema);
         let (status, message, error_code, vendor_code, parameters) = match self.error {
@@ -313,6 +342,16 @@ impl IntoResponse for ErrorWrapper {
                 None,
                 None,
             ),
+            ApiError::RequestNotAllowed {
+                message,
+                parameters,
+            } => (
+                StatusCode::FORBIDDEN,
+                message,
+                ErrorCode::InsufficientAccessRights,
+                None,
+                (!parameters.is_empty()).then_some(parameters),
+            ),
             ApiError::NotFound(message) => (
                 StatusCode::NOT_FOUND,
                 message.unwrap_or_else(|| "Not Found".into()),
@@ -324,6 +363,13 @@ impl IntoResponse for ErrorWrapper {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 message.unwrap_or_else(|| "Internal Server Error".into()),
                 ErrorCode::SovdServerFailure,
+                None,
+                None,
+            ),
+            ApiError::SovdServerMisconfigured(message) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                message,
+                ErrorCode::SovdServerMisconfigured,
                 None,
                 None,
             ),
@@ -577,6 +623,55 @@ mod tests {
     use super::*;
     use crate::test_utils::axum_response_into;
 
+    async fn forbidden_body(
+        error: DiagServiceError,
+    ) -> sovd_interfaces::error::ApiErrorResponse<VendorErrorCode> {
+        let response = ErrorWrapper {
+            error: error.into(),
+            include_schema: false,
+        }
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: sovd_interfaces::error::ApiErrorResponse<VendorErrorCode> =
+            axum_response_into(response).await.expect("Valid body");
+        assert_eq!(body.error_code, ErrorCode::InsufficientAccessRights);
+        body
+    }
+
+    #[tokio::test]
+    async fn request_not_allowed_maps_to_forbidden_distinct_from_access_denied() {
+        let not_allowed = forbidden_body(DiagServiceError::request_not_allowed("no grant")).await;
+        let denied = forbidden_body(DiagServiceError::AccessDenied("no grant".to_owned())).await;
+
+        assert_eq!(not_allowed.message, "Request not allowed: no grant");
+        assert_eq!(not_allowed.parameters, None, "no parameters, no field");
+        assert!(
+            denied.message.contains("Access denied"),
+            "{}",
+            denied.message
+        );
+        assert_ne!(not_allowed.message, denied.message);
+    }
+
+    #[tokio::test]
+    async fn request_not_allowed_returns_its_parameters() {
+        let parameters = HashMap::from_iter([
+            ("subject".to_owned(), serde_json::json!("app")),
+            (
+                "failedPreconditions".to_owned(),
+                serde_json::json!(["vehicleSafeState"]),
+            ),
+        ]);
+        let body = forbidden_body(DiagServiceError::RequestNotAllowed {
+            message: "preconditions not met".to_owned(),
+            parameters: parameters.clone(),
+        })
+        .await;
+
+        assert_eq!(body.message, "Request not allowed: preconditions not met");
+        assert_eq!(body.parameters, Some(parameters));
+    }
+
     #[tokio::test]
     async fn lock_priority_denial_includes_schema_when_requested() {
         let response = ErrorWrapper {
@@ -646,6 +741,24 @@ mod tests {
             axum_response_into(response).await.expect("Valid body");
         assert_eq!(body.error_code, ErrorCode::VendorSpecific);
         assert_eq!(body.vendor_code, Some(VendorErrorCode::LockRequired));
+    }
+
+    #[tokio::test]
+    async fn invalid_configuration_uses_server_misconfigured_error_code() {
+        let response = ErrorWrapper {
+            error: DiagServiceError::InvalidConfiguration(
+                "No variant detection services are configured".to_owned(),
+            )
+            .into(),
+            include_schema: false,
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: sovd_interfaces::error::ApiErrorResponse<VendorErrorCode> =
+            axum_response_into(response).await.expect("Valid body");
+        assert_eq!(body.error_code, ErrorCode::SovdServerMisconfigured);
+        assert_eq!(body.vendor_code, None);
     }
 
     #[test]

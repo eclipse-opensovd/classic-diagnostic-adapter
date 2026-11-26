@@ -200,8 +200,6 @@ fn out_dir() -> Result<String, std::io::Error> {
     reason = "Return type must be Result to satisfy feature-gated code paths"
 )]
 fn main() -> std::io::Result<()> {
-    cda_build::set_nightly_flag();
-
     #[cfg(feature = "gen-protos")]
     generate_protos()?;
 

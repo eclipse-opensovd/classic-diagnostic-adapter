@@ -150,7 +150,6 @@ async fn ecu_lock_under_owned_functional_lock_starts_no_tp() {
         request,
         &locks,
         LockCoverage::new(["ecu-a".to_owned()]),
-        Box::new(TestSecurityPlugin),
     )
     .await
     .expect("Lock creation should succeed");
@@ -192,7 +191,6 @@ async fn ecu_lock_without_covering_functional_lock_starts_tp() {
         request,
         &locks,
         LockCoverage::new(["ecu-a".to_owned()]),
-        Box::new(TestSecurityPlugin),
     )
     .await
     .expect("Lock creation should succeed");

@@ -13,8 +13,9 @@
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, HashMapExtensions, HashSet,
-    PayloadDecoder, SchemaDescription, SchemaProvider, ServicePayload, UdsDtc, UdsTransport,
+    BinaryEncoding, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap,
+    HashMapExtensions, HashSet, PayloadDecoder, SchemaDescription, SchemaProvider, ServicePayload,
+    UdsDtc, UdsTransport,
     datatypes::{
         self, DTC_CODE_BIT_LEN, DtcCode, DtcExtendedInfo, DtcMask, DtcReadInformationFunction,
         DtcRecordAndStatus, DtcSnapshot, ExtendedDataRecords, ExtendedSnapshots,
@@ -78,6 +79,61 @@ fn get_dtc_status_for_record(
         DiagServiceError::BadPayload(format!("Failed to get status byte for DTC {dtc_code:X}"))
     })?;
     Ok(get_dtc_status_for_mask(status_byte))
+}
+
+/// Query key that sets the raw status mask byte directly.
+const STATUS_QUERY_MASK_KEY: &str = "mask";
+
+/// Parses the value of the `status[mask]` query parameter.
+/// Strings are interpreted as hex (with optional `0x` prefix), matching the
+/// hex representation of `status.mask` in fault responses. Numbers are taken as is.
+fn status_mask_value_to_u8(val: &serde_json::Value) -> Result<u8, DiagServiceError> {
+    let invalid = || {
+        DiagServiceError::InvalidRequest(
+            "Invalid status mask value, must be a hex string (e.g. \"29\" or \"0x29\") or an \
+             integer in the range 0..=255"
+                .to_owned(),
+        )
+    };
+    match val {
+        serde_json::Value::String(str_val) => {
+            let trimmed = str_val.trim();
+            let hex = trimmed
+                .strip_prefix("0x")
+                .or_else(|| trimmed.strip_prefix("0X"))
+                .unwrap_or(trimmed);
+            u8::from_str_radix(hex, 16).map_err(|_| invalid())
+        }
+        serde_json::Value::Number(num_val) => num_val
+            .as_u64()
+            .and_then(|v| u8::try_from(v).ok())
+            .ok_or_else(invalid),
+        _ => Err(invalid()),
+    }
+}
+
+/// Builds the UDS DTC status mask from the `status[...]` query parameters.
+/// Keys are matched case-insensitively against the DTC status bit names
+/// (e.g. `confirmedDtc`) and `mask`. All set bits are OR combined.
+/// Unknown keys are ignored. If no bit is selected, all bits (`0xFF`) are requested.
+fn status_query_to_mask(
+    status: &HashMap<String, serde_json::Value>,
+) -> Result<u8, DiagServiceError> {
+    let mut mask = 0x00u8;
+    for (key, val) in status {
+        if key.eq_ignore_ascii_case(STATUS_QUERY_MASK_KEY) {
+            mask |= status_mask_value_to_u8(val)?;
+            continue;
+        }
+        if let Some(mask_bit) =
+            DtcMask::iter().find(|bit| key.eq_ignore_ascii_case(&bit.to_string()))
+            && status_value_to_bool(val)?
+        {
+            mask |= mask_bit as u8;
+        }
+    }
+
+    if mask == 0 { Ok(u8::MAX) } else { Ok(mask) }
 }
 
 fn status_value_to_bool(val: &serde_json::Value) -> Result<bool, DiagServiceError> {
@@ -275,6 +331,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         Ok((response, extended_data_lookup.scope, schema))
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Combining parameters into a struct would not improve readability here"
+    )]
     async fn map_extended_data(
         &self,
         ecu_name: &str,
@@ -283,6 +343,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         include_schema: bool,
         memory_selection: Option<u8>,
         scope: DtcReadInformationFunction,
+        binary_encoding: BinaryEncoding,
     ) -> Result<(Option<ExtendedDataRecords>, Option<serde_json::Value>), DiagServiceError> {
         fn extract_schema_properties(schema_desc: &SchemaDescription) -> Option<serde_json::Value> {
             // todo after solving #54: we are missing the 'Selector' and the case name here
@@ -290,7 +351,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 .get_param_properties()?
                 .values()
                 .filter_map(|p| p.as_object())
-                .find(|obj| obj.contains_key("any-of"));
+                .find(|obj| obj.contains_key("anyOf"));
 
             schema.map(|schema| serde_json::Value::Object(schema.clone()))
         }
@@ -311,6 +372,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             )
             .await?;
 
+        let schema_desc = schema_desc.map(|s| s.with_binary_encoding(binary_encoding));
         let schema = if include_schema {
             extract_schema_properties(&schema_desc.ok_or(DiagServiceError::InvalidRequest(
                 "Schema requested but not found".to_owned(),
@@ -323,7 +385,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             return Ok((None, schema));
         }
 
-        let extended_data_json = extended_data_response.into_json()?;
+        let extended_data_json = extended_data_response.into_json(binary_encoding)?;
         let extended_data: Option<HashMap<_, _>> =
             extended_data_json.data.as_object().and_then(|obj| {
                 obj.iter()
@@ -366,6 +428,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         ))
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Combining parameters into a struct would not improve readability here"
+    )]
     async fn map_snapshots(
         &self,
         ecu_name: &str,
@@ -374,6 +440,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         include_schema: bool,
         memory_selection: Option<u8>,
         scope: DtcReadInformationFunction,
+        binary_encoding: BinaryEncoding,
     ) -> Result<(Option<ExtendedSnapshots>, Option<serde_json::Value>), DiagServiceError> {
         fn extract_schema_properties(schema_desc: &SchemaDescription) -> Option<serde_json::Value> {
             // Todo when solving #54: We are missing the mux case name in the schema.
@@ -408,6 +475,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             )
             .await?;
 
+        let schema_desc = schema_desc.map(|s| s.with_binary_encoding(binary_encoding));
         let schema = if include_schema {
             extract_schema_properties(&schema_desc.ok_or(DiagServiceError::InvalidRequest(
                 "Schema requested but not found".to_owned(),
@@ -420,7 +488,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             return Ok((None, schema));
         }
 
-        let snapshot_json = snapshot_data_response.into_json()?;
+        let snapshot_json = snapshot_data_response.into_json(binary_encoding)?;
         let snapshot_data: Option<HashMap<_, _>> = snapshot_json
             .data
             .as_object()
@@ -516,26 +584,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError> {
         let mut all_dtcs = HashMap::new();
 
-        let mask = if let Some(status) = status {
-            let mut mask = 0x00u8;
-            // Status can contain more than the mask bits, thus we need to track
-            // if any of the status fields is a mask bit.
-            // If not use the default mask.
-            let mut any_mask_bit_set = false;
-
-            for mask_bit in DtcMask::iter() {
-                let mask_bit_str = mask_bit.to_string().to_lowercase();
-                if let Some(val) = status.get(&mask_bit_str)
-                    && status_value_to_bool(val)?
-                {
-                    any_mask_bit_set = true;
-                    mask |= mask_bit as u8;
-                }
-            }
-
-            if any_mask_bit_set { mask } else { u8::MAX }
-        } else {
-            u8::MAX
+        let mask = match status {
+            Some(status) => status_query_to_mask(&status)?,
+            None => u8::MAX,
         };
 
         for (read_info, lookup) in scoped_services {
@@ -577,7 +628,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 );
             }
 
-            if mask == 0xFF || mask == 0x00 {
+            if mask == 0xFF {
                 for record in lookup.dtcs {
                     all_dtcs.entry(record.code).or_insert(DtcRecordAndStatus {
                         record,
@@ -649,6 +700,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         include_snapshot: bool,
         include_schema: bool,
         memory_selection: Option<u8>,
+        binary_encoding: BinaryEncoding,
     ) -> Result<DtcExtendedInfo, DiagServiceError> {
         let dtc_code = decode_dtc_from_str(sae_dtc)?;
 
@@ -672,6 +724,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
                 include_schema,
                 memory_selection,
                 scope,
+                binary_encoding,
             )
             .await?
         } else {
@@ -686,6 +739,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
                 include_schema,
                 memory_selection,
                 scope,
+                binary_encoding,
             )
             .await?
         } else {
@@ -745,9 +799,10 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         };
 
         match self
-            .send_with_raw_payload(
+            .send_authorized_raw_payload(
                 ecu_name,
                 service_payload,
+                Some(security_plugin),
                 None,
                 true,
                 CommunicationReadiness::Enforce,
@@ -938,6 +993,95 @@ mod tests {
     fn test_sae_to_dtc_code_invalid_hex() {
         // 'Z' is not a valid hex character
         assert!(sae_to_dtc_code("P00042Z").is_err());
+    }
+
+    fn status_query(entries: &[(&str, serde_json::Value)]) -> HashMap<String, serde_json::Value> {
+        entries
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn test_status_query_to_mask_keys_case_insensitive() {
+        for key in [
+            "confirmedDtc",
+            "confirmeddtc",
+            "CONFIRMEDDTC",
+            "ConfirmedDtc",
+        ] {
+            let status = status_query(&[(key, json!("true"))]);
+            assert_eq!(
+                status_query_to_mask(&status).unwrap(),
+                DtcMask::ConfirmedDtc as u8,
+                "key {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_status_query_to_mask_or_combined() {
+        let status = status_query(&[
+            ("testFailed", json!("1")),
+            ("warningIndicatorRequested", json!(true)),
+            ("pendingDtc", json!("false")),
+        ]);
+        assert_eq!(
+            status_query_to_mask(&status).unwrap(),
+            DtcMask::TestFailed as u8 | DtcMask::WarningIndicatorRequested as u8
+        );
+    }
+
+    #[test]
+    fn test_status_query_to_mask_all_bits() {
+        let status: HashMap<String, serde_json::Value> = DtcMask::iter()
+            .map(|bit| (bit.to_string(), json!(1)))
+            .collect();
+        assert_eq!(status_query_to_mask(&status).unwrap(), 0xFF);
+    }
+
+    #[test]
+    fn test_status_query_to_mask_default_when_nothing_selected() {
+        assert_eq!(status_query_to_mask(&HashMap::new()).unwrap(), 0xFF);
+        let status = status_query(&[("confirmedDtc", json!("false")), ("unknown", json!("1"))]);
+        assert_eq!(status_query_to_mask(&status).unwrap(), 0xFF);
+    }
+
+    #[test]
+    fn test_status_query_to_mask_mask_key() {
+        for (key, val) in [
+            ("mask", json!("29")),
+            ("Mask", json!("0x29")),
+            ("MASK", json!("0X29")),
+            ("mask", json!(0x29)),
+        ] {
+            let status = status_query(&[(key, val.clone())]);
+            assert_eq!(
+                status_query_to_mask(&status).unwrap(),
+                0x29,
+                "key {key} value {val}"
+            );
+        }
+        let status = status_query(&[("mask", json!("08")), ("pendingDtc", json!("true"))]);
+        assert_eq!(status_query_to_mask(&status).unwrap(), 0x0C);
+    }
+
+    #[test]
+    fn test_status_query_to_mask_invalid_values() {
+        for (key, val) in [
+            ("mask", json!("zz")),
+            ("mask", json!("100")),
+            ("mask", json!(256)),
+            ("mask", json!(true)),
+            ("confirmedDtc", json!("yes")),
+            ("confirmedDtc", json!(2)),
+        ] {
+            let status = status_query(&[(key, val.clone())]);
+            assert!(
+                status_query_to_mask(&status).is_err(),
+                "key {key} value {val} should be rejected"
+            );
+        }
     }
 
     #[test]

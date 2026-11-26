@@ -151,7 +151,7 @@ Paths
          -
        * - 29
          - /modes/authentication
-         -
+         - see :need:`req~sovd-api-authentication-modes`
        * - 31
          - /operations/{routine-identifier}
          -
@@ -161,7 +161,8 @@ Paths
          - | /x-sovd2uds-download/requestdownload
            | /x-sovd2uds-download/flashtransfer
            | /x-sovd2uds-download/transferexit
-         - ``flashtransfer`` handles the whole transfer, not for individual calls
+         - ``flashtransfer`` handles the whole transfer, not for individual calls.
+           Services are selected by functional class, see :need:`req~sovd-api-flashing-functional-class`
        * - 3E
          - --
          - handled internally by CDA
@@ -169,7 +170,8 @@ Paths
          - /modes/dtcsetting
          -
 
-    NOTE: The mapping in ISO standard is inconsistent w.r.t. ``/modes/security`` and ``/modes/authentication``
+    NOTE: The mapping in ISO standard is inconsistent w.r.t. ``/modes/security`` and ``/modes/authentication``.
+    The CDA maps SID 27\ :sub:`16` and 29\ :sub:`16` to separate modes, see :doc:`/04_adr/07_uds_authentication_mode`.
 
     **Query Parameters**
 
@@ -366,11 +368,21 @@ Data Type A_BYTEFIELD as Hex
 
 .. req:: Data Type A_BYTEFIELD as Hex
     :id: req~sovd-api-bytefield-as-hex
+    :links: arch~sovd-api-binary-encoding
     :status: draft
 
     For the data type ``A_BYTEFIELD`` the json output type ``string`` with the format ``hex`` must be supported
     through an optional query-parameter. Using ``hex`` means, that the binary data must be base16-encoded,
     either with or without preceding ``0x`` prefixes.
+
+    By default, binary data is base64-encoded (format ``byte``) as specified by ISO 17978-3. The default
+    must be configurable (``server.binary_encoding = "base64" | "hex"``) and can be overridden per request
+    with the query parameter ``x-sovd2uds-binary-encoding=base64|hex``. The selected encoding applies to
+    ``A_BYTEFIELD`` values in requests and responses, including security access seeds and keys.
+
+    JSON schemas returned by the CDA must describe ``A_BYTEFIELD`` values as ``string`` with the format of the
+    selected encoding (``byte`` for base64, ``hex`` for hex), and their ``default`` values must be given in
+    that encoding as well.
 
     **Rationale**
 
@@ -463,8 +475,8 @@ Version Info Endpoint
     static data format (``id`` + ``data`` object containing ``name``, ``api.version``, and
     ``implementation.version``/``commit``/``build_date``).
 
-    These endpoints are registered by the same registration function that provides the standard
-    ``/version-info`` endpoint.
+    Each endpoint is registered by calling the version registrar with its path and is listed in
+    its ``data`` collection with the category ``identData``.
 
     **Rationale**
 
@@ -477,24 +489,23 @@ Version Info Endpoint
     :links: arch~sovd-api-version-registration-function
     :status: draft
 
-    A single registration function shall accept the following parameters:
+    A version registrar shall accept the following parameters:
 
     - ``vendor_name``: the implementation/vendor name of the SOVD server
-    - ``api_version``: the supported SOVD API version string
     - ``implementation_version``: the software version of the implementation
     - ``commit``: the Git commit hash of the build
     - ``build_date``: the date the binary was built
-    - ``base_uri``: the version-specific base URI
 
-    The function shall always register the ``/version-info`` endpoint.
+    The registrar shall provide a method to register the ``/version-info`` endpoint.
 
-    The function shall optionally register the ``/data/version`` and ``/apps/sovd2uds/data/version``
-    endpoints serving vendor-specific implementation data.
+    A separate method shall register a vendor-specific version data endpoint using a supplied
+    path. Applications can call it for each optional data endpoint they provide. Both methods
+    shall derive their version information from the same registrar values.
 
     **Rationale**
 
-    Centralizes version endpoint registration into a single callable unit, ensuring consistency
-    between the standard version-info response and optional vendor-specific endpoints.
+    Provides reusable registration for the standard version-info response and optional
+    vendor-specific endpoints with consistent version information.
 
 
 Health Endpoint
@@ -589,10 +600,37 @@ mdd-files, or to prepare for operations which affect the whole vehicle (e.g. dis
 
        * - Resource
          - Description
+       * - id
+         - Identifier of the entity, empty for the SOVD server
+       * - name
+         - Name of the entity, empty for the SOVD server
+       * - components
+         - The ECUs of the vehicle, see :need:`req~sovd-api-components-entity-collection`
+       * - apps
+         - The apps of the CDA
        * - locks
          - Locks affecting the whole vehicle
        * - functions
          - Functions affecting the whole vehicle (i.e. communication disable/enable)
+       * - data
+         - Data resources of the vehicle, e.g. ``version``
+
+    The ``sovd2uds`` app (``/apps/sovd2uds``) must provide a resource collection with ``id``, ``name``,
+    ``bulk-data`` and ``data``. It must contain ``operations`` only if the app serves at least one operation
+    (ISO 17978-3, Table 53, C1).
+
+    The ``bulk-data`` and ``operations`` collections of the app must list every category and operation that is
+    served beneath them. Resources that depend on a plugin or on the configuration, such as the runtime update
+    categories and operations, are listed only while they are served. Each operation item must contain ``id``,
+    ``name``, ``proximity_proof_required`` and ``asynchronous_execution`` (Table 169).
+
+    The ``data`` collections (``/data`` and ``/apps/sovd2uds/data``) must list every data resource served
+    beneath them, including resources registered at runtime. Each item must contain ``id``, ``name`` and
+    ``category``.
+
+    **Rationale**
+
+    A client must be able to find every resource by following the references, starting from the root.
 
 
 .. _requirements_sovd_api_locks:
@@ -602,8 +640,9 @@ Locks
 
 Locks allow clients to claim exclusive or non-exclusive access to a diagnostic entity
 (vehicle, ECU, or functional group) and to coordinate diagnostic communication across
-multiple concurrent clients. The same CRUD API and enforcement semantics apply to all
-three lock scopes.
+multiple concurrent clients. All three lock scopes share the same CRUD API shape;
+ECU-lock POST requests additionally check stored ECU connectivity as specified in
+:need:`req~sovd-api-lock-ecu-connectivity`.
 
 .. req:: Lock API
     :id: req~sovd-api-lock-api
@@ -667,7 +706,9 @@ three lock scopes.
 
     A POST that creates a lock must return HTTP 201 with a ``Location`` header referencing the
     created lock. A same-owner compatibility renewal must return HTTP 200 without a ``Location``
-    header. Both POST responses must include ``id`` (UUID string) and ``owned`` (boolean, always
+    header. When such a renewal carries vendor-specific properties, they replace the lock's
+    stored vendor-specific data; a renewal without them keeps the existing data. Both POST
+    responses must include ``id`` (UUID string) and ``owned`` (boolean, always
     ``true`` for the requesting client). The GET ``/locks/{id}`` response must include
     ``lock_expiration`` as an ISO 8601 string and ``owned`` relative to the requesting client.
 
@@ -677,6 +718,34 @@ three lock scopes.
 
     A unified lock API across all three scopes reduces client implementation complexity and
     ensures consistent lock management regardless of the diagnostic entity type.
+
+
+.. req:: ECU Lock Connectivity Check
+  :id: req~sovd-api-lock-ecu-connectivity
+  :links: arch~sovd-api-lock-ecu-connectivity
+  :status: draft
+
+  Before creating or renewing a lock through ``POST /components/{ecu-name}/locks``,
+  the CDA must check the ECU's stored connectivity. If it is ``Offline``, the request
+  must be rejected with HTTP 404, message ``ecu is offline``, ``error_code`` set to
+  ``vendor-specific``, and ``vendor_code`` set to ``not-found``. No lock may be created
+  or renewed, and pending preemption must be rolled back.
+
+  Errors reading the ECU state must retain their corresponding API error classification
+  and diagnostic message rather than being reported as an offline ECU. Lookup failures
+  must return HTTP 404; internal failures must return HTTP 500.
+
+  The connectivity check must not require an active ECU probe. It observes asynchronously
+  maintained state and therefore does not guarantee reachability after acquisition.
+
+  This requirement applies only to ECU-lock POST requests. It does not require all ECUs
+  to be online for vehicle or functional-group locks, change GET, PUT, or DELETE behavior
+  for existing ECU locks, or automatically revoke an existing lock on disconnect.
+
+  **Rationale**
+
+  Rejecting locks for known-offline ECUs avoids granting access based on an already known
+  communication failure while preserving the underlying cause of state lookup failures.
 
 
 .. req:: Lock Exclusivity
@@ -810,7 +879,7 @@ three lock scopes.
     **Write endpoints**: ``PUT /data/{id}``, ``PUT /configurations/{id}``,
     ``POST /operations/{op}/executions``, ``GET /operations/{op}/executions/{id}``,
     ``DELETE /operations/{op}/executions/{id}``, ``PUT /modes/*``,
-    ``DELETE /faults``, ``DELETE /faults/{dtc}``, ``POST /genericservice``,
+    ``DELETE /faults``, ``DELETE /faults/{dtc}``, ``PUT /genericservice``,
     download endpoints.
 
     **Read endpoints**: ``GET /data/{id}``, ``GET /configurations/{id}``,
@@ -1023,6 +1092,15 @@ three lock scopes.
     - When the defunct lock's original expiration elapses it is silently removed; no
       cleanup is triggered.
     - When the defunct lock is deleted, no cleanup is triggered.
+    - When the preempted client acquires a new lock on the same scope, or one whose
+      coverage contains all entities of the defunct lock (e.g. a vehicle lock), the defunct
+      lock is removed as if the client had deleted it. No cleanup is triggered. A client
+      therefore holds at most one lock record, active or defunct, per diagnostic entity.
+    - A lock request of the preempted client that overlaps the defunct lock without
+      containing it (e.g. an ECU lock while its vehicle lock is defunct) must be rejected
+      with the defunct lock's HTTP 409 ``lock-broken`` error (see
+      :need:`req~sovd-api-lock-defunct-enforcement`), until the client deletes the defunct
+      lock or acquires a lock that contains it.
     - The new (higher-priority) lock operates normally and performs its own cleanup on
       release or expiry.
 
@@ -1030,6 +1108,11 @@ three lock scopes.
 
     Retaining the defunct lock gives the preempted client an observable signal that their
     lock was superseded, identifying who took it and when, and if a lock is still held.
+    Once that client holds a new lock over all entities of the defunct lock, the signal has
+    served its purpose; keeping the record would only block the client's own requests (see
+    :need:`req~sovd-api-lock-defunct-enforcement`). A narrower lock does not re-establish the
+    broken lock, so the signal stays, and the narrower lock is rejected because every request
+    under it would fail with ``lock-broken``.
 
 
 
@@ -1099,7 +1182,7 @@ Flash API
 
 .. req:: Flash API
     :id: req~sovd-api-flashing
-    :links: arch~sovd-api-flash-file-management, arch~sovd-api-flash-data-transfer
+    :links: arch~sovd-api-flash-file-management, arch~sovd-api-flash-data-transfer, arch~sovd-api-flash-functional-class
     :status: draft
 
     A Flash-API is required to support flashing of ECUs, utilizing SIDs 34\ :sub:`16`, 36\ :sub:`16` & 37\ :sub:`16`. It needs to enable efficient transfer of the data, without sending the individual data transfers via REST.
@@ -1112,6 +1195,7 @@ Flash API
 
 .. req:: Flash API - Data Source Restriction
     :id: req~sovd-api-flashing-security
+    :links: arch~sovd-api-flash-folder-configuration
     :status: draft
 
     The source of the data to be sent for flashing, must be restrictable to a path and its subdirectories via configuration.
@@ -1119,6 +1203,23 @@ Flash API
     **Rationale**
 
     Without restrictions to the path, an attacker could exfiltrate arbitrary accessible data.
+
+.. req:: Flash API - Functional Class Selection
+    :id: req~sovd-api-flashing-functional-class
+    :links: arch~sovd-api-flash-functional-class, arch~sovd-api-flash-functional-class-configuration
+    :status: draft
+
+    The Flash API must allow the client to optionally select the ODX functional class that is used to resolve the
+    services for SIDs 34\ :sub:`16`, 36\ :sub:`16` & 37\ :sub:`16`, individually for each request.
+
+    If the client does not select a functional class, a configurable default functional class must be used. The
+    default value of this configuration is ``flash_download_upload``.
+
+    **Rationale**
+
+    Diagnostic descriptions can contain several services with the same SID and the same name for the flash
+    transfer, which differ only in their functional class (e.g. for different memory areas or flash procedures).
+    Without a selection, the client cannot choose which of these services is used.
 
 Communication Parameters API
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1146,9 +1247,56 @@ MDD Embedded files
     ``/components/{ecuName}/x-sovd2uds-bulk-data/mdd-embedded-files`` endpoint (listing) and
     ``/components/{ecuName}/x-sovd2uds-bulk-data/mdd-embedded-files/{id}`` endpoint (retrieval).
 
+    The same endpoints must also be available under the standardized ``bulk-data`` collection,
+    ``/components/{ecuName}/bulk-data/mdd-embedded-files`` and
+    ``/components/{ecuName}/bulk-data/mdd-embedded-files/{id}``.
+
     **Rationale**
 
     Some data required for communication with ECUs might be embedded in the mdd file. To allow clients to retrieve this data, it must be made available through the API.
+
+Authentication (UDS 29\ :sub:`16`)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. req:: Authentication Mode
+    :id: req~sovd-api-authentication-modes
+    :links: arch~sovd-api-authentication-modes
+    :status: draft
+
+    The CDA must provide the UDS service Authentication (SID 29\ :sub:`16`, ISO 14229-1 clause
+    10.6) for components via ``/modes/authentication``, separately from ``/modes/security``
+    (SID 27\ :sub:`16`).
+
+    The following must apply:
+
+    * Each ``PUT`` request results in exactly one UDS Authentication request. Multi-step
+      procedures (authentication with PKI certificate exchange, challenge-response
+      authentication) are orchestrated by the client (client-driven option of ISO 17978-3
+      §8.3.3).
+    * The CDA does not hold, generate or validate private keys, certificates, challenges or
+      proofs of ownership. They are passed through as request and response parameters.
+    * All sub-functions of ISO 14229-1 Table 74 must be supported, if the corresponding
+      service is described in the diagnostic database.
+    * A ``PUT`` request is a write operation and is subject to the lock rules, see
+      :need:`req~sovd-api-lock-ecu-enforcement` and :need:`req~sovd-api-lock-requirement-policy`.
+    * The CDA must track the last authentication state confirmed by the ECU per ECU, and
+      report it via ``GET /modes/authentication``. If the ECU cannot be reached, ``offline``
+      must be reported instead.
+    * A ``PUT`` request may contain an optional ``mode_expiration`` in seconds. When it elapses,
+      the CDA must send deAuthenticate. A ``mode_expiration`` together with deAuthenticate must
+      be rejected.
+    * If the ECU is in an authenticated state, the CDA must send deAuthenticate when the lock
+      that was used for authentication is released or expires, and during ECU cleanup.
+    * Negative responses of the ECU (including NRC 34\ :sub:`16` and
+      50\ :sub:`16` -- 5D\ :sub:`16`) must be reported to the client, including the NRC.
+    * The endpoint is not provided for functional groups.
+
+    **Rationale**
+
+    The authenticated state of an ECU is independent of the diagnostic session and the
+    security access level (ISO 14229-1 clause 10.6.4), so it needs its own mode. Keeping the
+    credentials in the client avoids secret handling in the CDA. Deauthenticating on lock
+    release prevents a following client from inheriting the authenticated state.
 
 Security
 ^^^^^^^^

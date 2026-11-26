@@ -11,5 +11,13 @@
 
 [styles]
 c = ["*.rs", "*.kt", "*.kts", "*.fbs"]
-python = [".env.example", ".gitkeep", ".markdownlintignore", ".yamlfmt"]
+python = [
+  ".env.example",
+  ".gitkeep",
+  ".markdownlintignore",
+  ".yamlfmt",
+  "*.bazel",
+  "*.bzl",
+  "*.env",
+]
 html = ["*.odx-*"]

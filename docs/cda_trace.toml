@@ -32,10 +32,13 @@ get_oneline_needs = true
 
 [codelinks.projects.cda.analyse.oneline_comment_style]
 # Configuration for oneline comment style
-start_sequence = "[["  # Start sequence for oneline comments
+start_sequence = "[[ " # Start sequence; the trailing space excludes TOML tables like `[[can.ecu_mappings]]`
 end_sequence = "]]"    # End sequence for the oneline comments; default is newline character
 field_split_char = "," # Character to split fields in the comment
 # Fields that are defined in the oneline comment style
+# Note: `links` must only point downwards (e.g. impl -> testset). Test comments
+# (test~/itest~) carry no links; they are referenced from a testset~ in
+# docs/05_verification/ instead (enforced in docs/conf.py).
 needs_fields = [
   { "name" = "id", "type" = "str" },
   { "name" = "title", "type" = "str" },

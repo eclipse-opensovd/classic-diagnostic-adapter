@@ -67,10 +67,12 @@ impl<S: SecurityPlugin> VariantDetection for EcuManager<S> {
 
         if service_responses.is_empty() {
             // No responses means ECU is unreachable -> set connectivity to Offline.
-            // Variant state is intentionally preserved (we still know what variant it was).
+            // The variant state is preserved (we still know what variant it was),
+            // except for an ECU assumed online whose restored variant was never
+            // confirmed in this session, see `EcuState::mark_unreachable`.
             let current_variant_state = {
                 let mut ecu_state = std_ext::lock_write(&self.runtime_state.ecu_state);
-                ecu_state.connectivity = Connectivity::Offline;
+                ecu_state.mark_unreachable();
                 ecu_state.variant_state.clone()
             };
             // Publish unconditionally, even when unchanged. This is the ECU's
@@ -133,5 +135,14 @@ impl<S: SecurityPlugin> VariantDetection for EcuManager<S> {
     async fn mark_as_no_variant_detected(&mut self) {
         self.clear_variant_and_unload(VariantState::NotDetected, None)
             .await;
+    }
+
+    async fn set_base_variant_online(&mut self) -> Result<(), DiagServiceError> {
+        if !self.diag_database.is_loaded() {
+            self.load()?;
+        }
+        let base_variant = self.diag_database.base_variant()?;
+        let variant_data = VariantData::from_variant_and_fallback(&base_variant, false);
+        self.set_variant(variant_data).await
     }
 }

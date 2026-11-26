@@ -36,6 +36,31 @@ pub trait RandomAccessData: Send + Sync {
     fn data_size(&self) -> Result<u64, StorageError>;
 }
 
+/// Adapts [`RandomAccessData`] to [`std::io::Read`], reading sequentially from the start.
+pub struct RandomAccessReader<'a, D: RandomAccessData + ?Sized> {
+    data: &'a D,
+    offset: u64,
+}
+
+impl<'a, D: RandomAccessData + ?Sized> RandomAccessReader<'a, D> {
+    /// Creates a reader over `data`, starting at offset 0.
+    #[must_use]
+    pub fn new(data: &'a D) -> Self {
+        Self { data, offset: 0 }
+    }
+}
+
+impl<D: RandomAccessData + ?Sized> std::io::Read for RandomAccessReader<'_, D> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self
+            .data
+            .read_at(self.offset, buf)
+            .map_err(std::io::Error::other)?;
+        self.offset = self.offset.saturating_add(read as u64);
+        Ok(read)
+    }
+}
+
 /// Marker trait for streaming data sources used in write operations.
 ///
 /// Any type implementing [`tokio::io::AsyncRead`] + [`Send`] + [`Unpin`] automatically

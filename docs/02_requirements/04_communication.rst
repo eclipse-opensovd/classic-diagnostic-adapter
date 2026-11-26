@@ -162,7 +162,11 @@ Vehicle Identification
     The CDA shall:
 
     1. Broadcast VIR messages to ``255.255.255.255`` on the configured gateway port
-       (default: 13400).
+       (default: 13400), sent from a configurable local UDP source port
+       (``UDP_TEST_EQUIPMENT_REQUEST``). The source port shall be configurable as a fixed
+       port, as ``0`` (chosen by the operating system) or as a port range from which a free
+       port is selected. It shall default to the dynamic port range ``49152-65535``
+       (ISO 13400-2 REQ 4.DoIP-135).
     2. Collect VAM responses within a configurable timeout window.
     3. Filter VAM responses by subnet mask, accepting only responses from IP addresses
        within the tester's configured subnet.
@@ -243,6 +247,43 @@ Spontaneous VAM Handling Mode
     ensures the CDA remains fully quiet on the vehicle network for as long as
     :need:`req~dt-deferred-initialization` postpones communication, regardless of the configured
     ``vam_handling_mode``.
+
+
+DoIP Discovery Mode
+^^^^^^^^^^^^^^^^^^^
+
+.. req:: DoIP Discovery Mode
+    :id: req~doip-discovery-mode
+    :links: arch~doip-vehicle-identification, arch~dt-deferred-initialization
+    :status: draft
+
+    The CDA must support a configurable ``[doip] discovery`` mode, controlling which mechanisms are used
+    to find DoIP gateways once communication has been initialized:
+
+    - **Full** (default) -- a VIR is broadcast (see :need:`req~doip-vehicle-identification`), VAMs are
+      handled according to :need:`req~doip-vam-handling-mode`, and a gateway that cannot be reached at a
+      persisted address is searched by broadcast (see :need:`req~dt-deferred-initialization`).
+    - **VamOnly** -- no VIR is ever broadcast, neither at startup nor as a fallback. VAMs are handled
+      according to :need:`req~doip-vam-handling-mode`. Persisted gateways are still connected by unicast to
+      their persisted address. A persisted gateway that cannot be connected this way (unreachable or
+      with an address that is not usable) is reported unreachable without a broadcast fallback. A
+      persisted gateway without network address is left untouched.
+    - **Disabled** -- no VIR is broadcast, no VAM is handled, and persisted gateways are not reconnected.
+      Gateways are only connected by an explicit direct connect (see
+      :need:`req~plugin-vehicle-topology-connect-ecu`).
+
+    The discovery mode and ``[communication] init_mode`` (see :need:`req~dt-deferred-initialization`)
+    are independent. ``init_mode`` controls when communication starts and whether a persisted topology is
+    reused; the discovery mode restricts which discovery mechanisms are used once it has started. Where
+    :need:`req~dt-deferred-initialization` requires a broadcast, it applies only with **Full**. The
+    registration of persisted ECUs (see :need:`req~dt-ecu-list-persistence`) does not depend on the
+    discovery mode.
+
+    **Rationale**
+
+    Some networks do not allow VIR broadcasts, or do not provide announcements at all, e.g. when the CDA
+    is used as a tester during ECU development. Separating how gateways are found from when communication
+    starts keeps both settings meaningful in every combination.
 
 
 Routing Activation

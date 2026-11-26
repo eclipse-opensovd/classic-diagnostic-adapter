@@ -15,7 +15,7 @@ use std::{path::PathBuf, sync::Arc};
 use async_trait::async_trait;
 use cda_interfaces::{
     HashMap, SchemaProvider, Shutdown, ShutdownSignal, UdsEcu,
-    communication_control::CommunicationAccess,
+    communication_control::{CommunicationAccess, DoipConnect},
     component_slot::ReplaceComponent,
     datatypes::ComponentsConfig,
     health::HealthProvider,
@@ -64,6 +64,9 @@ where
     /// Path for flash files
     pub flash_files_path: String,
 
+    /// Default functional class for the flash services
+    pub flash_functional_class_default: String,
+
     /// Component configuration
     pub components_config: ComponentsConfig,
 
@@ -78,6 +81,9 @@ where
 
     /// Shared coordinator used by rebuilt SOVD routes.
     pub communication_access: Arc<dyn CommunicationAccess>,
+
+    /// Connect-only transport handle used by rebuilt SOVD routes.
+    pub doip_connect: Option<Arc<dyn DoipConnect>>,
 
     /// Persistent storage used to execute automatic rollback when installing the
     /// newly built components fails.
@@ -98,8 +104,10 @@ where
     dynamic_router: DynamicRouter,
     vehicle_route_handle: cda_sovd::RouteHandle,
     flash_files_path: String,
+    flash_functional_class_default: String,
     components_config: ComponentsConfig,
     communication_access: Arc<dyn CommunicationAccess>,
+    doip_connect: Option<Arc<dyn DoipConnect>>,
     uds_manager: Arc<dyn ReplaceComponent<Uds>>,
     diagnostic_gateway: Arc<dyn ReplaceComponent<Gateway>>,
 }
@@ -138,6 +146,7 @@ where
         let vehicle_router = cda_sovd::build_vehicle_routes::<_, _, SecurityLoader>(
             cda_sovd::VehicleConfig {
                 flash_files_path: self.flash_files_path.clone(),
+                flash_functional_class_default: self.flash_functional_class_default.clone(),
                 functional_group_config,
                 components_config: self.components_config.clone(),
             },
@@ -146,6 +155,7 @@ where
                 file_managers,
                 locks: current_locks,
                 communication_access: Arc::clone(&self.communication_access),
+                doip_connect: self.doip_connect.clone(),
             },
         )
         .await;
@@ -257,8 +267,10 @@ where
             dynamic_router: config.infrastructure.dynamic_router,
             vehicle_route_handle: config.infrastructure.vehicle_route_handle,
             flash_files_path: config.infrastructure.flash_files_path,
+            flash_functional_class_default: config.infrastructure.flash_functional_class_default,
             components_config: config.infrastructure.components_config,
             communication_access: config.infrastructure.communication_access,
+            doip_connect: config.infrastructure.doip_connect,
             uds_manager: config.infrastructure.uds_manager,
             diagnostic_gateway: config.infrastructure.diagnostic_gateway,
         });

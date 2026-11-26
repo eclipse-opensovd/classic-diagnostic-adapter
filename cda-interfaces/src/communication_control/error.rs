@@ -13,7 +13,7 @@
 
 //! Error types for communication control and policies.
 //!
-//! [[ dimpl~communication-control-errors, Communication lifecycle error contract, dimpl, req~dt-error-handling; arch~dt-error-handling ]]
+//! [[ dimpl~communication-control-errors, Communication lifecycle error contract, dimpl ]]
 use thiserror::Error;
 
 /// Errors that can occur during communication control operations.

@@ -39,7 +39,9 @@ use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     Connectivity, FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, SchemaProvider,
     UdsEcu, VariantState,
-    communication_control::{ActivationCause, CommunicationAccess, CommunicationGuard},
+    communication_control::{
+        ActivationCause, CommunicationAccess, CommunicationGuard, DoipConnect,
+    },
     datatypes::ComponentsConfig,
     diagservices::{FieldParseError, UdsPayloadData},
     file_manager::FileManager,
@@ -69,12 +71,14 @@ use crate::{
 };
 
 pub(crate) mod apps;
+pub(crate) mod binary_encoding;
 pub(crate) mod components;
 pub(crate) mod docs;
 pub(crate) mod error;
 pub(crate) mod functions;
 mod lock_state;
 pub(crate) mod locks;
+pub(crate) mod vehicle;
 
 trait IntoSovd {
     type SovdType;
@@ -92,9 +96,17 @@ impl IntoSovd for cda_interfaces::EcuState {
     fn into_sovd(self) -> Self::SovdType {
         match (&self.connectivity, &self.variant_state) {
             (_, VariantState::Duplicate) => sovd_ecu::State::Duplicate,
-            (Connectivity::Online, VariantState::Detected { .. }) => sovd_ecu::State::Online,
-            (Connectivity::Online, VariantState::NotDetected) => sovd_ecu::State::NoVariantDetected,
-            (Connectivity::Online, VariantState::NotTested) => sovd_ecu::State::NotTested,
+            // AssumedOnline is internal-only and reported like Online; `last_seen`
+            // tells clients how current that is.
+            (Connectivity::Online | Connectivity::AssumedOnline, VariantState::Detected { .. }) => {
+                sovd_ecu::State::Online
+            }
+            (Connectivity::Online | Connectivity::AssumedOnline, VariantState::NotDetected) => {
+                sovd_ecu::State::NoVariantDetected
+            }
+            (Connectivity::Online | Connectivity::AssumedOnline, VariantState::NotTested) => {
+                sovd_ecu::State::NotTested
+            }
             (Connectivity::Offline, VariantState::NotTested) => sovd_ecu::State::Offline,
             (Connectivity::Offline, VariantState::Detected { .. } | VariantState::NotDetected) => {
                 sovd_ecu::State::Disconnected
@@ -124,6 +136,7 @@ pub(crate) struct WebserverEcuState<T: UdsEcu + Clone, U: FileManager> {
     // Map of Service Name -> (Execution Id -> ServiceExecution) for ECU routine operations
     pub(crate) service_executions: Arc<ExecutionLock<ServiceExecution>>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
+    flash_functional_class_default: Arc<str>,
     mdd_embedded_files: Arc<U>,
 }
 
@@ -273,10 +286,63 @@ impl std::ops::DerefMut for ComparamExecution {
     }
 }
 
+/// Response parameters of an async execution.
+///
+/// Byte fields cannot be identified in mapped JSON anymore, so the UDS
+/// response is kept and only mapped to JSON when it is read, in the binary
+/// encoding of the reading request. This way later requests can use another
+/// encoding than the request that started the execution, without mapping the
+/// response up front for every encoding.
+pub(crate) struct StoredParameters<M> {
+    map: Option<Arc<dyn Fn(cda_interfaces::BinaryEncoding) -> M + Send + Sync>>,
+}
+
+impl<M> StoredParameters<M> {
+    /// Store `map`, which produces the parameters in the requested encoding.
+    pub(crate) fn from_fn(
+        map: impl Fn(cda_interfaces::BinaryEncoding) -> M + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            map: Some(Arc::new(map)),
+        }
+    }
+}
+
+impl<M: Default> StoredParameters<M> {
+    /// Parameters in the given encoding, empty if nothing is stored.
+    pub(crate) fn in_encoding(&self, encoding: cda_interfaces::BinaryEncoding) -> M {
+        self.map
+            .as_ref()
+            .map_or_else(M::default, |map| map(encoding))
+    }
+}
+
+impl<M> Default for StoredParameters<M> {
+    fn default() -> Self {
+        Self { map: None }
+    }
+}
+
+impl<M> Clone for StoredParameters<M> {
+    fn clone(&self) -> Self {
+        Self {
+            map: self.map.as_ref().map(Arc::clone),
+        }
+    }
+}
+
+impl<M> std::fmt::Debug for StoredParameters<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredParameters")
+            .field("stored", &self.map.is_some())
+            .finish()
+    }
+}
+
 /// Stored state for a single ECU routine execution (async lifecycle).
 #[derive(Debug)]
 pub(crate) struct ServiceExecution {
-    pub parameters: serde_json::Map<String, serde_json::Value>,
+    pub parameters: StoredParameters<serde_json::Map<String, serde_json::Value>>,
     pub status: sovd_ecu::operations::ExecutionStatus,
     pub in_flight: bool,
     pub is_created: bool,
@@ -320,7 +386,7 @@ impl ExecutionStatus for ServiceExecution {
     }
     fn placeholder(communication_guard: CommunicationGuard) -> Self {
         ServiceExecution {
-            parameters: serde_json::Map::new(),
+            parameters: StoredParameters::default(),
             status: sovd_ecu::operations::ExecutionStatus::Running,
             in_flight: false,
             is_created: false,
@@ -336,7 +402,7 @@ impl ExecutionStatus for ServiceExecution {
 /// per-ECU identity is preserved across the execution lifecycle.
 #[derive(Debug)]
 pub(crate) struct FgServiceExecution {
-    pub parameters: HashMap<String, serde_json::Map<String, serde_json::Value>>,
+    pub parameters: StoredParameters<HashMap<String, serde_json::Map<String, serde_json::Value>>>,
     pub status: sovd_ecu::operations::ExecutionStatus,
     pub in_flight: bool,
     pub is_created: bool,
@@ -380,7 +446,7 @@ impl ExecutionStatus for FgServiceExecution {
     }
     fn placeholder(communication_guard: CommunicationGuard) -> Self {
         FgServiceExecution {
-            parameters: HashMap::new(),
+            parameters: StoredParameters::default(),
             status: sovd_ecu::operations::ExecutionStatus::Running,
             in_flight: false,
             is_created: false,
@@ -433,6 +499,19 @@ impl LockStateProvider for SovdLockStateProvider {
     async fn has_non_vehicle_locks(&self) -> bool {
         let locks = self.locks.read().await.clone();
         locks.has_non_vehicle_locks().await
+    }
+}
+
+#[async_trait]
+impl cda_interfaces::request_authorization::RequestLockProvider for SovdLockStateProvider {
+    async fn current_lock(
+        &self,
+        target: &cda_interfaces::request_authorization::UdsRequestTarget,
+    ) -> Option<cda_interfaces::request_authorization::RequestLockContext> {
+        // Resolve the current `Locks` per call so runtime reloads are observed, and release
+        // the provider guard before inspecting lock state.
+        let locks = self.locks.read().await.clone();
+        locks.request_lock_for(target).await
     }
 }
 
@@ -618,8 +697,14 @@ pub(crate) struct WebserverState<T: UdsEcu + Clone> {
     uds: T,
     locks: Arc<Locks>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
+    flash_functional_class_default: Arc<str>,
     components_config: Arc<RwLock<ComponentsConfig>>,
     communication_access: Arc<dyn CommunicationAccess>,
+    #[cfg_attr(
+        not(feature = "doip-direct-connect"),
+        allow(dead_code, reason = "only used by the direct connect operation")
+    )]
+    doip_connect: Option<Arc<dyn DoipConnect>>,
 }
 
 pub(crate) fn resource_response(
@@ -631,10 +716,14 @@ pub(crate) fn resource_response(
     let base_path = format!("http://{host}{uri}");
     let items = resources
         .into_iter()
-        .map(|(name, href)| sovd_interfaces::Resource {
-            name: name.to_string(),
-            href: format!("{base_path}/{}", href.unwrap_or(name)),
-            id: None,
+        .map(|(name, path)| {
+            let id = path.unwrap_or(name);
+            sovd_interfaces::Resource {
+                name: name.to_string(),
+                href: format!("{base_path}/{id}"),
+                id: id.to_string(),
+                translation_id: None,
+            }
         })
         .collect();
 
@@ -648,26 +737,68 @@ pub(crate) fn resource_response(
     (StatusCode::OK, Json(components)).into_response()
 }
 
+/// Builds a data list from `(id, category)` pairs, using the id as name.
+pub(crate) fn data_list_response(data: Vec<(String, String)>, include_schema: bool) -> Response {
+    let items = data
+        .into_iter()
+        .map(
+            |(id, category)| sovd_interfaces::components::ecu::ComponentDataInfo {
+                category,
+                name: id.clone(),
+                id,
+            },
+        )
+        .collect();
+    let schema = if include_schema {
+        Some(create_schema!(
+            sovd_interfaces::components::ecu::ComponentData
+        ))
+    } else {
+        None
+    };
+    (
+        StatusCode::OK,
+        Json(sovd_interfaces::components::ecu::ComponentData { items, schema }),
+    )
+        .into_response()
+}
+
+/// Flash API related configuration.
+pub struct FlashConfig {
+    /// Folder that contains the flash files.
+    pub files_path: String,
+    /// Functional class used to resolve the flash services when the client provides none.
+    pub functional_class_default: String,
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Combining parameters into a struct is not preferred here, to keep route setup \
+              explicit"
+)]
 pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: SecurityPluginLoader>(
     functional_group_config: FunctionalDescriptionConfig,
     components_config: ComponentsConfig,
     uds: &T,
-    flash_files_path: String,
+    flash_config: FlashConfig,
     mut file_manager: HashMap<String, U>,
     locks: Arc<Locks>,
     communication_access: Arc<dyn CommunicationAccess>,
+    doip_connect: Option<Arc<dyn DoipConnect>>,
 ) -> Router {
     let flash_data = Arc::new(RwLock::new(sovd_interfaces::sovd2uds::FileList {
         files: Vec::new(),
-        path: Some(PathBuf::from(flash_files_path)),
+        path: Some(PathBuf::from(flash_config.files_path)),
         schema: None,
     }));
     let state = WebserverState {
         uds: uds.clone(),
         locks,
         flash_data: Arc::clone(&flash_data),
+        flash_functional_class_default: Arc::from(flash_config.functional_class_default),
         components_config: Arc::new(RwLock::new(components_config)),
         communication_access,
+        doip_connect,
     };
 
     let router = components_route::<T, U>(state.clone(), &mut file_manager).await;
@@ -691,6 +822,20 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
         )
         .await,
     );
+    // Preliminary: ECU connection management is expected to move into the topology
+    // plugin. Only offered if built with the feature, and enabled in the configuration.
+    #[cfg(feature = "doip-direct-connect")]
+    let router = if state.doip_connect.is_some() {
+        router.api_route(
+            apps::sovd2uds::operations::doip_connect_ecu::EXECUTIONS_ROUTE,
+            routing::post_with(
+                apps::sovd2uds::operations::doip_connect_ecu::post::<T>,
+                apps::sovd2uds::operations::doip_connect_ecu::docs_post,
+            ),
+        )
+    } else {
+        router
+    };
     router
         .api_route(
             "/vehicle/v15/locks",
@@ -706,14 +851,24 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
                     locks::vehicle::lock::docs_delete,
                 ),
         )
+        .route("/vehicle/v15", routing::get(vehicle::get))
+        .route(vehicle::DATA_PATH, routing::get(vehicle::data_get))
         .route("/vehicle/v15/apps", routing::get(apps::get))
         .route(
             "/vehicle/v15/apps/sovd2uds",
             routing::get(apps::sovd2uds::get),
         )
         .route(
-            "/vehicle/v15/apps/sovd2uds/bulk-data",
+            apps::sovd2uds::DATA_PATH,
+            routing::get(apps::sovd2uds::data_get),
+        )
+        .route(
+            apps::sovd2uds::BULK_DATA_PATH,
             routing::get(apps::sovd2uds::bulk_data::get),
+        )
+        .route(
+            apps::sovd2uds::OPERATIONS_PATH,
+            routing::get(apps::sovd2uds::operations_get),
         )
         .api_route(
             "/vehicle/v15/apps/sovd2uds/bulk-data/flashfiles",
@@ -725,7 +880,7 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
         .route("/vehicle/v15/authorize", routing::post(S::authorize))
         .with_state(state)
         .api_route(
-            "/vehicle/v15/apps/sovd2uds/data/networkstructure",
+            apps::sovd2uds::data::NETWORKSTRUCTURE_PATH,
             routing::get_with(
                 apps::sovd2uds::data::networkstructure::get::<T>,
                 apps::sovd2uds::data::networkstructure::docs_get,
@@ -740,8 +895,9 @@ async fn get_components<T: UdsEcu + SchemaProvider + Clone>(
     fn ecu_to_resource(ecu: String) -> Resource {
         Resource {
             href: format!("http://localhost:20002/Vehicle/v15/components/{ecu}"),
-            id: Some(ecu.to_lowercase()),
+            id: ecu.to_lowercase(),
             name: ecu,
+            translation_id: None,
         }
     }
     let ecus = state.uds.get_physical_ecus().await;
@@ -790,8 +946,9 @@ fn docs_components(op: TransformOperation) -> TransformOperation {
             res.example(sovd_interfaces::ResourceResponse {
                 items: vec![sovd_interfaces::Resource {
                     href: "http://localhost:20002/Vehicle/v15/components/my_ecu".into(),
-                    id: Some("my_ecu".into()),
+                    id: "my_ecu".into(),
                     name: "My ECU".into(),
+                    translation_id: None,
                 }],
                 schema: None,
             })
@@ -838,6 +995,7 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
         communication_access: Arc::clone(&state.communication_access),
         service_executions: Arc::new(StdRwLock::new(HashMap::default())),
         flash_data: Arc::clone(&state.flash_data),
+        flash_functional_class_default: Arc::clone(&state.flash_functional_class_default),
         mdd_embedded_files: Arc::new(file_manager.remove(&ecu_lower).ok_or_else(|| {
             SovdError::RouteError(format!(
                 "FileManager for ECU '{ecu_name}' not found in provided FileManager map"
@@ -979,6 +1137,14 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
                 .put_with(modes::security::put, modes::security::docs_put),
         )
         .api_route(
+            &format!(
+                "/modes/{}",
+                sovd_interfaces::common::modes::AUTHENTICATION_ID
+            ),
+            routing::get_with(modes::authentication::get, modes::authentication::docs_get)
+                .put_with(modes::authentication::put, modes::authentication::docs_put),
+        )
+        .api_route(
             &format!("/modes/{}", sovd_interfaces::common::modes::COMM_CONTROL_ID),
             routing::get_with(modes::commctrl::get, modes::commctrl::docs_get)
                 .put_with(modes::commctrl::put, modes::commctrl::docs_put),
@@ -1060,6 +1226,21 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
                 x_sovd2uds_bulk_data::mdd_embedded_files::id::docs_get,
             ),
         )
+        .route("/bulk-data", routing::get(x_sovd2uds_bulk_data::get))
+        .api_route(
+            "/bulk-data/mdd-embedded-files",
+            routing::get_with(
+                x_sovd2uds_bulk_data::mdd_embedded_files::get,
+                x_sovd2uds_bulk_data::mdd_embedded_files::docs_get,
+            ),
+        )
+        .api_route(
+            "/bulk-data/mdd-embedded-files/{id}",
+            routing::get_with(
+                x_sovd2uds_bulk_data::mdd_embedded_files::id::get,
+                x_sovd2uds_bulk_data::mdd_embedded_files::id::docs_get,
+            ),
+        )
         .api_route(
             "/faults",
             routing::get_with(faults::get, faults::docs_get)
@@ -1069,7 +1250,9 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
             "/faults/{id}",
             routing::get_with(faults::id::get, faults::id::docs_get)
                 .delete_with(faults::id::delete, faults::id::docs_delete),
-        )
+        );
+
+    let router = router
         .with_state(ecu_state)
         .with_path_items(crate::openapi::defunct_lock_path)
         .with_path_items(|op| op.tag(ecu_name));
@@ -1081,6 +1264,7 @@ fn get_payload_data<'a, T>(
     content_type: Option<&mime::Mime>,
     headers: &HeaderMap,
     body: &'a Bytes,
+    binary_encoding: cda_interfaces::BinaryEncoding,
 ) -> Result<Option<UdsPayloadData>, ApiError>
 where
     T: sovd_interfaces::Payload + serde::de::Deserialize<'a>,
@@ -1092,7 +1276,10 @@ where
         (mime::APPLICATION, mime::JSON) => {
             let sovd_request = serde_json::from_slice::<T>(body)
                 .map_err(|e| ApiError::BadRequest(format!("Invalid JSON: {e:?}")))?;
-            Some(UdsPayloadData::ParameterMap(sovd_request.get_data_map()))
+            Some(UdsPayloadData::ParameterMap(
+                sovd_request.get_data_map(),
+                binary_encoding,
+            ))
         }
         (mime::APPLICATION, mime::OCTET_STREAM) => get_octet_stream_payload(headers, body)?,
         _ => {
@@ -1242,70 +1429,223 @@ pub(crate) mod static_data {
         extract::{Query, State},
         response::{IntoResponse, Response},
     };
+    use axum_extra::extract::WithRejection;
     use http::StatusCode;
+    use serde::Serialize;
 
     use crate::{dynamic_router::DynamicRouter, sovd::error::ApiError};
 
-    /// Add an endpoint serving static data.
-    /// For example it can be used, to serve version information.
-    /// The standard defines these routes for version data:
-    /// * `/vehicle/v15/apps/sovd2uds/data/version`.
-    /// * `/vehicle/v15/data/version`
+    /// A response served by a static data endpoint.
+    ///
+    /// Implemented by response types that carry their own optional `schema` field, like the
+    /// other SOVD response types. This keeps the response a plain struct, so no shape
+    /// requirement on the data has to be checked at runtime.
+    ///
+    /// The schema is built once by the caller and stored in the data; it is only sent with
+    /// `include-schema=true`.
+    pub(crate) trait StaticData:
+        Serialize + schemars::JsonSchema + Clone + Send + Sync + 'static
+    {
+        /// Returns the data with `schema` set to the given value.
+        #[must_use]
+        fn with_schema(self, schema: Option<schemars::Schema>) -> Self;
+    }
+
+    impl StaticData for sovd_interfaces::version_info::VersionInfo {
+        fn with_schema(self, schema: Option<schemars::Schema>) -> Self {
+            Self { schema, ..self }
+        }
+    }
+
+    impl StaticData for sovd_interfaces::version_info::DataVersion {
+        fn with_schema(self, schema: Option<schemars::Schema>) -> Self {
+            Self { schema, ..self }
+        }
+    }
+
+    /// Adds an endpoint serving static data, e.g. the version endpoints.
+    /// With `include-schema=true` the response also contains the schema stored in `data`.
+    /// The endpoint is listed in its `/data` collection with the given category.
+    ///
     /// # Arguments
     /// * `dynamic_router` - The dynamic router to add the endpoint to.
-    /// * `data` - The version data to return.
+    /// * `data` - The data to return, with its schema set.
     /// * `path` - The path to serve the data from.
     ///   There is no processing of this, it will be returned as is in the response.
-    pub async fn add_static_data_endpoint(
+    /// * `category` - The data category the collection lists the endpoint with,
+    ///   e.g. `identData` (ISO 17978-3 Table 70).
+    pub async fn add_static_data_endpoint<T: StaticData>(
         dynamic_router: &DynamicRouter,
-        data: serde_json::Map<String, serde_json::Value>,
+        data: T,
         path: &str,
+        category: &str,
     ) {
-        let data_docs = data.clone();
+        // The schema is not part of the documented example.
+        let data_docs = data.clone().with_schema(None);
         let router = ApiRouter::new()
             .api_route(
                 path,
-                routing::get_with(get, move |transformation| {
+                routing::get_with(get::<T>, move |transformation| {
                     docs_get(transformation, data_docs.clone())
                 }),
             )
             .with_state(data);
+        dynamic_router.register_data_resource(path, category).await;
         dynamic_router.add_routes(router).await;
     }
 
-    pub(crate) async fn get(
-        State(state): State<serde_json::Map<String, serde_json::Value>>,
-        Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
+    async fn get<T: StaticData>(
+        State(data): State<T>,
+        WithRejection(Query(query), _): WithRejection<
+            Query<sovd_interfaces::IncludeSchemaQuery>,
+            ApiError,
+        >,
     ) -> Response {
-        let mut response_map = state.clone();
-        if query.include_schema {
-            let schema = match serde_json::to_value(
-                create_schema!(serde_json::Map<String, serde_json::Value>),
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    return ApiError::InternalServerError(Some(format!(
-                        "Failed to build static data with schema: {e}"
-                    )))
-                    .into_response();
-                }
-            };
-
-            response_map.insert("schema".to_string(), schema);
-        }
-        (StatusCode::OK, Json(response_map)).into_response()
+        let data = if query.include_schema {
+            data
+        } else {
+            data.with_schema(None)
+        };
+        (StatusCode::OK, Json(data)).into_response()
     }
 
-    pub(crate) fn docs_get(
-        op: TransformOperation,
-        data: serde_json::Map<String, serde_json::Value>,
-    ) -> TransformOperation {
+    fn docs_get<T>(op: TransformOperation, data: T) -> TransformOperation
+    where
+        T: Serialize + schemars::JsonSchema,
+    {
         op.description("Get static information")
-            .response_with::<200, Json<serde_json::Map<String, serde_json::Value>>, _>(|res| {
-                let mut example = data;
-                example.insert("schema".to_string(), serde_json::Value::Null);
-                res.description("Successful response").example(example)
+            .response_with::<200, Json<T>, _>(|res| {
+                res.description("Successful response").example(data)
             })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use axum::body::Body;
+        use serde_json::{Value, json};
+        use sovd_interfaces::version_info::{DataVersion, SovdInfo, VendorInfo, VersionInfo};
+        use tower::ServiceExt;
+
+        use super::*;
+
+        fn version_info() -> VersionInfo {
+            VersionInfo {
+                sovd_info: vec![SovdInfo {
+                    version: "1.1.0".to_owned(),
+                    base_uri: "/vehicle/v15".to_owned(),
+                    vendor_info: VendorInfo {
+                        name: "CDA".to_owned(),
+                        version: "0.1.0".to_owned(),
+                        commit: "abc123".to_owned(),
+                        build_date: "2026-11-19".to_owned(),
+                    },
+                }],
+                schema: None,
+            }
+        }
+
+        fn version_info_with_schema() -> VersionInfo {
+            version_info().with_schema(Some(create_schema!(VersionInfo)))
+        }
+
+        async fn get_json(router: &DynamicRouter, uri: &str) -> (StatusCode, Value) {
+            let request = http::Request::builder()
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let response = router.get_router().await.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+        }
+
+        #[tokio::test]
+        async fn returns_the_data_without_schema_by_default() {
+            let router = DynamicRouter::new();
+            add_static_data_endpoint(
+                &router,
+                version_info_with_schema(),
+                "/version-info",
+                "identData",
+            )
+            .await;
+
+            let (status, value) = get_json(&router, "/version-info").await;
+
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(value, serde_json::to_value(version_info()).unwrap());
+        }
+
+        #[tokio::test]
+        async fn returns_the_schema_of_the_data_type() {
+            let router = DynamicRouter::new();
+            add_static_data_endpoint(
+                &router,
+                version_info_with_schema(),
+                "/version-info",
+                "identData",
+            )
+            .await;
+
+            let (status, value) = get_json(&router, "/version-info?include-schema=true").await;
+
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                value.get("schema"),
+                Some(&serde_json::to_value(create_schema!(VersionInfo)).unwrap())
+            );
+            assert_eq!(
+                value.pointer("/schema/properties/sovd_info/items/properties/base_uri/type"),
+                Some(&json!("string"))
+            );
+        }
+
+        /// [[ test~sovd-api-version-registrar, Version Registrar Consistency, test ]]
+        #[tokio::test]
+        async fn version_registration_uses_consistent_values_at_each_supplied_path() {
+            let router = DynamicRouter::new();
+            let versions = crate::VersionRegistrar::new("CDA", "0.1.0", "abc123", "2026-11-19");
+            versions.register_version_info(&router).await;
+            versions.register_data(&router, "/custom/version").await;
+            versions.register_data(&router, "/other/version").await;
+
+            let (status, value) = get_json(&router, "/version-info").await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(value, serde_json::to_value(version_info()).unwrap());
+            let expected = json!({
+                "id": "version",
+                "data": {
+                    "name": "CDA",
+                    "api": { "version": "1.1.0" },
+                    "implementation": {
+                        "version": "0.1.0",
+                        "commit": "abc123",
+                        "build_date": "2026-11-19"
+                    }
+                }
+            });
+            for path in ["/custom/version", "/other/version"] {
+                let (status, value) = get_json(&router, path).await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(value, expected);
+            }
+            for (path, schema) in [
+                ("/version-info", create_schema!(VersionInfo)),
+                ("/custom/version", create_schema!(DataVersion)),
+            ] {
+                let (status, value) =
+                    get_json(&router, &format!("{path}?include-schema=true")).await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(
+                    value.get("schema"),
+                    Some(&serde_json::to_value(schema).unwrap())
+                );
+            }
+            let (status, _) = get_json(&router, "/vehicle/v15/data/version").await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        }
     }
 }
 
@@ -1377,6 +1717,66 @@ pub(crate) mod tests {
 
     use super::*;
 
+    #[test]
+    fn stored_parameters_are_mapped_on_read_in_requested_encoding() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let stored = StoredParameters::from_fn({
+            let calls = Arc::clone(&calls);
+            move |encoding| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                encoding.encode(&[0x01, 0x02])
+            }
+        });
+        // Nothing is mapped when storing.
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let clone = stored.clone();
+        assert_eq!(
+            stored.in_encoding(cda_interfaces::BinaryEncoding::Base64),
+            "AQI="
+        );
+        assert_eq!(
+            clone.in_encoding(cda_interfaces::BinaryEncoding::Hex),
+            "0x01 0x02"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        assert_eq!(
+            StoredParameters::<String>::default().in_encoding(cda_interfaces::BinaryEncoding::Hex),
+            ""
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_response_includes_resource_ids() {
+        let uri = "/vehicle/v15/apps".parse().expect("valid URI");
+        let response = resource_response(
+            "example.com",
+            &uri,
+            vec![("SOVD to UDS", Some("sovd2uds")), ("Default", None)],
+            false,
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("resource response body");
+        let response: serde_json::Value =
+            serde_json::from_slice(&body).expect("valid resource response");
+        let Some(items) = response.get("items").and_then(serde_json::Value::as_array) else {
+            panic!("expected resource response items");
+        };
+        let [sovd2uds, default] = items.as_slice() else {
+            panic!("expected two resource items");
+        };
+        assert_eq!(
+            sovd2uds.get("id").and_then(serde_json::Value::as_str),
+            Some("sovd2uds")
+        );
+        assert_eq!(
+            default.get("id").and_then(serde_json::Value::as_str),
+            Some("Default")
+        );
+    }
+
     struct DeferredCommunicationAccess {
         activation_requests: AtomicUsize,
     }
@@ -1432,6 +1832,30 @@ pub(crate) mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn data_list_response_lists_id_name_and_category() {
+        let response = data_list_response(
+            vec![
+                ("version".to_owned(), "identData".to_owned()),
+                ("networkstructure".to_owned(), "sysInfo".to_owned()),
+            ],
+            false,
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({ "items": [
+                { "id": "version", "name": "version", "category": "identData" },
+                { "id": "networkstructure", "name": "networkstructure", "category": "sysInfo" },
+            ]})
+        );
+    }
+
     /// [[ test~deferred-sovd-admission, Deferred request admission triggers activation and returns a retry hint, test ]]
     #[test]
     fn communication_denial_requests_activation_and_returns_retry_hint() {
@@ -1463,7 +1887,7 @@ pub(crate) mod tests {
         entries.insert(
             exec_id,
             ServiceExecution {
-                parameters: serde_json::Map::new(),
+                parameters: crate::sovd::StoredParameters::default(),
                 status: sovd_ecu::operations::ExecutionStatus::Running,
                 in_flight: false,
                 is_created: true,
@@ -1544,7 +1968,7 @@ pub(crate) mod tests {
             ComparamExecution::new(
                 sovd_ecu::operations::comparams::Execution {
                     capability: sovd_ecu::operations::comparams::executions::Capability::Execute,
-                    status: sovd_ecu::operations::comparams::executions::Status::Running,
+                    status: sovd_ecu::operations::ExecutionStatus::Running,
                     comparam_override: HashMap::default(),
                 },
                 communication_guard,
@@ -1573,9 +1997,9 @@ pub(crate) mod tests {
         };
 
         let id = reservation.commit_async(|execution| {
-            execution
-                .parameters
-                .insert("result".to_owned(), serde_json::json!("ok"));
+            execution.parameters = StoredParameters::from_fn(|_| {
+                serde_json::Map::from_iter([("result".to_owned(), serde_json::json!("ok"))])
+            });
         });
 
         assert_eq!(Arc::strong_count(&access.active), 2);
@@ -1602,7 +2026,7 @@ pub(crate) mod tests {
         entries.insert(
             Uuid::new_v4(),
             ServiceExecution {
-                parameters: serde_json::Map::new(),
+                parameters: crate::sovd::StoredParameters::default(),
                 status: sovd_ecu::operations::ExecutionStatus::Running,
                 in_flight: false,
                 is_created: true,
@@ -1627,6 +2051,58 @@ pub(crate) mod tests {
         assert_eq!(Arc::strong_count(&access.active), 1);
     }
 
+    /// [[ test~ecu-state-assumed-online-reported-as-online, An `AssumedOnline` ECU is reported like an Online one over SOVD, test ]]
+    #[test]
+    fn assumed_online_is_reported_like_online() {
+        let detected = VariantState::Detected {
+            name: "Variant".to_owned(),
+            is_base_variant: false,
+            is_fallback: false,
+        };
+        for variant_state in [
+            detected,
+            VariantState::NotDetected,
+            VariantState::NotTested,
+            VariantState::Duplicate,
+        ] {
+            let state = |connectivity| {
+                cda_interfaces::EcuState {
+                    connectivity,
+                    variant_state: variant_state.clone(),
+                    variant_index: None,
+                }
+                .into_sovd()
+            };
+            assert_eq!(
+                state(Connectivity::AssumedOnline),
+                state(Connectivity::Online),
+                "{variant_state:?}"
+            );
+        }
+        let assumed = |variant_state| {
+            cda_interfaces::EcuState {
+                connectivity: Connectivity::AssumedOnline,
+                variant_state,
+                variant_index: None,
+            }
+            .into_sovd()
+        };
+        assert_eq!(
+            assumed(VariantState::Detected {
+                name: "Variant".to_owned(),
+                is_base_variant: false,
+                is_fallback: false,
+            }),
+            sovd_ecu::State::Online
+        );
+        assert_eq!(assumed(VariantState::NotTested), sovd_ecu::State::NotTested);
+        assert_eq!(
+            assumed(VariantState::NotDetected),
+            sovd_ecu::State::NoVariantDetected
+        );
+        assert_eq!(assumed(VariantState::Duplicate), sovd_ecu::State::Duplicate);
+    }
+
     pub fn create_test_webserver_state<T: UdsEcu + Clone, U: FileManager>(
         ecu_name: String,
         uds: T,
@@ -1644,6 +2120,7 @@ pub(crate) mod tests {
                 path: Some(PathBuf::new()),
                 schema: None,
             })),
+            flash_functional_class_default: Arc::from("flash_download_upload"),
             mdd_embedded_files: Arc::new(file_manager),
         }
     }

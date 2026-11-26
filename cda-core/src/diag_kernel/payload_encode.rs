@@ -15,16 +15,15 @@ use std::collections::HashSet;
 
 use cda_database::datatypes;
 use cda_interfaces::{
-    DiagServiceError, DynamicPlugin, HashMap, PayloadEncoder, ServicePayload,
+    BinaryEncoding, DiagServiceError, DynamicPlugin, HashMap, PayloadEncoder, ServicePayload,
     diagservices::UdsPayloadData, dlt_ctx, util,
 };
 use cda_plugin_security::SecurityPlugin;
 
 use super::ecumanager::EcuManager;
 use crate::diag_kernel::{
-    operations::{self, json_value_to_uds_data},
-    payload::str_to_json_value,
-    payload_decode::mux_case_struct_from_selector_value,
+    operations::json_value_to_uds_data, payload::str_to_json_value,
+    security::check_raw_service_plugin,
 };
 
 impl<S: SecurityPlugin> PayloadEncoder for EcuManager<S> {
@@ -46,17 +45,25 @@ impl<S: SecurityPlugin> PayloadEncoder for EcuManager<S> {
         // not sufficient to identify the correct service - doing so would pick
         // an arbitrary service with that SID, causing the wrong service to be
         // used for the access check (and thus reported in any resulting error).
-        // If no service with a matching prefix can be found,
-        // DiagServiceError::NotFound is returned to the caller.
+        // If no service with a matching prefix can be found, the security plugin
+        // is asked via `SecurityApi::check_raw_service` whether the raw request
+        // may be sent anyway. By default (and for the void plugin) this yields
+        // DiagServiceError::NotFound. Requests allowed this way are passed through
+        // without state transitions; `validate_request_send` still runs before sending.
         let sid_matched_services = self.lookup_services_by_sid(raw_data_sid)?;
         let mapped_service = sid_matched_services
             .iter()
-            .find(|service| service.matches_request_prefix(&rawdata))
-            .ok_or_else(|| {
-                DiagServiceError::NotFound(format!(
-                    "No matching generic service found for request prefix: {rawdata:02X?}"
-                ))
-            })?;
+            .find(|service| service.matches_request_prefix(&rawdata));
+        let Some(mapped_service) = mapped_service else {
+            check_raw_service_plugin::<S>(security_plugin, &rawdata)?;
+            return Ok(ServicePayload {
+                data: rawdata,
+                new_session: None,
+                new_security: None,
+                source_address: self.tester_address,
+                target_address: self.logical_address,
+            });
+        };
         let mapped_dc = mapped_service.diag_comm().map(datatypes::DiagComm).ok_or(
             DiagServiceError::InvalidDatabase("Service is missing DiagComm".to_owned()),
         )?;
@@ -117,7 +124,12 @@ impl<S: SecurityPlugin> PayloadEncoder for EcuManager<S> {
                 .await?;
         }
 
-        let mut mapped_params = request
+        // Params are encoded in database order. A param without BYTE-POSITION
+        // (ISO 22901-1 §7.4.8) is placed at the current end of the payload,
+        // i.e. after the preceding param. This covers both a leading param at
+        // byte 0 whose position was omitted and a param following a
+        // variable-length field.
+        let mapped_params = request
             .params()
             .map(|params| {
                 params
@@ -127,36 +139,24 @@ impl<S: SecurityPlugin> PayloadEncoder for EcuManager<S> {
             })
             .unwrap_or_default();
 
-        mapped_params.sort_by(|a, b| {
-            match (a.has_byte_position(), b.has_byte_position()) {
-                // Both have a position -> normal comparison
-                (true, true) => a
-                    .byte_position()
-                    .cmp(&b.byte_position())
-                    .then(a.bit_position().cmp(&b.bit_position())),
-                // Only a has no position -> a goes after b
-                (false, true) => std::cmp::Ordering::Greater,
-                // Only b has no position -> b goes after a
-                (true, false) => std::cmp::Ordering::Less,
-                // Neither has a position -> preserve order
-                (false, false) => std::cmp::Ordering::Equal,
-            }
-        });
-
-        let mut uds = process_coded_constants(&mapped_params)?;
-
         // If no input data was provided, fall back to an empty parameter map
         // this allows for a streamlined handling where some values might
         // have defaults that can be used when no data is provided, while returning
         // errors if the request expects input data but it is not provided.
         let data = match data {
             Some(d) => d,
-            None => UdsPayloadData::ParameterMap(HashMap::default()),
+            None => UdsPayloadData::ParameterMap(HashMap::default(), BinaryEncoding::default()),
         };
+        let mut uds = Vec::new();
         match data {
-            UdsPayloadData::Raw(bytes) => uds.extend(bytes),
-            UdsPayloadData::ParameterMap(json_values) => {
-                self.process_parameter_map(&mapped_params, &json_values, &mut uds)?;
+            UdsPayloadData::Raw(bytes) => encode_raw_payload(&mapped_params, bytes, &mut uds)?,
+            UdsPayloadData::ParameterMap(json_values, binary_encoding) => {
+                self.process_parameter_map(
+                    &mapped_params,
+                    &json_values,
+                    &mut uds,
+                    binary_encoding,
+                )?;
             }
         }
 
@@ -181,32 +181,38 @@ impl<S: SecurityPlugin> EcuManager<S> {
         payload: &mut Vec<u8>,
         parent_byte_pos: usize,
         sibling_values: Option<&HashMap<String, serde_json::Value>>,
+        enc: BinaryEncoding,
     ) -> Result<(), DiagServiceError> {
         //  ISO_22901-1:2008-11 7.3.5.4
         //  MATCHING-REQUEST-PARAM, DYNAMIC and NRC-CONST are only allowed in responses
         match param.param_type()? {
-            datatypes::ParamType::CodedConst => Ok(()),
+            datatypes::ParamType::CodedConst => encode_coded_const(param, payload, parent_byte_pos),
             datatypes::ParamType::MatchingRequestParam => Err(DiagServiceError::InvalidRequest(
                 "MatchingRequestParam only supported for responses".to_owned(),
             )),
             datatypes::ParamType::Value => {
-                self.map_param_value_to_uds(param, value, payload, parent_byte_pos)
+                self.map_param_value_to_uds(param, value, payload, parent_byte_pos, enc)
             }
             datatypes::ParamType::Reserved => Self::map_reserved_param_to_uds(param, payload),
-            datatypes::ParamType::TableStruct => {
-                self.map_table_struct_to_uds(param, value, payload, parent_byte_pos, sibling_values)
-            }
+            datatypes::ParamType::TableStruct => self.map_table_struct_to_uds(
+                param,
+                value,
+                payload,
+                parent_byte_pos,
+                sibling_values,
+                enc,
+            ),
             datatypes::ParamType::Dynamic => Err(DiagServiceError::ParameterConversionError(
                 "Mapping Dynamic DoP to UDS payload not implemented".to_owned(),
             )),
             datatypes::ParamType::LengthKey => {
-                Self::map_param_length_key_to_uds(param, value, payload, parent_byte_pos)
+                Self::map_param_length_key_to_uds(param, value, payload, parent_byte_pos, enc)
             }
             datatypes::ParamType::NrcConst => Err(DiagServiceError::ParameterConversionError(
                 "Mapping NrcConst DoP to UDS payload not implemented".to_owned(),
             )),
             datatypes::ParamType::PhysConst => {
-                self.map_phys_const_param_to_uds(param, payload, value)
+                self.map_phys_const_param_to_uds(param, payload, value, enc)
             }
             datatypes::ParamType::System => Err(DiagServiceError::ParameterConversionError(
                 "Mapping System DoP to UDS payload not implemented".to_owned(),
@@ -215,7 +221,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 "Mapping TableEntry DoP to UDS payload not implemented".to_owned(),
             )),
             datatypes::ParamType::TableKey => {
-                Self::map_table_key_to_uds(param, value, payload, parent_byte_pos)
+                Self::map_table_key_to_uds(param, value, payload, parent_byte_pos, enc)
             }
         }
     }
@@ -226,6 +232,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         value: Option<&serde_json::Value>,
         payload: &mut Vec<u8>,
         parent_byte_pos: usize,
+        enc: BinaryEncoding,
     ) -> Result<(), DiagServiceError> {
         let value_data =
             param
@@ -240,11 +247,16 @@ impl<S: SecurityPlugin> EcuManager<S> {
             ));
         };
 
-        let value = resolve_required_param(
+        // Check the DOP class before resolving the value, so a forbidden DOP is
+        // reported as such and not as a missing parameter.
+        reject_dop_forbidden_in_request(&dop, param)?;
+
+        let (value, enc) = resolve_required_param(
             value,
             &dop,
             || value_data.physical_default_value(),
             param.short_name().unwrap_or_default(),
+            enc,
         )?;
 
         match dop.variant()? {
@@ -255,6 +267,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     normal_dop.compu_method().map(Into::into),
                     normal_dop.physical_type().map(Into::into),
                     &value,
+                    enc,
                 )?;
                 diag_type.encode(
                     uds_data,
@@ -317,7 +330,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     // position (relevant for the very first item, in case earlier
                     // padding/reserved bits have not extended `payload` that far).
                     let item_byte_pos = payload.len().max(field_start_pos);
-                    self.map_struct_to_uds(&structure, item_byte_pos, v, payload)?;
+                    self.map_struct_to_uds(&structure, item_byte_pos, v, payload, enc)?;
                 }
                 Ok(())
             }
@@ -326,25 +339,22 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 (param.byte_position() as usize).saturating_add(parent_byte_pos),
                 &value,
                 payload,
+                enc,
             ),
-            datatypes::DataOperationVariant::StaticField(_static_field) => {
-                Err(DiagServiceError::ParameterConversionError(
-                    "Mapping StaticField DoP to UDS payload not implemented".to_owned(),
-                ))
-            }
-            datatypes::DataOperationVariant::Mux(mux_dop) => {
-                self.map_mux_to_uds(&mux_dop, &value, payload)
-            }
-            datatypes::DataOperationVariant::EnvDataDesc(_)
-            | datatypes::DataOperationVariant::EnvData(_)
-            | datatypes::DataOperationVariant::Dtc(_) => Err(DiagServiceError::InvalidDatabase(
-                "EnvData(Desc) and DTC DoPs cannot be mapped via parameters to request, but \
-                 handled via a dedicated 'faults' endpoint"
+            datatypes::DataOperationVariant::Dtc(_) => Err(DiagServiceError::InvalidDatabase(
+                "DTC DoPs cannot be mapped via parameters to request, but handled via a dedicated \
+                 'faults' endpoint"
                     .to_owned(),
             )),
-            datatypes::DataOperationVariant::DynamicLengthField(_dynamic_length_field) => {
-                Err(DiagServiceError::ParameterConversionError(
-                    "Mapping DynamicLengthField DoP to UDS payload not implemented".to_owned(),
+            datatypes::DataOperationVariant::StaticField(_)
+            | datatypes::DataOperationVariant::Mux(_)
+            | datatypes::DataOperationVariant::EnvDataDesc(_)
+            | datatypes::DataOperationVariant::EnvData(_)
+            | datatypes::DataOperationVariant::DynamicLengthField(_) => {
+                // Already rejected by `reject_dop_forbidden_in_request` above.
+                Err(forbidden_in_request_error(
+                    forbidden_request_dop_class(&dop)?.unwrap_or("complex DOP"),
+                    param,
                 ))
             }
         }
@@ -355,6 +365,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         value: Option<&serde_json::Value>,
         payload: &mut Vec<u8>,
         parent_byte_pos: usize,
+        enc: BinaryEncoding,
     ) -> Result<(), DiagServiceError> {
         let length_key =
             param
@@ -382,6 +393,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     normal_dop.compu_method().map(Into::into),
                     normal_dop.physical_type().map(Into::into),
                     value,
+                    enc,
                 )?;
                 diag_type.encode(
                     uds_data,
@@ -433,6 +445,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         param: &datatypes::Parameter,
         uds_payload_data: &mut Vec<u8>,
         param_data: Option<&serde_json::Value>,
+        enc: BinaryEncoding,
     ) -> Result<(), DiagServiceError> {
         let p = param
             .specific_data_as_phys_const()
@@ -447,11 +460,14 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     "PhysConst has no DOP".to_owned(),
                 ))?;
 
-        let value = resolve_required_param(
+        reject_dop_forbidden_in_request(&dop, param)?;
+
+        let (value, enc) = resolve_required_param(
             param_data,
             &dop,
             || p.phys_constant_value(),
             param.short_name().unwrap_or_default(),
+            enc,
         )?;
 
         // Handle different DOP variants - PhysConst can have Normal or Structure DOPs
@@ -463,6 +479,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     normal_dop.compu_method().map(Into::into),
                     normal_dop.physical_type().map(Into::into),
                     &value,
+                    enc,
                 )?;
                 diag_type.encode(
                     uds_data,
@@ -477,10 +494,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     param.byte_position() as usize,
                     &value,
                     uds_payload_data,
+                    enc,
                 )?;
-            }
-            datatypes::DataOperationVariant::Mux(mux_dop) => {
-                self.map_mux_to_uds(&mux_dop, &value, uds_payload_data)?;
             }
             _ => {
                 return Err(DiagServiceError::InvalidDatabase(format!(
@@ -510,111 +525,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(())
     }
 
-    fn map_mux_to_uds(
-        &self,
-        mux_dop: &datatypes::MuxDop,
-        value: &serde_json::Value,
-        uds_payload: &mut Vec<u8>,
-    ) -> Result<(), DiagServiceError> {
-        let Some(value) = value.as_object() else {
-            return Err(DiagServiceError::InvalidRequest(format!(
-                "Expected value to be object type, but it was: {value:#?}"
-            )));
-        };
-
-        let switch_key = &mux_dop
-            .switch_key()
-            .ok_or(DiagServiceError::InvalidDatabase(
-                "Mux switch key is None".to_owned(),
-            ))?;
-        let switch_key_dop = switch_key.dop().map(datatypes::DataOperation).ok_or(
-            DiagServiceError::InvalidDatabase("Mux switch key DoP is None".to_owned()),
-        )?;
-
-        match switch_key_dop.variant()? {
-            datatypes::DataOperationVariant::Normal(normal_dop) => {
-                let switch_key_diag_type = normal_dop.diag_coded_type()?;
-                let mut mux_payload = Vec::new();
-
-                // Process selector and encode switch key if present
-                let selected_case = value
-                    .get("Selector")
-                    .or(Some(&serde_json::Value::from(serde_json::Number::from(0))))
-                    .map(|selector| -> Result<_, DiagServiceError> {
-                        let switch_key_value = json_value_to_uds_data(
-                            &switch_key_diag_type,
-                            normal_dop.compu_method().map(Into::into),
-                            normal_dop.physical_type().map(Into::into),
-                            selector,
-                        )?;
-
-                        switch_key_diag_type.encode(
-                            switch_key_value.clone(),
-                            &mut mux_payload,
-                            switch_key.byte_position() as usize,
-                            switch_key.bit_position().unwrap_or(0) as usize,
-                        )?;
-
-                        let selector = operations::uds_data_to_serializable(
-                            switch_key_diag_type.base_datatype(),
-                            None,
-                            false,
-                            &mux_payload,
-                        )?;
-
-                        Ok(
-                            mux_case_struct_from_selector_value(mux_dop, &selector).and_then(
-                                |(case, struct_)| case.short_name().map(|name| (name, struct_)),
-                            ),
-                        )
-                    })
-                    .transpose()?
-                    .flatten();
-
-                // Get case name and structure from selected case or default
-                let (case_name, struct_) = selected_case
-                    .or_else(|| {
-                        mux_dop.default_case().and_then(|default_case| {
-                            default_case
-                                .short_name()
-                                .zip(default_case.structure().and_then(|s| {
-                                    s.specific_data_as_structure().map(|s| Some(s.into()))
-                                }))
-                        })
-                    })
-                    .ok_or_else(|| {
-                        DiagServiceError::InvalidRequest(
-                            "Cannot find selector value or default case".to_owned(),
-                        )
-                    })?;
-
-                self.reject_unexpected_keys(
-                    ["Selector", case_name].into_iter(),
-                    value.keys().map(String::as_str),
-                )?;
-
-                if let Some(struct_) = struct_ {
-                    let struct_data = value.get(case_name).ok_or_else(|| {
-                        DiagServiceError::BadPayload(format!(
-                            "Mux case {case_name} value not found in json"
-                        ))
-                    })?;
-
-                    let mut struct_payload = Vec::new();
-                    self.map_struct_to_uds(&struct_, 0, struct_data, &mut struct_payload)?;
-
-                    mux_payload.extend_from_slice(&struct_payload);
-                }
-
-                uds_payload.extend_from_slice(&mux_payload);
-                Ok(())
-            }
-            _ => Err(DiagServiceError::InvalidDatabase(
-                "Mux switch key DoP is not a NormalDoP".to_owned(),
-            )),
-        }
-    }
-
     /// Encode a TABLE-KEY parameter: resolve the key string to its wire
     /// representation using the table's key DOP and compu method.
     fn map_table_key_to_uds(
@@ -622,6 +532,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         value: Option<&serde_json::Value>,
         payload: &mut Vec<u8>,
         parent_byte_pos: usize,
+        enc: BinaryEncoding,
     ) -> Result<(), DiagServiceError> {
         let value = value.ok_or_else(|| {
             DiagServiceError::InvalidRequest(format!(
@@ -677,6 +588,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     normal_dop.compu_method().map(Into::into),
                     normal_dop.physical_type().map(Into::into),
                     value,
+                    enc,
                 )?;
                 diag_type.encode(
                     uds_data,
@@ -701,6 +613,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         payload: &mut Vec<u8>,
         parent_byte_pos: usize,
         sibling_values: Option<&HashMap<String, serde_json::Value>>,
+        enc: BinaryEncoding,
     ) -> Result<(), DiagServiceError> {
         let table_struct_data =
             param
@@ -814,6 +727,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                             parent_byte_pos.saturating_add(param.byte_position() as usize),
                             &struct_json,
                             payload,
+                            enc,
                         )
                     }
                     _ => Err(DiagServiceError::InvalidDatabase(format!(
@@ -831,6 +745,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         struct_byte_pos: usize,
         value: &serde_json::Value,
         payload: &mut Vec<u8>,
+        enc: BinaryEncoding,
     ) -> Result<(), DiagServiceError> {
         let Some(value) = value.as_object() else {
             return Err(DiagServiceError::InvalidRequest(format!(
@@ -863,6 +778,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 payload,
                 struct_byte_pos,
                 None,
+                enc,
             )
         })
     }
@@ -872,6 +788,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         mapped_params: &[datatypes::Parameter],
         json_values: &HashMap<String, serde_json::Value>,
         uds: &mut Vec<u8>,
+        enc: BinaryEncoding,
     ) -> Result<(), DiagServiceError> {
         self.reject_unexpected_keys(
             mapped_params.iter().filter_map(|p| p.short_name()),
@@ -879,14 +796,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
         )?;
 
         for param in mapped_params {
-            // When BYTE-POSITION is omitted (ISO 22901-1 §7.4.8) the
-            // parameter follows a variable-length PARAM-LENGTH-INFO field
-            // and must be appended at the current end of the payload.
-            let effective_byte_pos = if param.has_byte_position() {
-                param.byte_position() as usize
-            } else {
-                uds.len()
-            };
+            // When BYTE-POSITION is omitted (ISO 22901-1 §7.4.8) the parameter
+            // is appended at the current end of the payload.
+            let effective_byte_pos = effective_byte_pos(param, uds);
 
             if uds.len() < effective_byte_pos {
                 uds.extend(vec![0x0; effective_byte_pos.saturating_sub(uds.len())]);
@@ -906,12 +818,14 @@ impl<S: SecurityPlugin> EcuManager<S> {
             } else {
                 effective_byte_pos
             };
+
             self.map_param_to_uds(
                 param,
                 json_values.get(short_name),
                 uds,
                 parent_byte_pos,
                 Some(json_values),
+                enc,
             )?;
         }
         Ok(())
@@ -931,9 +845,12 @@ fn resolve_required_param<S: AsRef<str>>(
     dop: &datatypes::DataOperation,
     default_value: impl FnOnce() -> Option<S>,
     param_name: &str,
-) -> Result<serde_json::Value, DiagServiceError> {
+    request_encoding: BinaryEncoding,
+) -> Result<(serde_json::Value, BinaryEncoding), DiagServiceError> {
+    // Values provided by the client use the request encoding, while defaults
+    // from the database are always hex coded.
     if let Some(value) = provided_value {
-        return Ok(value.clone());
+        return Ok((value.clone(), request_encoding));
     }
     match dop.variant()? {
         datatypes::DataOperationVariant::Normal(_) => {
@@ -942,7 +859,10 @@ fn resolve_required_param<S: AsRef<str>>(
                     "Required parameter '{param_name}' missing",
                 ))
             })?;
-            Ok(phys_value_str_to_json(str_val.as_ref()))
+            Ok((
+                phys_value_str_to_json(str_val.as_ref()),
+                BinaryEncoding::Hex,
+            ))
         }
         _ => Err(DiagServiceError::InvalidRequest(format!(
             "Required parameter '{param_name}' missing",
@@ -978,70 +898,175 @@ fn try_parse_str_as_json_number(value: &str) -> Result<serde_json::Value, DiagSe
     }
 }
 
-fn process_coded_constants(
-    mapped_params: &[datatypes::Parameter],
-) -> Result<Vec<u8>, DiagServiceError> {
-    let mut uds: Vec<u8> = Vec::new();
-
-    for param in mapped_params {
-        if let Some(coded_const) = param.specific_data_as_coded_const() {
-            let diag_type: datatypes::DiagCodedType = coded_const
-                .diag_coded_type()
-                .and_then(|t| {
-                    let type_: Option<datatypes::DiagCodedType> = t.try_into().ok();
-                    type_
-                })
-                .ok_or(DiagServiceError::InvalidDatabase(format!(
-                    "Param '{}' is missing DiagCodedType",
-                    param.short_name().unwrap_or_default()
-                )))?;
-            let coded_const_value =
-                coded_const
-                    .coded_value()
-                    .ok_or(DiagServiceError::InvalidDatabase(format!(
-                        "Param '{}' is missing coded value",
-                        param.short_name().unwrap_or_default()
-                    )))?;
-
-            let const_json_value =
-                if let Ok(number) = try_parse_str_as_json_number(coded_const_value) {
-                    number
-                } else {
-                    str_to_json_value(coded_const_value, diag_type.base_datatype())?
-                };
-
-            let uds_val = json_value_to_uds_data(&diag_type, None, None, &const_json_value)
-                .inspect_err(|e| {
-                    tracing::error!(
-                        error = ?e,
-                        "Failed to convert CodedConst coded value to UDS data for parameter '{}'",
-                        param.short_name().unwrap_or_default()
-                    );
-                })?;
-
-            diag_type.encode(
-                uds_val,
-                &mut uds,
-                param.byte_position() as usize,
-                param.bit_position() as usize,
-            )?;
+/// Returns the ODX class name of `dop` if it must not be used in a REQUEST.
+///
+/// ISO 22901-1:2008 7.3.6.10.1: "Only STRUCTURE and END-OF-PDU-FIELD are usable
+/// directly or indirectly inside a REQUEST." ASAM MCD-2D ODX 2.2 additionally forbids
+/// an END-OF-PDU-FIELD referencing an ENV-DATA-DESC inside a REQUEST.
+/// DTC-DOPs are simple DOPs and therefore not covered here.
+fn forbidden_request_dop_class(
+    dop: &datatypes::DataOperation,
+) -> Result<Option<&'static str>, DiagServiceError> {
+    Ok(match dop.variant()? {
+        datatypes::DataOperationVariant::StaticField(_) => Some("STATIC-FIELD"),
+        datatypes::DataOperationVariant::DynamicLengthField(_) => Some("DYNAMIC-LENGTH-FIELD"),
+        datatypes::DataOperationVariant::Mux(_) => Some("MUX"),
+        datatypes::DataOperationVariant::EnvDataDesc(_) => Some("ENV-DATA-DESC"),
+        datatypes::DataOperationVariant::EnvData(_) => Some("ENV-DATA"),
+        datatypes::DataOperationVariant::EndOfPdu(end_of_pdu)
+            if end_of_pdu
+                .field()
+                .is_some_and(|f| f.env_data_desc().is_some()) =>
+        {
+            Some("END-OF-PDU-FIELD referencing an ENV-DATA-DESC")
         }
-    }
+        _ => None,
+    })
+}
 
-    Ok(uds)
+fn forbidden_in_request_error(class: &str, param: &datatypes::Parameter) -> DiagServiceError {
+    DiagServiceError::InvalidDatabase(format!(
+        "Parameter '{}' references a {class}, which is not allowed in a REQUEST (ISO 22901-1:2008 \
+         7.3.6.10.1)",
+        param.short_name().unwrap_or_default()
+    ))
+}
+
+/// Rejects DOPs that ODX does not allow inside a REQUEST, see
+/// [`forbidden_request_dop_class`].
+fn reject_dop_forbidden_in_request(
+    dop: &datatypes::DataOperation,
+    param: &datatypes::Parameter,
+) -> Result<(), DiagServiceError> {
+    match forbidden_request_dop_class(dop)? {
+        Some(class) => Err(forbidden_in_request_error(class, param)),
+        None => Ok(()),
+    }
+}
+
+/// Absolute byte position of a top-level request param. Without
+/// BYTE-POSITION the param follows the data encoded so far.
+fn effective_byte_pos(param: &datatypes::Parameter, uds: &[u8]) -> usize {
+    if param.has_byte_position() {
+        param.byte_position() as usize
+    } else {
+        uds.len()
+    }
+}
+
+/// Builds a request from caller-provided raw bytes.
+///
+/// The raw bytes replace all non-constant params. CODED-CONSTs before the
+/// first non-constant param (in database order) and all positioned
+/// CODED-CONSTs form the header in front of the raw bytes. CODED-CONSTs
+/// without BYTE-POSITION after it follow the raw bytes.
+fn encode_raw_payload(
+    mapped_params: &[datatypes::Parameter],
+    raw: Vec<u8>,
+    uds: &mut Vec<u8>,
+) -> Result<(), DiagServiceError> {
+    let first_non_const = mapped_params
+        .iter()
+        .position(|p| p.specific_data_as_coded_const().is_none())
+        .unwrap_or(mapped_params.len());
+
+    let (trailing, header): (Vec<_>, Vec<_>) = mapped_params
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.specific_data_as_coded_const().is_some())
+        .partition(|(i, p)| *i > first_non_const && !p.has_byte_position());
+
+    for (_, param) in header {
+        let base = if param.has_byte_position() {
+            0
+        } else {
+            uds.len()
+        };
+        encode_coded_const(param, uds, base)?;
+    }
+    uds.extend(raw);
+    for (_, param) in trailing {
+        let pos = uds.len();
+        encode_coded_const(param, uds, pos)?;
+    }
+    Ok(())
+}
+
+/// Encodes a CODED-CONST param at `base_byte_pos + BYTE-POSITION`.
+fn encode_coded_const(
+    param: &datatypes::Parameter,
+    uds: &mut Vec<u8>,
+    base_byte_pos: usize,
+) -> Result<(), DiagServiceError> {
+    let coded_const = param.specific_data_as_coded_const().ok_or_else(|| {
+        DiagServiceError::InvalidDatabase(format!(
+            "Param '{}' is not a CodedConst",
+            param.short_name().unwrap_or_default()
+        ))
+    })?;
+    let diag_type: datatypes::DiagCodedType = coded_const
+        .diag_coded_type()
+        .and_then(|t| {
+            let type_: Option<datatypes::DiagCodedType> = t.try_into().ok();
+            type_
+        })
+        .ok_or(DiagServiceError::InvalidDatabase(format!(
+            "Param '{}' is missing DiagCodedType",
+            param.short_name().unwrap_or_default()
+        )))?;
+    let coded_const_value = coded_const
+        .coded_value()
+        .ok_or(DiagServiceError::InvalidDatabase(format!(
+            "Param '{}' is missing coded value",
+            param.short_name().unwrap_or_default()
+        )))?;
+
+    let const_json_value = if let Ok(number) = try_parse_str_as_json_number(coded_const_value) {
+        number
+    } else {
+        str_to_json_value(coded_const_value, diag_type.base_datatype())?
+    };
+
+    let uds_val = json_value_to_uds_data(
+        &diag_type,
+        None,
+        None,
+        &const_json_value,
+        BinaryEncoding::Hex,
+    )
+    .inspect_err(|e| {
+        tracing::error!(
+            error = ?e,
+            "Failed to convert CodedConst coded value to UDS data for parameter '{}'",
+            param.short_name().unwrap_or_default()
+        );
+    })?;
+
+    diag_type.encode(
+        uds_val,
+        uds,
+        base_byte_pos.saturating_add(param.byte_position() as usize),
+        param.bit_position() as usize,
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    fn hex_param_map(values: HashMap<String, serde_json::Value>) -> UdsPayloadData {
+        UdsPayloadData::ParameterMap(values, BinaryEncoding::Hex)
+    }
+
     use cda_interfaces::{
         PayloadDecoder, PayloadEncoder, diagservices::UdsPayloadData, service_ids, util::std_ext,
     };
-    use cda_plugin_security::DefaultSecurityPluginData;
+    use cda_plugin_security::{DefaultSecurityPluginData, mock::StrictRawTestSecurityPlugin};
     use serde_json::json;
 
     use super::*;
     use crate::diag_kernel::test_utils::ecu_manager_builder::{
+        ForbiddenRequestDop, create_ecu_manager_with_coded_const_in_struct_service,
         create_ecu_manager_with_end_pdu_request_service,
+        create_ecu_manager_with_forbidden_request_dop,
         create_ecu_manager_with_length_key_request_service,
         create_ecu_manager_with_multiple_routine_control_services,
         create_ecu_manager_with_multiple_write_did_services, create_ecu_manager_with_mux_service,
@@ -1051,8 +1076,10 @@ mod tests {
         create_ecu_manager_with_phys_const_structure_dop_service,
         create_ecu_manager_with_phys_const_text_table_service,
         create_ecu_manager_with_struct_service,
+        create_ecu_manager_with_trailing_coded_const_after_leading_length_service,
         create_ecu_manager_with_trailing_param_after_param_length_info_service,
         create_ecu_manager_with_value_default_text_table_service,
+        create_ecu_manager_with_write_did_services_and_plugin,
     };
 
     macro_rules! skip_sec_plugin {
@@ -1072,15 +1099,15 @@ mod tests {
         }
     }
 
-    async fn test_mux_from_and_to_uds(
+    async fn test_mux_from_uds_and_rejected_to_uds(
         ecu_manager: super::super::ecumanager::EcuManager<DefaultSecurityPluginData>,
         service: &cda_interfaces::DiagComm,
         sid: u8,
-        data: &Vec<u8>,
+        data: &[u8],
         mux_1_json: serde_json::Value,
     ) {
         let response = ecu_manager
-            .convert_from_uds(service, &create_payload(data.clone()), true, None)
+            .convert_from_uds(service, &create_payload(data.to_owned()), true, None)
             .await
             .unwrap();
 
@@ -1094,28 +1121,23 @@ mod tests {
         };
 
         assert_eq!(
-            response.serialize_to_json().unwrap().data,
+            response
+                .serialize_to_json(cda_interfaces::BinaryEncoding::Hex)
+                .unwrap()
+                .data,
             expected_response_json
         );
 
-        let payload_data =
-            UdsPayloadData::ParameterMap(serde_json::from_value(mux_1_json).unwrap());
-        let mut service_payload = ecu_manager
+        // MUX is not allowed in a REQUEST (ISO 22901-1:2008 7.3.6.10.1)
+        let payload_data = hex_param_map(serde_json::from_value(mux_1_json).unwrap());
+        let err = ecu_manager
             .create_uds_payload(service, &skip_sec_plugin!(), Some(payload_data), None)
             .await
-            .unwrap();
-        if let Some(byte) = service_payload.data.get_mut(1)
-            && let Some(&val) = data.get(1)
-        {
-            *byte = val;
-        }
-        if let Some(byte) = service_payload.data.get_mut(4)
-            && let Some(&val) = data.get(4)
-        {
-            *byte = val;
-        }
-
-        assert_eq!(*service_payload.data, *data);
+            .unwrap_err();
+        assert!(
+            matches!(&err, DiagServiceError::InvalidDatabase(msg) if msg.contains("MUX")),
+            "{err:?}"
+        );
     }
 
     async fn validate_struct_payload(struct_byte_pos: u32) {
@@ -1128,7 +1150,7 @@ mod tests {
             "param3": "test"
         });
 
-        let payload_data = UdsPayloadData::ParameterMap(
+        let payload_data = hex_param_map(
             [("main_param".to_string(), test_value)]
                 .into_iter()
                 .collect(),
@@ -1179,7 +1201,7 @@ mod tests {
             "param1": 0x1234
         });
 
-        let payload_data = UdsPayloadData::ParameterMap(
+        let payload_data = hex_param_map(
             [("main_param".to_string(), test_value)]
                 .into_iter()
                 .collect(),
@@ -1204,7 +1226,7 @@ mod tests {
 
         let test_value = json!([1, 2, 3]);
 
-        let payload_data = UdsPayloadData::ParameterMap(
+        let payload_data = hex_param_map(
             [("main_param".to_string(), test_value)]
                 .into_iter()
                 .collect(),
@@ -1232,7 +1254,7 @@ mod tests {
             "param3": "test"
         });
 
-        let payload_data = UdsPayloadData::ParameterMap(
+        let payload_data = hex_param_map(
             [("main_param".to_string(), test_value)]
                 .into_iter()
                 .collect(),
@@ -1251,111 +1273,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_map_mux_to_uds_with_default_case() {
-        async fn test_default(
-            ecu_manager: &super::super::ecumanager::EcuManager<DefaultSecurityPluginData>,
-            service: &cda_interfaces::DiagComm,
-            test_value: serde_json::Value,
-            select_value: u16,
-            sid: u8,
-        ) {
-            let payload_data =
-                UdsPayloadData::ParameterMap(serde_json::from_value(test_value).unwrap());
-
-            let service_payload = ecu_manager
-                .create_uds_payload(service, &skip_sec_plugin!(), Some(payload_data), None)
-                .await
-                .unwrap();
-
-            assert_eq!(service_payload.data.first().copied(), Some(sid));
-            assert_eq!(service_payload.data.get(1).copied(), Some(0));
-
-            assert_eq!(
-                service_payload.data.get(2).copied(),
-                Some(((select_value >> 8) & 0xFF) as u8)
-            );
-            assert_eq!(
-                service_payload.data.get(3).copied(),
-                Some((select_value & 0xFF) as u8)
-            );
-
-            assert_eq!(service_payload.data.get(4).copied(), Some(0x42));
-        }
-
-        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service_and_default_case();
-        let with_selector = json!({
-            "mux_1_param": {
-                "Selector": 0xffff,
-                "default_case": {
-                    "default_structure_param_1": 0x42,
-                }
-            },
-        });
-
-        let without_selector = json!({
-            "mux_1_param": {
-                "default_case": {
-                    "default_structure_param_1": 0x42,
-                }
-            },
-        });
-
-        test_default(&ecu_manager, &service, with_selector, 0xFFFF, sid).await;
-        test_default(&ecu_manager, &service, without_selector, 0, sid).await;
-    }
-
-    #[tokio::test]
-    async fn test_map_mux_to_uds_invalid_json_type() {
-        let (ecu_manager, service, _) = create_ecu_manager_with_mux_service(None, None, None);
-
-        let test_value = json!([1, 2, 3]);
-
-        let payload_data = UdsPayloadData::ParameterMap(
-            [("mux_1_param".to_string(), test_value)]
-                .into_iter()
-                .collect(),
-        );
-
-        let result = ecu_manager
-            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data), None)
-            .await;
-
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(
-                e.to_string().contains("Expected value to be object type"),
-                "Expected error message to contain 'Expected value to be object type', but got: \
-                 {e}",
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_map_mux_to_uds_missing_case_data() {
-        let (ecu_manager, service, _) = create_ecu_manager_with_mux_service(None, None, None);
-
-        let test_value = json!({
-            "mux_1_param": {
-                "Selector": 0x0a,
-            },
-        });
-
-        let payload_data =
-            UdsPayloadData::ParameterMap(serde_json::from_value(test_value).unwrap());
-
-        let result = ecu_manager
-            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data), None)
-            .await;
-
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Mux case mux_1_case_1 value not found in json")
-        );
-    }
-
-    #[tokio::test]
     async fn test_phys_const_normal_dop_to_uds() {
         let (ecu_manager, dc, _sid) = create_ecu_manager_with_phys_const_normal_dop_service();
 
@@ -1363,8 +1280,7 @@ mod tests {
             "DID": 61840
         });
 
-        let payload_data =
-            UdsPayloadData::ParameterMap(serde_json::from_value(json_payload).unwrap());
+        let payload_data = hex_param_map(serde_json::from_value(json_payload).unwrap());
 
         let result = ecu_manager
             .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data), None)
@@ -1403,8 +1319,7 @@ mod tests {
             }
         });
 
-        let payload_data =
-            UdsPayloadData::ParameterMap(serde_json::from_value(json_payload).unwrap());
+        let payload_data = hex_param_map(serde_json::from_value(json_payload).unwrap());
 
         let result = ecu_manager
             .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data), None)
@@ -1434,8 +1349,7 @@ mod tests {
             }
         });
 
-        let payload_data =
-            UdsPayloadData::ParameterMap(serde_json::from_value(json_payload).unwrap());
+        let payload_data = hex_param_map(serde_json::from_value(json_payload).unwrap());
 
         let encode_result = ecu_manager
             .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data), None)
@@ -1472,7 +1386,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mux_from_and_to_uds_case_1() {
+    async fn test_mux_from_uds_and_rejected_to_uds_case_1() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
         let param_1_value: f32 = 13.37;
         let param_1_bytes = param_1_value.to_be_bytes();
@@ -1496,11 +1410,11 @@ mod tests {
             },
         });
 
-        test_mux_from_and_to_uds(ecu_manager, &service, sid, &data.to_vec(), mux_1_json).await;
+        test_mux_from_uds_and_rejected_to_uds(ecu_manager, &service, sid, &data, mux_1_json).await;
     }
 
     #[tokio::test]
-    async fn test_mux_from_and_to_uds_case_2() {
+    async fn test_mux_from_uds_and_rejected_to_uds_case_2() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
         #[rustfmt::skip]
         let data = [
@@ -1525,11 +1439,11 @@ mod tests {
             }
         });
 
-        test_mux_from_and_to_uds(ecu_manager, &service, sid, &data.to_vec(), mux_1_json).await;
+        test_mux_from_uds_and_rejected_to_uds(ecu_manager, &service, sid, &data, mux_1_json).await;
     }
 
     #[tokio::test]
-    async fn test_mux_from_and_to_uds_case_3() {
+    async fn test_mux_from_uds_and_rejected_to_uds_case_3() {
         use cda_database::datatypes::{DataType, database_builder::EcuDataBuilder};
 
         let mut db_builder = EcuDataBuilder::new();
@@ -1559,14 +1473,14 @@ mod tests {
             }
         });
 
-        test_mux_from_and_to_uds(ecu_manager, &service, sid, &data.to_vec(), mux_1_json).await;
+        test_mux_from_uds_and_rejected_to_uds(ecu_manager, &service, sid, &data, mux_1_json).await;
     }
 
     #[tokio::test]
     async fn test_length_key_request_to_uds() {
         let (ecu_manager, dc, sid) = create_ecu_manager_with_length_key_request_service();
 
-        let payload_data = UdsPayloadData::ParameterMap(
+        let payload_data = hex_param_map(
             serde_json::from_value(json!({
                 "length_indicator": 4,
                 "value_param": 500
@@ -1586,9 +1500,8 @@ mod tests {
     async fn test_length_key_request_missing_value_fails() {
         let (ecu_manager, dc, _sid) = create_ecu_manager_with_length_key_request_service();
 
-        let payload_data = UdsPayloadData::ParameterMap(
-            serde_json::from_value(json!({"value_param": 500})).unwrap(),
-        );
+        let payload_data =
+            hex_param_map(serde_json::from_value(json!({"value_param": 500})).unwrap());
 
         let result = ecu_manager
             .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data), None)
@@ -1601,9 +1514,8 @@ mod tests {
     async fn test_length_key_param_encode_zero_length() {
         let (ecu_manager, dc, sid) = create_ecu_manager_with_param_length_info_service();
 
-        let payload_data = UdsPayloadData::ParameterMap(
-            serde_json::from_value(json!({"len_key": 0, "var_data": ""})).unwrap(),
-        );
+        let payload_data =
+            hex_param_map(serde_json::from_value(json!({"len_key": 0, "var_data": ""})).unwrap());
 
         let result = ecu_manager
             .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data), None)
@@ -1617,7 +1529,7 @@ mod tests {
     async fn test_length_key_param_encode_nonzero_length() {
         let (ecu_manager, dc, sid) = create_ecu_manager_with_param_length_info_service();
 
-        let payload_data = UdsPayloadData::ParameterMap(
+        let payload_data = hex_param_map(
             serde_json::from_value(json!({"len_key": 3, "var_data": "0xAA 0xBB 0xCC"})).unwrap(),
         );
 
@@ -1634,7 +1546,7 @@ mod tests {
         let (ecu_manager, dc, sid) = create_ecu_manager_with_param_length_info_service();
         let pos_sid = sid.saturating_add(cda_interfaces::UDS_ID_RESPONSE_BITMASK);
 
-        let payload_data = UdsPayloadData::ParameterMap(
+        let payload_data = hex_param_map(
             serde_json::from_value(json!({"len_key": 3, "var_data": "0xAA 0xBB 0xCC"})).unwrap(),
         );
         let encoded = ecu_manager
@@ -1650,8 +1562,51 @@ mod tests {
             .await
             .unwrap();
 
-        let json_out = decoded.serialize_to_json().unwrap().data;
+        let json_out = decoded
+            .serialize_to_json(cda_interfaces::BinaryEncoding::Hex)
+            .unwrap()
+            .data;
         assert_eq!(json_out.get("var_data"), Some(&json!("0xAA 0xBB 0xCC")));
+        assert_eq!(json_out.get("len_key"), Some(&json!(3)));
+    }
+
+    #[tokio::test]
+    async fn test_length_key_param_roundtrip_base64() {
+        let (ecu_manager, dc, sid) = create_ecu_manager_with_param_length_info_service();
+        let pos_sid = sid.saturating_add(cda_interfaces::UDS_ID_RESPONSE_BITMASK);
+
+        let payload_data = UdsPayloadData::ParameterMap(
+            serde_json::from_value(json!({"len_key": 3, "var_data": "qrvM"})).unwrap(),
+            BinaryEncoding::Base64,
+        );
+        let encoded = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data), None)
+            .await
+            .unwrap();
+        assert_eq!(encoded.data, vec![sid, 0x03, 0xAA, 0xBB, 0xCC]);
+
+        // Hex input must be rejected when base64 is selected.
+        let hex_payload = UdsPayloadData::ParameterMap(
+            serde_json::from_value(json!({"len_key": 3, "var_data": "0xAA 0xBB 0xCC"})).unwrap(),
+            BinaryEncoding::Base64,
+        );
+        assert!(
+            ecu_manager
+                .create_uds_payload(&dc, &skip_sec_plugin!(), Some(hex_payload), None)
+                .await
+                .is_err()
+        );
+
+        let response_bytes = vec![pos_sid, 0x03, 0xAA, 0xBB, 0xCC];
+        let decoded = ecu_manager
+            .convert_from_uds(&dc, &create_payload(response_bytes), true, None)
+            .await
+            .unwrap();
+        let json_out = decoded
+            .serialize_to_json(BinaryEncoding::Base64)
+            .unwrap()
+            .data;
+        assert_eq!(json_out.get("var_data"), Some(&json!("qrvM")));
         assert_eq!(json_out.get("len_key"), Some(&json!(3)));
     }
 
@@ -1661,7 +1616,7 @@ mod tests {
             create_ecu_manager_with_trailing_param_after_param_length_info_service();
         let pos_sid = sid.saturating_add(cda_interfaces::UDS_ID_RESPONSE_BITMASK);
 
-        let payload_data = UdsPayloadData::ParameterMap(
+        let payload_data = hex_param_map(
             serde_json::from_value(json!({
                 "len_key": 3,
                 "var_data": "0xAA 0xBB 0xCC",
@@ -1687,7 +1642,10 @@ mod tests {
             .await
             .unwrap();
 
-        let json_out = decoded.serialize_to_json().unwrap().data;
+        let json_out = decoded
+            .serialize_to_json(cda_interfaces::BinaryEncoding::Hex)
+            .unwrap()
+            .data;
         assert_eq!(json_out.get("len_key"), Some(&json!(3)));
         assert_eq!(json_out.get("var_data"), Some(&json!("0xAA 0xBB 0xCC")));
         assert_eq!(
@@ -1699,13 +1657,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_coded_const_in_struct_is_encoded() {
+        let (ecu_manager, dc, sid) = create_ecu_manager_with_coded_const_in_struct_service();
+        let payload_data = hex_param_map(
+            serde_json::from_value(json!({ "main_param": { "value": 0x1234 } })).unwrap(),
+        );
+        let encoded = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data), None)
+            .await
+            .unwrap();
+        assert_eq!(encoded.data, vec![sid, 0xAB, 0x12, 0x34]);
+    }
+
+    #[tokio::test]
+    async fn test_trailing_coded_const_after_leading_length_param() {
+        // 0x1234 instead of 0x0000 ensures the constant is not ORed into bytes 0..2.
+        // A SID without BYTE-POSITION must still be encoded at byte 0.
+        for (trailer, trailer_bytes, sid_without_byte_pos) in [
+            ("0", [0x00, 0x00], false),
+            ("4660", [0x12, 0x34], false),
+            ("0", [0x00, 0x00], true),
+            ("4660", [0x12, 0x34], true),
+        ] {
+            let (ecu_manager, dc, sid) =
+                create_ecu_manager_with_trailing_coded_const_after_leading_length_service(
+                    trailer,
+                    sid_without_byte_pos,
+                );
+            let mut expected = vec![sid, 0x01, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC];
+            expected.extend(trailer_bytes);
+
+            let payload_data =
+                hex_param_map(serde_json::from_value(json!({ "cert": "0xAA 0xBB 0xCC" })).unwrap());
+            let encoded = ecu_manager
+                .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data), None)
+                .await
+                .unwrap();
+            assert_eq!(
+                encoded.data, expected,
+                "trailing coded const must follow the leading-length param \
+                 (sid_without_byte_pos={sid_without_byte_pos})"
+            );
+
+            let raw = UdsPayloadData::Raw(vec![0x00, 0x03, 0xAA, 0xBB, 0xCC]);
+            let encoded = ecu_manager
+                .create_uds_payload(&dc, &skip_sec_plugin!(), Some(raw), None)
+                .await
+                .unwrap();
+            assert_eq!(
+                encoded.data, expected,
+                "trailing coded const must follow raw payload data \
+                 (sid_without_byte_pos={sid_without_byte_pos})"
+            );
+
+            let mut response = vec![
+                sid.saturating_add(cda_interfaces::UDS_ID_RESPONSE_BITMASK),
+                0x01,
+                0x00,
+                0x03,
+                0xAA,
+                0xBB,
+                0xCC,
+            ];
+            response.extend(trailer_bytes);
+            let decoded = ecu_manager
+                .convert_from_uds(&dc, &create_payload(response), true, None)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("decode failed (sid_without_byte_pos={sid_without_byte_pos}): {e}")
+                });
+            let json_out = decoded
+                .serialize_to_json(cda_interfaces::BinaryEncoding::Hex)
+                .unwrap()
+                .data;
+            assert_eq!(json_out.get("challenge"), Some(&json!("0xAA 0xBB 0xCC")));
+
+            // MATCHING-REQUEST-PARAM: the request SID is read from response byte 1,
+            // also when it has no BYTE-POSITION in the request.
+            let decoded = ecu_manager
+                .convert_from_uds(&dc, &create_payload(vec![0x7F, sid, 0x34]), true, None)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "negative response decode failed \
+                         (sid_without_byte_pos={sid_without_byte_pos}): {e}"
+                    )
+                });
+            assert_eq!(
+                decoded.response_type,
+                cda_interfaces::diagservices::DiagServiceResponseType::Negative
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_process_parameter_map_unexpected_params_strict() {
         let (mut ecu_manager, service, _, _) = create_ecu_manager_with_struct_service(1);
         ecu_manager.strict_parameter_validation = true;
 
         let struct_value = json!({"param1": 0x1234u32, "param2": 1.0f32, "param3": "hello"});
         // bogus_param is at the top-level service parameter map, not defined in the service
-        let payload_data = UdsPayloadData::ParameterMap(
+        let payload_data = hex_param_map(
             [
                 ("main_param".to_string(), struct_value),
                 ("bogus_param".to_string(), json!("should be rejected")),
@@ -1735,7 +1787,7 @@ mod tests {
 
         // bogus_nested is inside the struct value, not defined in the struct's sub-params
         let struct_value = json!({"param1": 0x1234u32, "param2": 1.0f32, "param3": "hello", "bogus_nested": "reject me"});
-        let payload_data = UdsPayloadData::ParameterMap(
+        let payload_data = hex_param_map(
             [("main_param".to_string(), struct_value)]
                 .into_iter()
                 .collect(),
@@ -1755,51 +1807,6 @@ mod tests {
         }
     }
 
-    /// Strict mode must reject unexpected keys inside a Mux parameter object.
-    ///
-    /// `map_mux_to_uds` only reads `"Selector"` and the matched case name;
-    /// any extra keys must be rejected when `strict_parameter_validation` is
-    /// enabled, mirroring the behaviour of `map_struct_to_uds` and
-    /// `process_parameter_map`.
-    #[tokio::test]
-    async fn test_map_mux_to_uds_unexpected_params_strict() {
-        let (mut ecu_manager, service, _) = create_ecu_manager_with_mux_service(None, None, None);
-        ecu_manager.strict_parameter_validation = true;
-
-        // Valid mux payload with an extra key "bogus_mux_key" at the mux
-        // object level.  "Selector" and "mux_1_case_1" are the only
-        // legitimate keys for this request.
-        let test_value = json!({
-            "mux_1_param": {
-                "Selector": 5,
-                "mux_1_case_1": {
-                    "mux_1_case_1_param_1": 13.37f32,
-                    "mux_1_case_1_param_2": 7
-                },
-                "bogus_mux_key": "should be rejected"
-            }
-        });
-
-        let payload_data =
-            UdsPayloadData::ParameterMap(serde_json::from_value(test_value).unwrap());
-
-        let result = ecu_manager
-            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data), None)
-            .await;
-
-        assert!(
-            result.is_err(),
-            "Expected strict mode to reject unexpected mux-level key 'bogus_mux_key', but the \
-             request succeeded"
-        );
-        if let Err(e) = result {
-            assert!(
-                e.to_string().contains("Unexpected parameters in request"),
-                "Expected 'Unexpected parameters in request' error, got: {e}"
-            );
-        }
-    }
-
     /// Verifies that `map_phys_const_param_to_uds` correctly handles a
     /// `PHYS-CONST` parameter whose `phys_constant_value` is a text-table key
     /// (e.g. "ACTIVE") rather than a numeric literal.
@@ -1815,7 +1822,7 @@ mod tests {
         // No user-provided parameters - the PHYS-CONST "MODE" uses its
         // embedded phys_constant_value "ACTIVE" which maps to coded value 1
         // via the TextTable compu method.
-        let payload_data = UdsPayloadData::ParameterMap(serde_json::from_value(json!({})).unwrap());
+        let payload_data = hex_param_map(serde_json::from_value(json!({})).unwrap());
 
         let result = ecu_manager
             .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data), None)
@@ -1860,7 +1867,7 @@ mod tests {
         // No user-provided parameters - the VALUE param "MODE" uses its
         // embedded physical_default_value "ACTIVE" which should map to coded
         // value 1 via the TextTable compu method.
-        let payload_data = UdsPayloadData::ParameterMap(serde_json::from_value(json!({})).unwrap());
+        let payload_data = hex_param_map(serde_json::from_value(json!({})).unwrap());
 
         let result = ecu_manager
             .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data), None)
@@ -1911,7 +1918,7 @@ mod tests {
         let (ecu_manager, service, sid) =
             create_ecu_manager_with_end_pdu_request_service(2, Some(2));
 
-        let payload_data = UdsPayloadData::ParameterMap(
+        let payload_data = hex_param_map(
             serde_json::from_value(json!({
                 "repeated_items": [
                     { "leading_length_field": "AA" },
@@ -1948,7 +1955,7 @@ mod tests {
         let (ecu_manager, service, sid) =
             create_ecu_manager_with_end_pdu_request_service(1, Some(20));
 
-        let payload_data = UdsPayloadData::ParameterMap(
+        let payload_data = hex_param_map(
             serde_json::from_value(json!({
                 "repeated_items": [
                     { "leading_length_field": "AA" }
@@ -1978,7 +1985,7 @@ mod tests {
         let (ecu_manager, service, _sid) =
             create_ecu_manager_with_end_pdu_request_service(1, Some(1));
 
-        let payload_data = UdsPayloadData::ParameterMap(
+        let payload_data = hex_param_map(
             serde_json::from_value(json!({
                 "repeated_items": [
                     { "leading_length_field": "AA" },
@@ -1996,6 +2003,45 @@ mod tests {
             result.is_err(),
             "Expected an error when providing more items than max_number_of_items allows"
         );
+    }
+
+    /// Unmatched raw prefix with the default plugin keeps the `NotFound` behavior.
+    #[tokio::test]
+    async fn test_check_genericservice_unmatched_prefix_default_plugin_not_found() {
+        let ecu_manager =
+            create_ecu_manager_with_write_did_services_and_plugin::<StrictRawTestSecurityPlugin>();
+        let plugin: DynamicPlugin = Box::new(StrictRawTestSecurityPlugin);
+        let result = ecu_manager
+            .check_genericservice(&plugin, vec![0x2E, 0x01, 0xFE])
+            .await;
+        assert!(matches!(result, Err(DiagServiceError::NotFound(_))));
+    }
+
+    /// Unmatched raw prefix with the void plugin keeps the `NotFound` behavior.
+    #[tokio::test]
+    async fn test_check_genericservice_unmatched_prefix_void_plugin_not_found() {
+        let ecu_manager =
+            create_ecu_manager_with_write_did_services_and_plugin::<StrictRawTestSecurityPlugin>();
+        let result = ecu_manager
+            .check_genericservice(&skip_sec_plugin!(), vec![0x2E, 0x01, 0xFE])
+            .await;
+        assert!(matches!(result, Err(DiagServiceError::NotFound(_))));
+    }
+
+    /// A plugin allowing the raw request lets it pass without state transitions.
+    #[tokio::test]
+    async fn test_check_genericservice_unmatched_prefix_permissive_plugin_ok() {
+        use cda_plugin_security::mock::TestSecurityPlugin;
+        let ecu_manager =
+            create_ecu_manager_with_write_did_services_and_plugin::<TestSecurityPlugin>();
+        let plugin: DynamicPlugin = Box::new(TestSecurityPlugin);
+        let payload = ecu_manager
+            .check_genericservice(&plugin, vec![0x2E, 0x01, 0xFE])
+            .await
+            .expect("permissive plugin must allow raw request");
+        assert_eq!(payload.data, vec![0x2E, 0x01, 0xFE]);
+        assert!(payload.new_session.is_none());
+        assert!(payload.new_security.is_none());
     }
 
     /// Regression test for `check_genericservice` incorrectly matching services
@@ -2146,5 +2192,84 @@ mod tests {
             "Error message should not reference the unrelated service '{unrestricted_name}', got: \
              {err_msg}"
         );
+    }
+
+    async fn assert_forbidden_in_request(
+        ecu_manager: &super::super::ecumanager::EcuManager<DefaultSecurityPluginData>,
+        service: &cda_interfaces::DiagComm,
+        value: serde_json::Value,
+        class: &str,
+    ) {
+        let payload_data = hex_param_map(serde_json::from_value(value).unwrap());
+        let err = ecu_manager
+            .create_uds_payload(service, &skip_sec_plugin!(), Some(payload_data), None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, DiagServiceError::InvalidDatabase(msg)
+                if msg.contains(class) && msg.contains("not allowed in a REQUEST")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dops_forbidden_in_request_are_rejected() {
+        for (kind, class) in [
+            (ForbiddenRequestDop::StaticField, "STATIC-FIELD"),
+            (
+                ForbiddenRequestDop::DynamicLengthField,
+                "DYNAMIC-LENGTH-FIELD",
+            ),
+            (ForbiddenRequestDop::EnvDataDesc, "ENV-DATA-DESC"),
+            (ForbiddenRequestDop::EnvData, "ENV-DATA"),
+            (
+                ForbiddenRequestDop::EndOfPduWithEnvDataDesc,
+                "END-OF-PDU-FIELD referencing an ENV-DATA-DESC",
+            ),
+        ] {
+            let (ecu_manager, service) = create_ecu_manager_with_forbidden_request_dop(kind, false);
+            // with a value
+            assert_forbidden_in_request(
+                &ecu_manager,
+                &service,
+                json!({"forbidden": [{"val": 1}]}),
+                class,
+            )
+            .await;
+            // without a value the DOP class is reported, not a missing parameter
+            assert_forbidden_in_request(&ecu_manager, &service, json!({}), class).await;
+
+            // nested in a STRUCTURE
+            let (ecu_manager, service) = create_ecu_manager_with_forbidden_request_dop(kind, true);
+            assert_forbidden_in_request(
+                &ecu_manager,
+                &service,
+                json!({"outer": {"forbidden": [{"val": 1}]}}),
+                class,
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mux_in_request_is_rejected() {
+        let (ecu_manager, service, _) = create_ecu_manager_with_mux_service(None, None, None);
+        assert_forbidden_in_request(
+            &ecu_manager,
+            &service,
+            json!({"mux_1_param": {"Selector": 5}}),
+            "MUX",
+        )
+        .await;
+        assert_forbidden_in_request(&ecu_manager, &service, json!({}), "MUX").await;
+
+        let (ecu_manager, service, _) = create_ecu_manager_with_mux_service_and_default_case();
+        assert_forbidden_in_request(
+            &ecu_manager,
+            &service,
+            json!({"mux_1_param": {"default_case": {"default_structure_param_1": 0x42}}}),
+            "MUX",
+        )
+        .await;
     }
 }

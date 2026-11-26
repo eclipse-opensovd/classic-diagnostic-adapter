@@ -157,22 +157,35 @@ impl crate::config::ConfigSanity for HttpProtectionConfig {
             HttpProtectionScope::GlobalWithExemptions(routes)
             | HttpProtectionScope::SelectedRoutes(routes) => routes,
         };
-        for route in routes {
-            if !route.prefix.starts_with('/') {
-                return Err(ConfigSanityError::InvalidValue {
-                    field: "scope.routes.prefix".to_owned(),
-                    reason: "must be a nonblank absolute path prefix".to_owned(),
-                });
-            }
-            if route.methods.is_empty() {
-                return Err(ConfigSanityError::InvalidValue {
-                    field: "scope.routes.methods".to_owned(),
-                    reason: "must contain at least one HTTP method".to_owned(),
-                });
-            }
-        }
-        Ok(())
+        validate_routes(routes, "scope.routes")
     }
+}
+
+/// Rejects routes that would widen their scope, reporting errors under `field`.
+///
+/// An empty or relative prefix matches more paths than intended (`""` matches every path),
+/// and a route without methods never matches.
+pub(crate) fn validate_routes(
+    routes: &[HttpRouteMatcher],
+    field: &str,
+) -> Result<(), crate::config::ConfigSanityError> {
+    use crate::config::ConfigSanityError;
+
+    for route in routes {
+        if !route.prefix.starts_with('/') {
+            return Err(ConfigSanityError::InvalidValue {
+                field: format!("{field}.prefix"),
+                reason: "must be a nonblank absolute path prefix".to_owned(),
+            });
+        }
+        if route.methods.is_empty() {
+            return Err(ConfigSanityError::InvalidValue {
+                field: format!("{field}.methods"),
+                reason: "must contain at least one HTTP method".to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Checks whether `path` starts with `prefix` at a path boundary.

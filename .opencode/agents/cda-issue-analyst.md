@@ -34,8 +34,10 @@ permission:
     "gh auth status*": allow
     "opencode mcp list*": allow
     "opencode mcp debug*": allow
-    "cargo test*": allow
-    "cargo check*": allow
+    "make test*": allow
+    "make check*": allow
+    "make integration-test*": allow
+    "make run*": allow
     "cargo tree*": allow
 ---
 

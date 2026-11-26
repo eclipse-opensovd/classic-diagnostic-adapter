@@ -13,6 +13,7 @@
 name = "cda-comm-can"
 version = "0.1.0"
 edition.workspace = true
+rust-version.workspace = true
 publish = false
 description = "CAN bus communication layer used in CDA"
 homepage.workspace = true
@@ -49,6 +50,7 @@ schemars = { workspace = true }
 tokio-socketcan-isotp = { workspace = true, optional = true }
 
 [dev-dependencies]
+cda-interfaces = { workspace = true, features = ["test-utils"] }
 toml = { workspace = true }
 cda-transport-router = { workspace = true }
 

@@ -137,6 +137,7 @@ Entities
 
 .. arch:: Components Entity Collection
     :id: arch~sovd-api-components-entity-collection
+    :links: dimpl~sovd-ecu-last-seen, testset~sovd-api-ecu-last-seen
     :status: draft
 
     The ``/components`` endpoint serves as the entry point for discovering available ECU entities.
@@ -156,10 +157,10 @@ Entities
 
     - The ECU identifier and name
     - Variant information (name, base variant flag, connectivity state, and logical address)
-    - A ``last_seen`` timestamp of the last successful diagnostic contact with the ECU (see
-      :need:`arch~dt-ecu-states`), if the ECU has ever been contacted (either in the current session, or,
-      when loaded from a persisted ECU list, in a previous session)
-    - URI references to the standardized resource collection endpoints: data, operations, configurations, faults, modes, locks, and extension endpoints
+    - A ``last_seen`` timestamp of the last reply of the ECU (see :need:`arch~dt-ecu-states`), if the ECU has
+      ever been contacted (either in the current session, or, when loaded from a persisted ECU list, in a
+      previous session). It is formatted as RFC 3339 in UTC with second precision and omitted if the ECU was never contacted.
+    - URI references to the standardized resource collection endpoints: data, operations, configurations, faults, modes, locks, bulk-data, and extension endpoints
 
     The connectivity state of an ECU reflects its current diagnostic reachability and variant detection status:
 
@@ -211,7 +212,7 @@ SDG/SD Metadata
 
 .. arch:: Component SDG/SDs
     :id: arch~sovd-api-component-sdgsd
-    :links: dimpl~sovd-api-component-sdgsd, dimpl~sovd-api-component-data-sdgsd, dimpl~sovd-api-component-operations-sdgsd, itest~sovd-api-component-sdgsd, itest~sovd-api-component-alias-sdgsd, itest~sovd-api-component-data-sdgsd, itest~sovd-api-component-operations-sdgsd
+    :links: dimpl~sovd-api-component-sdgsd, dimpl~sovd-api-component-data-sdgsd, dimpl~sovd-api-component-operations-sdgsd, testset~sovd-api-component-sdgsd
     :status: draft
 
     Special Data Groups (SDGs) and Special Data (SDs) from the diagnostic description can be retrieved through an
@@ -584,6 +585,11 @@ Configurations -- SID 22\ :sub:`16` & 2E\ :sub:`16`
     .. note::
        ``x-sovd2uds-serviceAbstract`` is an extension to the standard.
 
+    .. note::
+       configuration_write service requests bypass the structured service resolution, the target ECU will receive
+       raw UDS request payload (e.g. ``2E 1234 <payload>``) and is responsible for evaluating whether the
+       payload is valid and whether the operation can be performed.
+
     **Rationale for serviceAbstract**
 
     Coding data files might not include the matching name for a service, or detailed JSON parameters that would
@@ -852,18 +858,188 @@ Authentication -- SID 29\ :sub:`16`
 
 .. arch:: Authentication Endpoints
     :id: arch~sovd-api-authentication-modes
+    :links: testset~sovd-api-authentication-modes
     :status: draft
 
     .. note::
-       This is technically a deviation from Table 343 in the ISO API. The table in the ISO is misleading, since 8.3.2 and 8.3.3 describe them separately.
+       This is technically a deviation from Table 343 in the ISO API. The table in the ISO is misleading, since 8.3.2
+       and 8.3.3 describe them separately. See :doc:`/04_adr/07_uds_authentication_mode`.
 
-    The endpoints are available under ``/modes/authentication``. A ``PUT`` call needs to provide a request body containing
-    ``value`` with the desired subfunction (names are determined by the UDS standard), and a ``parameters`` field containing all request parameters.
+    The endpoints are available under ``/components/{ecu-name}/modes/authentication``. They are not provided
+    for functional groups, since authentication procedures are ECU specific. ``GET /modes`` lists the mode
+    ``authentication`` if the diagnostic database of the ECU contains at least one SID 29\ :sub:`16` service.
 
-    Diagnostic data descriptions have to specify the used services including the subfunction individually, so the
-    request parameters can be converted into UDS payloads.
+    The CDA follows the client-driven approach of ISO 17978-3 §8.3.3: every ``PUT`` is translated into exactly
+    one UDS Authentication request. The client orchestrates multi-step procedures and provides all certificates,
+    challenges and proofs of ownership. The CDA does not store or validate any credentials.
+
+    **GET**
+
+    Returns the authentication state of the ECU as tracked by the CDA:
+
+    .. code-block:: json
+
+       {
+         "id": "authentication",
+         "value": "authenticated",
+         "x-sovd2uds-last-subfunction": "verifyProofOfOwnershipBidirectional",
+         "x-sovd2uds-expires-at": "2026-10-09T12:00:00Z"
+       }
+
+    ``value`` is one of:
+
+    * ``authenticated`` -- the ECU confirmed the authentication.
+    * ``deAuthenticated`` -- the ECU is not authenticated.
+    * ``offline`` -- the ECU cannot be reached.
+
+    ``x-sovd2uds-last-subfunction`` is the last sub-function that resulted in a positive response and is omitted
+    if there was none. ``x-sovd2uds-expires-at`` (ISO 8601 string) is the point in time at which the
+    ``mode_expiration`` elapses and is only present while an expiration is running.
+
+    **PUT**
+
+    The request body contains ``value`` with the sub-function name, an optional ``mode_expiration`` and
+    ``parameters`` with the request parameters:
+
+    .. code-block:: json
+
+       {
+         "value": "verifyProofOfOwnershipBidirectional",
+         "mode_expiration": 3600,
+         "parameters": {
+           "<request parameter short name>": "<value>"
+         }
+       }
+
+    The response body contains ``id``, ``value`` and the decoded response parameters in ``parameters``:
+
+    .. code-block:: json
+
+       {
+         "id": "authentication",
+         "value": "verifyProofOfOwnershipBidirectional",
+         "parameters": {
+           "<response parameter short name>": "<value>"
+         }
+       }
+
+    .. list-table:: Sub-function names (ISO 14229-1 Table 74)
+       :header-rows: 1
+
+       * - ``value``
+         - Sub-function
+         - Procedure
+       * - ``deAuthenticate``
+         - 00\ :sub:`16`
+         - common
+       * - ``verifyCertificateUnidirectional``
+         - 01\ :sub:`16`
+         - PKI certificate exchange
+       * - ``verifyCertificateBidirectional``
+         - 02\ :sub:`16`
+         - PKI certificate exchange
+       * - ``proofOfOwnership``
+         - 03\ :sub:`16`
+         - PKI certificate exchange
+       * - ``transmitCertificate``
+         - 04\ :sub:`16`
+         - PKI certificate exchange
+       * - ``requestChallengeForAuthentication``
+         - 05\ :sub:`16`
+         - challenge-response
+       * - ``verifyProofOfOwnershipUnidirectional``
+         - 06\ :sub:`16`
+         - challenge-response
+       * - ``verifyProofOfOwnershipBidirectional``
+         - 07\ :sub:`16`
+         - challenge-response
+       * - ``authenticationConfiguration``
+         - 08\ :sub:`16`
+         - common
+
+    Names are matched case-insensitively. Unknown names are rejected with HTTP 400.
+
+    **Service resolution**
+
+    The CDA maps the ``value`` to its sub-function byte and selects the SID 29\ :sub:`16` service of the ECU
+    variant whose request contains this sub-function as coded constant. The short name of the service is not
+    evaluated, so no naming convention is required in the diagnostic description. If no matching service
+    exists, the request is rejected with HTTP 404.
+
+    Diagnostic descriptions have to specify each used sub-function as an individual service, so the request
+    parameters can be converted into UDS payloads.
+
+    **Parameters**
+
+    * Keys in ``parameters`` are the short names of the request parameters in the diagnostic description.
+    * Byte fields (certificates, challenges, proofs of ownership, session keys) use the same representation
+      as other raw byte parameters of the SOVD API.
+    * Length fields are calculated by the CDA where the diagnostic description defines them as length keys.
+    * The suppressPosRspMsgIndicationBit is never set, since the CDA needs the response to track the state.
+
+    **Mode expiration**
+
+    The field ``mode_expiration`` is optional. If set, it determines the time in seconds that the authentication
+    should be active, as for the session mode (:need:`arch~sovd-api-session-management`):
+
+    * The expiration starts when the request switches the tracked state to ``authenticated``. For requests that
+      do not switch the state to ``authenticated``, the field has no effect.
+    * Requests with ``value`` ``deAuthenticate`` and a ``mode_expiration`` are rejected with HTTP 400.
+    * When the expiration elapses, the CDA sends ``deAuthenticate`` and sets the tracked state to
+      ``deAuthenticated``. On a negative or missing response a warning is logged and the tracked state stays
+      ``authenticated``, since the ECU may still be unprotected (NRC 5D\ :sub:`16`). The next lock release or ECU
+      cleanup sends ``deAuthenticate`` again.
+    * A running expiration is cancelled by ``deAuthenticate``, lock release or expiry, ECU cleanup, and loss of
+      the connection to the ECU.
+    * A following successful authentication without ``mode_expiration`` cancels a running expiration, with
+      ``mode_expiration`` it restarts it.
+
+    **State tracking**
+
+    The CDA tracks the authentication state per ECU:
+
+    * It is set to ``authenticated`` after a positive response whose ``authenticationReturnParameter``
+      signals that authentication was completed (e.g. ``proofOfOwnership``,
+      ``verifyProofOfOwnershipUnidirectional``, ``verifyProofOfOwnershipBidirectional``, or
+      ``verifyCertificate*`` when no proof of ownership is needed).
+    * It is set to ``deAuthenticated`` after a positive response to ``deAuthenticate``, an ECU reset, or a loss of
+      the connection to the ECU.
+    * A negative response leaves the tracked state and a running expiration unchanged. An authenticated ECU stays
+      authenticated until a new authentication completes or the state is explicitly left
+      (ISO 14229-1 clause 10.6.4).
+
+    While the ECU cannot be reached, ``GET`` reports ``offline``.
+
+    The ECU internal authentication timeout is restarted by every request on the same diagnostic channel,
+    including tester present (ISO 14229-1 clause 10.6.4). The CDA does not track this ECU internal timeout,
+    it is independent of ``mode_expiration``. The tracked state is informational. The ECU remains the authority.
+
+    **Locks and cleanup**
+
+    ``PUT`` is a write operation and requires the lock of the ECU, see :need:`arch~sovd-api-lock-api`.
+    If the tracked state is ``authenticated``, the CDA sends ``deAuthenticate`` before the session and security
+    access are reset when:
+
+    * the lock is released or expires (:need:`arch~sovd-api-lock-expiration`),
+    * the ECU is cleaned up.
+
+    A failed ``deAuthenticate`` is logged and does not prevent the remaining cleanup. The tracked state stays
+    ``authenticated``, so the next lock release or cleanup retries it.
+
+    **Error handling**
+
+    * A negative response of the ECU is returned as HTTP 502 with the NRC in the error parameters, like other
+      services. This includes NRC 34\ :sub:`16` (authenticationRequired) and the authentication specific
+      NRCs 50\ :sub:`16` -- 5D\ :sub:`16`.
+    * NRC 78\ :sub:`16` (responsePending) is handled as described in :need:`arch~uds-nrc-handling`,
+      which covers long running certificate verification.
+    * Lock violations are rejected according to the lock rules (HTTP 409 / 423).
 
     .. uml:: images/authentication.puml
+
+    .. uml:: images/authentication_challenge_response.puml
+
+    .. uml:: images/authentication_cleanup.puml
 
 
 Communication Control -- SID 28\ :sub:`16`
@@ -964,7 +1140,11 @@ Faults -- SID 14\ :sub:`16` & 19\ :sub:`16`
     All values are either boolean values (true/false), or a bit value (0/1).
 
     Additionally, a special key called ``mask`` is available, which takes a hexadecimal mask as a value
-    to allow filtering by the complete status byte. Using other keys together with ``mask`` is not supported.
+    to allow filtering by the complete status byte (e.g. ``29`` or ``0x29``).
+
+    Keys are matched case-insensitively. All selected bits, including the bits of ``mask``, are OR combined
+    into one status mask, so a DTC is returned if any of the selected bits is set. Unknown keys are ignored.
+    If no bit is selected (including a ``mask`` of 0), no filter is applied and all faults are returned.
 
     .. uml:: images/fault_read.puml
 
@@ -1014,7 +1194,10 @@ Locks
     A POST that creates a lock returns HTTP 201 and a relative ``Location`` header for the new
     lock resource. For compatibility with existing CDA clients, POST by the owner of the active
     lock renews that lock and returns HTTP 200 with its representation and no ``Location`` header.
-    This does not create an independent lock resource. Clients should use PUT on
+    This does not create an independent lock resource. If the renewal request contains
+    vendor-specific properties, they replace the lock's metadata after the priority mechanism has
+    evaluated the request (see :need:`arch~sovd-api-lock-priority`); an empty set keeps the
+    existing metadata. Clients should use PUT on
     ``/locks/{lock-id}`` to modify an existing lock's expiration; successful PUT returns HTTP 204.
 
     **Response fields (GET /locks/{id})**
@@ -1022,6 +1205,36 @@ Locks
     ``lock_expiration`` (ISO 8601 string) and ``x-sovd2uds-isexclusive`` (boolean). For defunct
     locks: additionally ``x-sovd2uds-broken-by`` (string), ``x-sovd2uds-broken-at`` (ISO 8601 string), and
     ``x-sovd2uds-current-holder`` (string, the identity of the current lock holder).
+
+
+.. arch:: ECU Lock Connectivity Check
+    :id: arch~sovd-api-lock-ecu-connectivity
+    :status: draft
+
+    Before acquiring or renewing an ECU lock through
+    ``POST /components/{ecu-name}/locks``, the CDA checks the ECU's stored connectivity
+    after lock-priority, vehicle-ownership, and functional-lock conflict checks.
+
+    - If connectivity is ``Online`` or ``AssumedOnline``, lock acquisition proceeds. This check does not require
+      successful variant detection or guarantee that subsequent diagnostic communication succeeds.
+    - If connectivity is ``Offline``, the request returns HTTP 503 with message
+      ``ecu is offline``, ``error_code`` set to ``vendor-specific``, and ``vendor_code``
+      set to ``communication-not-ready``. No ECU lock is created or renewed.
+    - If reading the ECU state fails, the diagnostic error is converted to its corresponding
+      API error rather than reported as an offline ECU. Lookup failures retain their HTTP 404
+      response and diagnostic message; internal failures return HTTP 500.
+
+    On rejection, pending preemption is rolled back and the acquisition reservation is released.
+
+    The check reads a state snapshot; it does not probe the ECU. Connectivity is updated
+    asynchronously by transport events and diagnostic processing, so a recently disconnected
+    ECU may still be reported as online until the disconnect is detected. An ECU can also
+    disconnect after the check succeeds.
+
+    This connectivity requirement applies to ECU-lock POST requests only. It does not add
+    an all-ECUs-online requirement to vehicle or functional-group locks, and does not change
+    the behavior of GET, PUT, or DELETE on existing ECU locks. A disconnect alone does not
+    revoke an existing lock; its normal expiration and deletion rules still apply.
 
 
 .. arch:: Lock Exclusivity
@@ -1171,6 +1384,7 @@ Locks
 .. arch:: Lock Acquisition Policy
     :id: arch~sovd-api-lock-acquisition-policy
     :status: draft
+    :links: dimpl~sovd-api-lock-acquisition-policy, dimpl~sovd-api-lock-acquisition-policy-config, testset~sovd-api-lock-acquisition-policy
 
     The ECU lock POST handler and the functional group lock POST handler each evaluate the
     configured ``lock_acquisition_policy`` before creating the child lock, in addition to
@@ -1213,7 +1427,10 @@ Locks
 
     When a vehicle lock POST request arrives and a lock is already held by a different client,
     the priority mechanism is additionally invoked to evaluate preemption before returning HTTP
-    423.
+    423. A same-owner POST renewal of a vehicle lock is also evaluated, as a ``PostRenew``
+    operation that names the renewed lock; the prior lock, including its metadata, is part of the
+    active-lock snapshot so the mechanism can detect a metadata change and re-evaluate the
+    client's priority. A renewal may be allowed or denied but never preempt other locks.
 
     **Mechanism input**
 
@@ -1249,6 +1466,17 @@ Locks
        function.
     4. A new lock is created for the preempting client and placed in the active slot with
        its own expiration task and cleanup function.
+    5. When the preempted client later acquires a new lock on the same scope, or one whose
+       coverage contains the defunct lock's coverage (always true for a vehicle lock), the
+       defunct entry is removed from the defunct store in the same state transition that
+       inserts the new lock, exactly as a ``DELETE`` on the defunct lock would remove it.
+       Defunct entries of other clients are unaffected, and the ``x-sovd2uds-current-holder``
+       chain of remaining entries is re-linked past the removed one.
+    6. An ECU or functional-group lock request of the preempted client whose coverage
+       overlaps an unexpired defunct lock of that client without containing it is rejected
+       with that defunct lock's HTTP 409 ``lock-broken`` error. The check runs in the
+       acquisition evaluation while the transition reservation is held, before the vehicle
+       lock ownership check, so the defunct store cannot change before the lock is committed.
 
     ``GET /locks`` returns both the active lock and any defunct locks for the entity.
     Defunct lock entries carry ``x-sovd2uds-broken-by``, ``x-sovd2uds-broken-at``, and
@@ -1275,19 +1503,97 @@ Generic Service
 
 .. arch:: Generic Service Endpoint
     :id: arch~sovd-api-generic-service
+    :links: dimpl~sovd-api-generic-service, testset~sovd-api-generic-service
     :status: draft
 
     The ``/genericservice`` endpoint provides raw UDS passthrough functionality, allowing clients to send
     arbitrary UDS requests to an ECU without relying on diagnostic description (MDD) service resolution
-    or parameter encoding.
+    or parameter encoding. ISO 17978-3 defines no such resource, it is a vendor extension.
 
-    The client sends a hex-encoded UDS request in the JSON body, and receives the raw hex-encoded UDS
-    response from the ECU.
+    **Body formats**
+
+    Like every other diagnostic exchange of the SOVD-API (ISO 17978-3 §5.10, Clause 7), request and response
+    are JSON by default. The UDS bytes are a string in the binary encoding selected by the configuration and
+    the ``x-sovd2uds-binary-encoding`` query parameter (see :need:`arch~sovd-api-binary-encoding`):
+
+    .. code-block:: text
+
+       PUT /components/{ecu}/genericservice?x-sovd2uds-binary-encoding=hex
+       Content-Type: application/json
+
+       { "data": "0x22 0xF1 0x90" }
+
+       200 OK
+       Content-Type: application/json
+
+       { "id": "genericservice", "data": "0x62 0xF1 0x90 ..." }
+
+    ISO 17978-3 defines no contract for a raw UDS exchange. The bodies therefore follow the data resources:
+    the bytes are in the field ``data``, like in the request body of writing a data resource, and the
+    response carries the resource ``id`` like ``ReadValue``. ``request`` and ``send`` are accepted as aliases
+    of ``data`` in the request. With the ``hex`` encoding, the response
+    uses the notation of the request. Spaces and commas between the bytes are accepted in the request but
+    not repeated in the response; mixed notations are answered in the default notation:
+
+    .. list-table:: Hex notation
+       :header-rows: 1
+
+       * - Request
+         - Notation
+         - Response
+       * - ``0x22F190``, ``0x22 F1 90``
+         - One leading ``0x``
+         - ``0x62F190...``
+       * - ``22F190``, ``22 F1 90``
+         - No prefix
+         - ``62F190...``
+       * - ``0x22 0xF1 0x90``, raw request with JSON response
+         - ``0x`` per byte (default)
+         - ``0x62 0xF1 0x90 ...``
+
+    To transfer and handle the data efficiently, without encoding and decoding, ``application/octet-stream``
+    can be selected instead to exchange the raw bytes, independently for the request and the response. The
+    headers are evaluated like for the other endpoints supporting both formats (e.g. ``/data``):
+
+    .. list-table:: Format selection
+       :header-rows: 1
+
+       * - Header
+         - Value
+         - Format
+       * - ``Content-Type``
+         - ``application/json`` or missing
+         - JSON request
+       * - ``Content-Type``
+         - ``application/octet-stream``
+         - Raw request bytes
+       * - ``Accept``
+         - missing or ``*/*``
+         - Same format as the request
+       * - ``Accept``
+         - ``application/json`` / ``application/octet-stream``
+         - JSON / raw response
+
+    **Status codes**
+
+    Every ECU response is passed through with ``200 OK``: positive responses, suppressed positive responses
+    (empty) and negative responses (``7F <SID> <NRC>``), i.e. as raw bytes or as
+    ``{ "id": "genericservice", "data": "7F2231" }``.
+    The passthrough does not interpret the response; ``502 Bad Gateway`` would require a SOVD error object
+    describing the NRC. Errors of the CDA itself (e.g. no response, communication failure) are reported as
+    SOVD errors as for the other endpoints.
+
+    Any other ``Content-Type`` or ``Accept``, an invalid or empty request and an undecodable binary value are
+    rejected with ``400 Bad Request`` before anything is sent to the ECU. The binary form is no deviation from
+    ISO 17978-3, since the standard neither defines this resource nor the content types of custom resources.
+
+    **Security**
 
     Permissions for generic service calls can be checked and enforced through the security plugin. Since
     generic service requests bypass the structured service resolution, the security plugin receives the
     raw UDS request payload (e.g. ``22 F1 90``) and is responsible for evaluating whether the authenticated
-    client is authorized to send that specific UDS command to the target ECU.
+    client is authorized to send that specific UDS command to the target ECU. The payload is decoded from
+    the body before, so the plugin is independent of the body format and binary encoding.
 
     .. uml:: images/generic_service.puml
 
@@ -1297,21 +1603,22 @@ Version Endpoint
 
 .. arch:: API Version Endpoint Registration Function
     :id: arch~sovd-api-version-registration-function
-    :links: dimpl~sovd-api-version-endpoint
+    :links: dimpl~sovd-api-version-endpoint, testset~sovd-api-version-endpoint
     :status: draft
 
-    The CDA provides a version registration function that sets up version-related endpoints during
-    initialization.
+    The CDA provides a registrar for version-related endpoints during initialization.
 
     **Registration Function**
 
-    The function accepts the following parameters: ``vendor_name``, ``implementation_version``, ``commit``,
+    The registrar accepts the following parameters: ``vendor_name``, ``implementation_version``, ``commit``,
     ``build_date``.
 
-    It always registers the standard ``/version-info`` endpoint, and optionally registers the default
-    ``/data/version`` and ``/apps/sovd2uds/data/version`` endpoints.
+    A method registers the standard ``/version-info`` endpoint. A separate method registers a version
+    data endpoint at a caller-supplied path. Applications can call it for each optional
+    vendor-specific endpoint, including ``/data/version`` and ``/apps/sovd2uds/data/version``.
+    Both response formats are derived from the same registrar values.
 
-    The fields ``base_uri`` and ``api_version`` are determined by the function.
+    The fields ``base_uri`` and ``api_version`` are determined by the registrar.
 
     **Standard Endpoint: /version-info**
 
@@ -1334,6 +1641,12 @@ Version Endpoint
             ]
         }
 
+    **Version segments**
+
+    The SOVD routes are currently mounted under ``/vehicle/v15``, which is reported in ``sovd_info``
+    with ``version`` ``1.1.0``. The standard's ``v1`` version identifier and configurable base URI
+    are tracked in `issue #181 <https://github.com/eclipse-opensovd/classic-diagnostic-adapter/issues/181>`_.
+
     **Optional Vendor-Specific Endpoints: /data/version, /apps/sovd2uds/data/version**
 
     When enabled, these endpoints are registered as static data endpoints returning:
@@ -1355,12 +1668,17 @@ Version Endpoint
             }
         }
 
-    Both endpoint types are available immediately after the HTTP server starts and do not require
-    any ECU communication.
+    The default version endpoints are available immediately after the HTTP server starts, do not
+    require any ECU communication, and stay accessible while a runtime update is running. Custom
+    data paths must be configured separately to remain accessible during global HTTP protections.
+
+    The vendor-specific endpoints are registered as static data endpoints with the data category
+    ``identData``. Registering a static data endpoint also lists it in its ``data`` collection
+    (``/data`` or ``/apps/sovd2uds/data``), so endpoints added at runtime, e.g. by an embedding
+    application, are listed as well. Resources served by other routes, like
+    ``/apps/sovd2uds/data/networkstructure`` (``sysInfo``), are registered for listing separately.
 
     .. uml:: images/version_registration.puml
-
-    .. note:: The current implementation only registers ``/data/version`` and ``/apps/sovd2uds/data/version``
 
 Error Codes & Messages
 ----------------------

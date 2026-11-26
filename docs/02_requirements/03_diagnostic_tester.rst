@@ -135,6 +135,45 @@ Database Loading
     database files may be inconsistent or corrupted.
 
 
+.. req:: Initial Diagnostic Database Provisioning
+    :id: req~dt-initial-database-provisioning
+    :links: arch~dt-database-loading, arch~plugin-diagnostic-database-update
+    :status: draft
+
+    The CDA shall support deployments in which the executable and initial MDD files are delivered on a
+    read-only file system while the CDA storage is located on a separate writable file system.
+
+    The MDD decompression configuration shall support the following policies:
+
+    - ``always``: When no active diagnostic database collection exists, the CDA shall provision it from the
+      configured database directory before loading the diagnostic databases. Compressed MDD files shall be
+      decompressed in the new collection. Compressed MDD files introduced by runtime updates shall also be
+      decompressed.
+    - ``never``: Startup shall not create an active collection, and the CDA shall not decompress MDD files while
+      seeding storage or applying updates.
+
+    The following requirements apply whenever storage is provisioned or seeded:
+
+    - The configured database directory shall be treated as a read-only source and shall not be modified.
+    - MDD files containing compressed chunks shall be copied to CDA storage before being decompressed.
+    - MDD files that are already uncompressed shall be copied without modification.
+    - A newly provisioned or seeded collection shall become the source from which the CDA loads its diagnostic
+      databases.
+    - If an active diagnostic database collection already exists, the CDA shall use that collection and
+      shall not provision or seed it again from the configured database directory.
+    - The existence of the active collection, rather than whether it contains any files, shall determine
+      whether provisioning or seeding has already occurred.
+    - Provisioning and seeding shall be atomic. If copying or decompressing any MDD file fails, no partially
+      populated active collection shall become visible, and the source files shall remain unchanged.
+
+    **Rationale**
+
+    Production deployments may deliver the CDA and compressed initial MDD files as part of an immutable
+    system image. Keeping the MDD files compressed reduces image size, while provisioning decompressed copies
+    into writable runtime storage enables memory-efficient read-only memory mapping without modifying the
+    system image.
+
+
 DoIP Gateway Initialization
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -188,11 +227,13 @@ Communication Initialization Mode
       the first-ever startup, or any time after the persisted topology has been cleared, see
       :need:`req~dt-ecu-list-persistence`). Whenever a persisted topology exists, the CDA must instead
       attempt a direct (unicast) DoIP connection to each persisted gateway's known network address,
-      skipping the broadcast VIR step; if a gateway cannot be reached at its persisted address, the CDA
-      must fall back to broadcast-based discovery for that specific gateway, as defined in
-      :need:`req~doip-vehicle-identification`, before marking its ECUs as Offline. This mode requires ECU
-      list persistence to be enabled; it is equivalent to **Always** if persistence is disabled, since no
-      persisted topology can ever exist in that configuration.
+      skipping the broadcast VIR step; for the gateways that cannot be reached at their persisted address
+      or have no usable persisted address, the CDA must fall back to one broadcast-based discovery, as
+      defined in :need:`req~doip-vehicle-identification`, before marking the ECUs of gateways still not
+      found as Offline. This is one VIR for all of these gateways, not one per gateway, since a VIR is a
+      broadcast that every gateway answers. This mode requires ECU list persistence to be enabled; it is
+      equivalent to **Always** if persistence is disabled, since no persisted topology can ever exist in
+      that configuration.
     - **OnDemand** -- DoIP gateway initialization and ECU discovery are postponed until one of the
       following triggers occurs:
 
@@ -200,21 +241,23 @@ Communication Initialization Mode
         communication based on specific conditions (e.g., security unlock, session establishment). This
         triggers a full initialization of all gateways/ECUs at once, applying the same
         persisted-vs-broadcast behavior as **WhenNotPersisted** described above.
-      - **First diagnostic request to a specific ECU** (on-demand initialization) -- if a persisted
-        topology exists, this establishes a connection only to that ECU's gateway (direct reconnect, with
-        broadcast fallback for that gateway alone, as in **WhenNotPersisted**); other persisted gateways
-        remain unconnected until their own first request. If no persisted topology exists, no gateway
-        network address is yet known, so this necessarily triggers a full, vehicle-wide VIR broadcast
-        discovering and connecting all gateways at once, since VIR-based discovery is inherently
-        broadcast-based and cannot be scoped to a single ECU.
+      - **First diagnostic request** (on-demand initialization) -- triggers a full initialization of all
+        gateways/ECUs at once, applying the same persisted-vs-broadcast behavior as **WhenNotPersisted**
+        described above.
+
+      Until one of these triggers occurs, no gateway is connected and no VIR is sent.
 
     - **Disabled** -- DoIP gateway initialization and ECU discovery are postponed like in **OnDemand**
       mode, but neither the first-diagnostic-request nor the plugin-API trigger apply. Communication only
       starts once a detection run is explicitly initiated -- typically via the ``networkreset`` operation
       with ``trigger_detection=true`` (see :need:`req~plugin-vehicle-topology-reset-clear-persisted`), but
       a plugin or other custom code may equally initiate a detection run directly. Once triggered, this
-      always initializes all gateways/ECUs at once (there is no per-ECU auto-trigger in this mode),
+      always initializes all gateways/ECUs at once (there is no first-request trigger in this mode),
       applying the same persisted-vs-broadcast behavior as **WhenNotPersisted**.
+
+    The broadcast steps of all modes apply only if the DoIP discovery mode allows a VIR (see
+    :need:`req~doip-discovery-mode`). The use of a persisted topology in these modes applies to DoIP
+    gateways only (see :need:`req~dt-ecu-list-persistence`).
 
     In both **OnDemand** and **Disabled** mode:
 
@@ -236,7 +279,7 @@ Communication Initialization Mode
     API immediately, without generating any vehicle network traffic, until a detection run is explicitly
     initiated (typically via ``networkreset``, but potentially by a plugin or other custom code) -- as
     opposed to **OnDemand** mode, where the first diagnostic request to any ECU implicitly authorizes
-    (at least that ECU's) communication.
+    communication with the whole vehicle.
 
     Distinguishing **Always** from **WhenNotPersisted** avoids leaving the choice between "always
     rebroadcast, but keep tracking state/``last_seen`` across restarts" and "skip rebroadcasting whenever
@@ -249,11 +292,10 @@ Communication Initialization Mode
     offering their own **Always**/**WhenNotPersisted** choice: these modes exist specifically to avoid
     vehicle network traffic until explicitly authorized, so unconditionally rebroadcasting even when a
     persisted topology is already available would be counter to their purpose. Within **OnDemand**, the two
-    triggers intentionally differ in scope: the plugin-API trigger is a deliberate, whole-vehicle "start
-    communication now" signal and must activate every gateway, matching what a plugin expects after an
-    explicit authorization event; the first-diagnostic-request trigger, by contrast, is an implicit,
-    incidental signal tied to one specific ECU, so it should only establish what is strictly needed to
-    serve that request when a persisted topology makes this possible.
+    triggers differ only in what causes them: the plugin-API trigger is a deliberate "start communication
+    now" signal, the first diagnostic request an implicit one. Both start the whole vehicle: once
+    communication is demanded there is no further reason to stay quiet, and a VIR needed for one gateway is
+    a broadcast that every gateway answers anyway, so a start per gateway would only send more VIRs.
 
 
 Post-Update Deferred Communication
@@ -310,7 +352,9 @@ Variant Detection
 
     The following requirements apply:
 
-    - Variant detection must be initiated automatically after startup (unless deferred initialization is enabled)
+    - Variant detection must be initiated automatically after startup (unless deferred initialization is
+      enabled, or the ECU's last known variant is restored from a persisted topology, see
+      :need:`req~dt-ecu-list-persistence`)
     - Variant detection requests must be sent as defined in the MDD variant detection configuration
     - Responses must be evaluated against variant patterns defined in the MDD
     - For ECUs with duplicate definitions (same logical address), variant detection must determine which definition applies
@@ -337,18 +381,20 @@ ECU States
     The following states must be supported:
 
     - **NotTested**: ECU is registered but variant detection has not been performed
-    - **Online**: ECU is reachable and variant has been successfully detected
+    - **Online**: ECU is reachable and variant has been successfully detected, or restored from a persisted
+      ECU list and confirmed reachable by a reply of the ECU (see :need:`req~dt-ecu-list-persistence`)
     - **AssumedOnline**: ECU was known to be Online according to a persisted ECU list (see
       :need:`req~dt-ecu-list-persistence`), but has not yet been contacted in the current session
     - **NoVariantDetected**: ECU is reachable but no matching variant pattern was found (using fallback if enabled)
     - **Duplicate**: ECU shares its logical address with another ECU that was identified as the correct variant; this ECU's database is unloaded
-    - **Offline**: ECU was tested but could not be reached; the ECU has never been successfully online since registration or last re-detection
+    - **Offline**: ECU was tested but could not be reached; the ECU has never been successfully online in the current session since registration or last re-detection
     - **Disconnected**: ECU was previously online but communication has been lost
 
     State transitions must occur as follows:
 
     - Registration --> NotTested
-    - Registration from a persisted ECU list, for an ECU last known to be Online --> AssumedOnline
+    - Registration from a persisted ECU list, for an ECU last known to be Online and not communicating
+      over CAN (see :need:`req~dt-ecu-list-persistence`) --> AssumedOnline
     - NotTested --> Online (successful variant detection)
     - NotTested --> NoVariantDetected (detection failed, fallback enabled)
     - NotTested --> Duplicate (another ECU with same logical address detected as correct variant)
@@ -356,8 +402,10 @@ ECU States
     - Offline --> NotTested (reconnection attempt or explicit re-detection requested)
     - Online --> Disconnected (connection lost)
     - Online --> NotTested (explicit re-detection requested)
-    - AssumedOnline --> Online (successfully contacted, e.g. first diagnostic request or re-detection)
-    - AssumedOnline --> Disconnected (contact attempted but ECU unreachable)
+    - AssumedOnline --> Online (the ECU replied, e.g. to its first diagnostic request or to a re-detection;
+      the restored variant is kept, not re-detected)
+    - AssumedOnline --> Offline (contact attempted but ECU unreachable; the restored variant is discarded,
+      since it was never confirmed in the current session)
     - AssumedOnline --> NotTested (explicit re-detection requested)
     - NoVariantDetected --> Online (successful re-detection)
     - NoVariantDetected --> Duplicate (another ECU with same logical address detected as correct variant)
@@ -370,9 +418,10 @@ ECU States
     :need:`arch~sovd-api-components-entity-collection`).
 
     In addition to the state, the SOVD API must expose a ``last_seen`` timestamp for each ECU, indicating
-    the time of the last successful diagnostic contact with that ECU. This timestamp must be preserved
-    across CDA restarts by persisting it together with the ECU list (see :need:`req~dt-ecu-list-persistence`
-    and :need:`req~dt-ecu-list-persistence-shutdown`).
+    the time of the last UDS message the CDA received from that ECU. For ECUs covered by the persisted ECU
+    list, this timestamp must be preserved across CDA restarts (see :need:`req~dt-ecu-list-persistence`
+    and :need:`req~dt-ecu-list-persistence-shutdown`). For all other ECUs it reflects the current session
+    only.
 
     .. uml::
         :caption: ECU State Chart
@@ -415,8 +464,8 @@ ECU States
         Online --> Disconnected : Connection lost
         Online --> NotTested : Re-detection\nrequested
 
-        AssumedOnline --> Online : Successfully\ncontacted
-        AssumedOnline --> Disconnected : Contact attempted\nbut unreachable
+        AssumedOnline --> Online : ECU\nreplied
+        AssumedOnline --> Offline : Contact attempted\nbut unreachable
         AssumedOnline --> NotTested : Re-detection\nrequested
 
         NoVariantDetected --> Online : Variant\nre-detected
@@ -433,7 +482,7 @@ ECU States
     Explicit state management provides clients with visibility into ECU availability and allows
     appropriate error handling based on the current state. The AssumedOnline state allows the CDA to
     immediately report ECUs as reachable based on prior knowledge (e.g. in
-    :need:`req~dt-deferred-initialization`'s **OnDemand** mode, before its per-ECU trigger has fired) while
+    :need:`req~dt-deferred-initialization`'s **OnDemand** mode, before one of its triggers has fired) while
     still internally tracking that this assumption has not yet been confirmed in the current session. The
     ``last_seen`` timestamp gives clients visibility into how stale that assumption might be, which is
     especially relevant while an ECU remains in the AssumedOnline state.
@@ -452,6 +501,11 @@ ECU List Persistence
 
     The CDA must be able to persist the detected ECU/gateway topology, so that it does not necessarily need
     to re-run full ECU detection (VIR/VAM discovery and variant detection) on every startup.
+
+    The persisted topology covers DoIP gateways and the ECUs reachable through them. ECU list persistence
+    requires the DoIP transport: if DoIP is disabled, it must behave as disabled (see below), even if
+    ``ecu_list_persistence.enabled`` is ``true``. ECUs that communicate over CAN/ISO-TP (e.g. pinned to CAN
+    via a transport override) are never registered in the AssumedOnline state.
 
     This is a core diagnostic-tester capability, usable purely through ``[communication]`` configuration
     (``ecu_list_persistence.enabled``, ``init_mode``); it does not require the Vehicle Topology Plugin (see
@@ -492,6 +546,13 @@ ECU List Persistence
       ``init_mode``, select the applicable startup behavior (see :need:`req~dt-deferred-initialization`)
     - When an ECU is loaded from a persisted topology with a last known state of Online, it must be
       registered in the AssumedOnline state (see :need:`req~dt-ecu-states`) rather than NotTested
+    - A variant restored from the persisted topology is not verified against the ECU: the first reply of
+      the ECU (positive or negative) confirms it as Online with the restored variant, and no variant
+      detection runs for it until one is explicitly requested (see :need:`req~dt-variant-detection`) or a
+      detection run is triggered (e.g. via ``networkreset``, see :need:`req~plugin-vehicle-topology-reset`).
+      Consequently, a variant change that happened while the CDA was not running (e.g. the ECU was flashed
+      by another tester, or is running its boot variant) remains undetected. Deployments where this can
+      occur should use ``init_mode = Always``, or trigger a re-detection after such changes.
     - When the Vehicle Topology Plugin is loaded, it must be possible to clear the persisted topology
       independently of triggering a new detection run (see
       :need:`req~plugin-vehicle-topology-reset-clear-persisted`); this has no observable effect when
@@ -508,6 +569,14 @@ ECU List Persistence
     performing a full VIR/VAM broadcast detection at startup when left unconfigured (see the **Always** vs
     **WhenNotPersisted** distinction in :need:`req~dt-deferred-initialization`).
 
+    The restored variant is trusted on purpose: verifying it would require the same UDS traffic per ECU that
+    persisting the topology is meant to avoid. The ``last_seen`` timestamp tells clients how old the
+    restored information is.
+
+    Persistence is limited to DoIP, where reconnecting to the persisted gateways avoids the VIR/VAM
+    broadcast. On CAN, ECU addresses are static and each ECU is probed individually, so a persisted
+    topology does not save comparable work.
+
 
 ECU List Persistence - Shutdown Update
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -519,16 +588,17 @@ ECU List Persistence - Shutdown Update
 
     In addition to persisting the topology after a detection run (see
     :need:`req~dt-ecu-list-persistence`), the CDA must, as part of a graceful shutdown, update the persisted
-    ``last_seen`` timestamp of each ECU that was contacted since the last time the topology was persisted,
-    so that this information survives a restart. This shutdown update must be skipped entirely when ECU
+    ``last_seen`` timestamp of each ECU in the persisted topology that was contacted since its entry was
+    last persisted, so that this information survives a restart. The update must not create new entries.
+    This shutdown update must be skipped entirely when ECU
     list persistence is disabled (see :need:`req~dt-ecu-list-persistence`).
 
     **Rationale**
 
-    The ``last_seen`` timestamp is updated frequently during normal operation (on every successful
-    diagnostic response), which is not practical to persist and flush on every single occurrence without
+    The ``last_seen`` timestamp is updated frequently during normal operation (on every UDS message
+    received from the ECU), which is not practical to persist and flush on every single occurrence without
     impacting performance and flash wear. Persisting the latest value at shutdown ensures the timestamp
-    surviving a restart is reasonably up to date, without requiring a flush on every diagnostic response.
+    surviving a restart is reasonably up to date, without requiring a flush on every message.
 
 
 Error Handling

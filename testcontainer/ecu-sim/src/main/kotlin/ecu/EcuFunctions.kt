@@ -25,6 +25,10 @@ import networkInstances
 
 private fun generateDefaultEcuState() = EcuState()
 
+internal fun NetworkingData.configureBroadcastAddress(address: String?) {
+    address?.let { broadcastAddress = it }
+}
+
 fun NetworkingData.addDoipEntity(
     name: String,
     logicalAddress: Short,

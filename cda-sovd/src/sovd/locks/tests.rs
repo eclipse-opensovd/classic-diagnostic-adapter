@@ -28,6 +28,7 @@ use cda_interfaces::{
         LockSnapshot,
     },
     mock::MockUdsEcu,
+    util::test_utils::wait_until,
 };
 use cda_plugin_security::{
     AuthApi,
@@ -49,27 +50,9 @@ mod cleanup;
 mod handlers;
 mod lifecycle;
 mod policy;
+mod request_context;
 mod transactions;
 mod validation;
-
-const POLL_INTERVAL: Duration = Duration::from_millis(10);
-const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
-
-async fn wait_until<F, Fut>(description: &str, mut condition: F)
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = bool>,
-{
-    let poll = async {
-        while !condition().await {
-            cda_interfaces::util::tokio_ext::sleep_for(POLL_INTERVAL).await;
-        }
-    };
-    assert!(
-        tokio::time::timeout(WAIT_TIMEOUT, poll).await.is_ok(),
-        "Timed out waiting until {description}"
-    );
-}
 
 async fn await_events(policy: &EventRecordingPolicy, count: usize) {
     wait_until("lock lifecycle events are delivered", || async {
@@ -155,6 +138,7 @@ impl Locks {
             reservation,
             evaluation_id: None,
             policy: Arc::clone(&self.priority_policy),
+            renewal_metadata: None,
         }
     }
 }
@@ -358,6 +342,15 @@ pub(crate) async fn insert_test_ecu_lock(locks: &Locks, ecu_name: &str) {
             .expect("test expiration should be representable"),
         parent_vehicle_lock_id: None,
     };
+    locks.test_insert_active(lock).await;
+}
+
+#[cfg(feature = "doip-direct-connect")]
+pub(crate) async fn insert_test_vehicle_lock(locks: &Locks, subject: &str) {
+    let lock = test_lock("test-vehicle-lock-id")
+        .owner(subject)
+        .vehicle()
+        .build();
     locks.test_insert_active(lock).await;
 }
 

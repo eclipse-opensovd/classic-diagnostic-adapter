@@ -15,6 +15,7 @@ use std::{option::Option, time::SystemTime};
 
 use cda_interfaces::{
     UdsEcu,
+    lock_config::LockAcquisitionPolicy,
     lock_priority_api::{LockId, LockScope},
 };
 use cda_plugin_security::Claims;
@@ -288,18 +289,72 @@ pub(super) fn validate_claim(
     Ok(())
 }
 
+/// Requires the caller to hold the effective vehicle lock.
+///
+/// Used by operations that change the vehicle topology and therefore must not run
+/// while any other client works on the vehicle. Fails with `LockRequired` if no
+/// vehicle lock is held, `Locked` if another client holds it and `LockBroken` if
+/// the caller's vehicle lock was preempted.
+#[cfg(feature = "doip-direct-connect")]
+pub(crate) async fn validate_vehicle_write(
+    claims: &impl Claims,
+    locks: &Locks,
+    include_schema: bool,
+) -> Result<(), ErrorWrapper> {
+    let now = SystemTime::now();
+    locks
+        .core
+        .read_store(|store| {
+            let state = &store.state;
+            if let Some(lock) = state
+                .defunct()
+                .find(|lock| {
+                    lock.original_expires_at > now
+                        && lock.principal.subject == claims.sub()
+                        && lock.scope == ScopeKey::Vehicle
+                })
+                .cloned()
+            {
+                let current_holder = state.current_holder(&lock).to_owned();
+                return Err(ErrorWrapper {
+                    error: lock.broken_error(&current_holder),
+                    include_schema,
+                });
+            }
+            validate_active_locks(
+                claims.sub(),
+                state.active().filter(|lock| {
+                    active_lock_is_effective(state, lock, now) && lock.scope == ScopeKey::Vehicle
+                }),
+                true,
+            )
+            .map_err(|error| ErrorWrapper {
+                error,
+                include_schema,
+            })
+        })
+        .await
+}
+
+/// Validates that an ECU or functional-group lock may be acquired with respect to the
+/// vehicle lock: the configured acquisition policy and blocking by a foreign vehicle lock.
+///
+/// [[ dimpl~sovd-api-lock-acquisition-policy, Child lock acquisition checks the configured vehicle lock precondition, dimpl ]]
 pub(crate) async fn validate_vehicle_owner(
     locks: &Locks,
     claims: &impl Claims,
 ) -> Result<(), ApiError> {
-    let vehicle = locks.active_for_scope(&LockScope::Vehicle).await;
-    if vehicle
-        .as_ref()
-        .is_some_and(|lock| lock.principal.subject != claims.sub())
-    {
-        return Err(ApiError::Conflict(
+    match locks.active_for_scope(&LockScope::Vehicle).await {
+        None if locks.config.lock_acquisition_policy
+            == LockAcquisitionPolicy::VehicleLockRequired =>
+        {
+            Err(ApiError::Conflict(
+                "An active vehicle lock is required to acquire this lock".to_owned(),
+            ))
+        }
+        Some(owned) if owned.principal.subject != claims.sub() => Err(ApiError::Conflict(
             "Vehicle lock is held by another client".to_owned(),
-        ));
+        )),
+        _ => Ok(()),
     }
-    Ok(())
 }

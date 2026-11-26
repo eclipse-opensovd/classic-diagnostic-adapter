@@ -160,6 +160,19 @@ pub trait AuthApi: Send + Sync + 'static {
 /// diagnostic services. It enables fine-grained control over which services
 /// can be executed based on the current security context.
 pub trait SecurityApi: Send + Sync + 'static {
+    /// Validates a fully resolved UDS request immediately before transmission.
+    ///
+    /// # Errors
+    /// Returns [`DiagServiceError::RequestNotAllowed`] when the request must not be transmitted.
+    /// Its `parameters` are returned to the client in the `parameters` of the `403` SOVD error
+    /// response, so they must only contain what the caller may know.
+    fn validate_request_send(
+        &self,
+        _context: &cda_interfaces::request_authorization::UdsRequestSendContext<'_>,
+    ) -> Result<(), DiagServiceError> {
+        Ok(())
+    }
+
     /// Validates whether a diagnostic service can be executed.
     ///
     /// This method is called before executing diagnostic services to ensure
@@ -179,6 +192,22 @@ pub trait SecurityApi: Send + Sync + 'static {
         &self,
         service: &cda_database::datatypes::DiagService,
     ) -> Result<(), DiagServiceError>;
+
+    /// Called by the generic service when no MDD service matches the raw request prefix.
+    ///
+    /// The default implementation rejects the request, which results in the
+    /// same `NotFound` error as if no plugin hook existed. Plugins may override
+    /// this to explicitly allow specific raw requests that have no MDD entry.
+    /// The request is still subject to [`SecurityApi::validate_request_send`]
+    /// before transmission.
+    ///
+    /// # Errors
+    /// Returns [`DiagServiceError::NotFound`] (default) when the raw request is not allowed.
+    fn check_raw_service(&self, bytes: &[u8]) -> Result<(), DiagServiceError> {
+        Err(DiagServiceError::NotFound(format!(
+            "No matching generic service found for request prefix: {bytes:02X?}"
+        )))
+    }
 }
 
 impl AuthApi for Box<dyn AuthApi> {
@@ -505,6 +534,7 @@ pub mod mock {
                 &self,
                 service: &cda_database::datatypes::DiagService<'a>,
             ) -> Result<(), DiagServiceError>;
+            fn check_raw_service(&self, bytes: &[u8]) -> Result<(), DiagServiceError>;
         }
     }
 
@@ -524,6 +554,7 @@ pub mod mock {
                 &self,
                 service: &cda_database::datatypes::DiagService<'a>,
             ) -> Result<(), DiagServiceError>;
+            fn check_raw_service(&self, bytes: &[u8]) -> Result<(), DiagServiceError>;
         }
 
         impl SecurityPlugin for SecurityPlugin {
@@ -584,6 +615,40 @@ pub mod mock {
             _service: &cda_database::datatypes::DiagService<'_>,
         ) -> Result<(), DiagServiceError> {
             Ok(())
+        }
+
+        fn check_raw_service(&self, _bytes: &[u8]) -> Result<(), DiagServiceError> {
+            Ok(())
+        }
+    }
+
+    /// Like [`TestSecurityPlugin`], but keeps the default `check_raw_service`
+    /// behavior (rejecting raw requests without a matching MDD service).
+    #[derive(Clone, Default)]
+    pub struct StrictRawTestSecurityPlugin;
+
+    impl AuthApi for StrictRawTestSecurityPlugin {
+        fn claims(&self) -> Box<&dyn Claims> {
+            Box::new(&TestClaims)
+        }
+    }
+
+    impl SecurityApi for StrictRawTestSecurityPlugin {
+        fn validate_service(
+            &self,
+            _service: &cda_database::datatypes::DiagService<'_>,
+        ) -> Result<(), DiagServiceError> {
+            Ok(())
+        }
+    }
+
+    impl SecurityPlugin for StrictRawTestSecurityPlugin {
+        fn as_auth_plugin(&self) -> &dyn AuthApi {
+            self
+        }
+
+        fn as_security_plugin(&self) -> &dyn SecurityApi {
+            self
         }
     }
 

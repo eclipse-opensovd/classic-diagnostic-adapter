@@ -12,7 +12,8 @@
  */
 
 use std::{
-    sync::Arc,
+    net::IpAddr,
+    sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant},
 };
 
@@ -20,12 +21,13 @@ use async_trait::async_trait;
 use cda_interfaces::{
     DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, FunctionalTransport,
     HashMap, HashMapExtensions, NetworkTopology, PhysicalTransport, RouteStatus, ServicePayload,
-    TransmissionParameters, TransportProbe, TransportResponse, VariantDetectionRequest,
-    VariantDetectionSender,
+    TransmissionParameters, TransportProbe, TransportResponse, VariantDetectionSender,
     communication_control::{
-        GatewayLifecycle, TransportControl, TransportState, error::CommControlError,
+        DoipEndpoint, GatewayLifecycle, TransportControl, TransportState, error::CommControlError,
     },
-    dlt_ctx, pending_nrc_from_raw, uds_response_from_raw,
+    dlt_ctx, pending_nrc_from_raw,
+    topology::{DiscoveryStrategy, KnownGateway, TopologyState, is_physical_gateway},
+    uds_response_from_raw,
     util::{self, tokio_ext},
 };
 use doip_definitions::{
@@ -36,6 +38,10 @@ use doip_definitions::{
     },
 };
 use futures::FutureExt;
+// Ensure mbedtls-rs is considered "used" when the feature is enabled,
+// even if `openssl` is also enabled and takes precedence.
+#[cfg(feature = "mbedtls")]
+use mbedtls_rs as _;
 use tokio::{
     sync::{Mutex, RwLock, broadcast, mpsc},
     task::JoinHandle,
@@ -49,6 +55,8 @@ mod connection_receiver;
 mod connection_sender;
 mod connections;
 mod ecu_connection;
+mod gateway_session;
+mod reconnect;
 pub mod socket;
 mod vir_vam;
 
@@ -56,8 +64,9 @@ mod vir_vam;
 pub(crate) mod test_helpers;
 
 use crate::{
-    config::DoipConfig,
-    connections::{EcuError, GatewayState},
+    config::{DoipConfig, VirSourcePort},
+    connections::{ConnectControl, EcuError},
+    gateway_session::{ConnectFailure, DirectRejection, GatewaySession},
     socket::DoIPUdpSocket,
 };
 
@@ -70,6 +79,40 @@ use crate::{
 /// configuration entry, or a `ComParam` in a future iteration without changing the
 /// surrounding logic.
 const SUPPRESS_POSITIVE_RESPONSE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Settles a started discovery when dropped, unless already settled via
+/// [`finish`](Self::finish). Moved into the task that runs the discovery, so
+/// an aborted task (`stop`) still settles it. Settles as not a full VIR
+/// discovery, since an incomplete run must not be treated as one.
+struct DiscoveryGuard {
+    topology: Arc<TopologyState>,
+    generation: u64,
+    armed: bool,
+}
+
+impl DiscoveryGuard {
+    fn begin(topology: &Arc<TopologyState>) -> Self {
+        Self {
+            topology: Arc::clone(topology),
+            generation: topology.begin_discovery(),
+            armed: true,
+        }
+    }
+
+    fn finish(mut self, full_vir_discovery: bool) {
+        self.armed = false;
+        self.topology
+            .finish_discovery(self.generation, full_vir_discovery);
+    }
+}
+
+impl Drop for DiscoveryGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.topology.finish_discovery(self.generation, false);
+        }
+    }
+}
 
 /// Events received on a `DoIP` connection.
 ///
@@ -93,8 +136,9 @@ enum DiagnosticResponse {
     /// A response to a `DoIP` alive-check request, indicating that the ECU is reachable.
     AliveCheckResponse,
     /// `TesterPresent` NRC - intercepted at the decoding layer so the receiver
-    /// can log-and-drop without routing it to a per-ECU channel.
-    TesterPresentNRC(u8),
+    /// can log it, report it as a reply of the ECU with its source address, and
+    /// drop it without routing it to a per-ECU channel.
+    TesterPresentNRC { source_address: u16, nrc: u8 },
     /// Generic `DoIP` negative acknowledgment, carrying the `GenericNack` struct with the NACK code.
     GenericNack(GenericNack), // todo #22 -> we need the address of the ECU that sent the nack
 }
@@ -124,23 +168,66 @@ pub(crate) struct DoipGatewayState<T: EcuAddresses + DoipComParams> {
     /// `None` until the first successful `start()` binds it. No UDP socket is
     /// created at construction time, only when an authorized activation runs.
     pub(crate) socket: Arc<Mutex<Option<DoIPUdpSocket>>>,
+    /// Network of the tester address (`tester_address` & `tester_subnet`), VAMs
+    /// from outside it are ignored.
     pub(crate) netmask: u32,
+    /// Discovery plan and connected gateways, shared with topology persistence.
+    pub(crate) topology: Arc<TopologyState>,
+    /// Connect state of the current transport start, `None` while stopped.
+    /// Every function that works on a session clones it once and does not read
+    /// this again, so work of an earlier start cannot change the current one.
+    pub(crate) session: Arc<RwLock<Option<Arc<GatewaySession>>>>,
+}
+
+impl<T: EcuAddresses + DoipComParams> DoipGatewayState<T> {
+    /// Whether the gateway `logical_address` has a connection.
+    pub(crate) async fn has_connection(&self, logical_address: u16) -> bool {
+        self.logical_address_to_connection
+            .read()
+            .await
+            .contains_key(&logical_address)
+    }
+
+    /// Address that the connection of the given gateway was made to.
+    pub(crate) async fn connection_ip(&self, logical_address: u16) -> Option<String> {
+        self.doip_connections
+            .read()
+            .await
+            .iter()
+            .find(|connection| connection.ecus.contains_key(&logical_address))
+            .map(|connection| connection.ip.clone())
+    }
 }
 
 /// Owns all connection tasks for one enabled lifecycle so they stop together.
-pub(crate) struct ConnectionTasks(Mutex<Vec<JoinHandle<()>>>);
+/// `None` once shut down: a task pushed afterwards is aborted right away.
+/// A std mutex, so a task is registered in the same synchronous step that spawns it.
+pub(crate) struct ConnectionTasks(StdMutex<Option<Vec<JoinHandle<()>>>>);
 
 impl ConnectionTasks {
     fn new() -> Self {
-        Self(Mutex::new(Vec::new()))
+        Self(StdMutex::new(Some(Vec::new())))
     }
 
-    pub(crate) async fn push(&self, task: JoinHandle<()>) {
-        self.0.lock().await.push(task);
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Vec<JoinHandle<()>>>> {
+        util::std_ext::lock_mutex(&self.0)
+    }
+
+    /// Registers `task`, dropping the handles of finished tasks so the list
+    /// does not grow with every reconnect.
+    pub(crate) fn push(&self, task: JoinHandle<()>) {
+        match self.lock().as_mut() {
+            Some(tasks) => {
+                tasks.retain(|task| !task.is_finished());
+                tasks.push(task);
+            }
+            // E.g. a VAM or fallback connect racing with the transport stop.
+            None => task.abort(),
+        }
     }
 
     async fn shutdown(&self) {
-        let mut tasks = std::mem::take(&mut *self.0.lock().await);
+        let mut tasks = self.lock().take().unwrap_or_default();
         for task in &tasks {
             task.abort();
         }
@@ -152,22 +239,60 @@ impl ConnectionTasks {
             }
         }
     }
+
+    /// Awaits the tasks registered so far without aborting them. For tasks
+    /// that must run to completion, e.g. the commit of a connect.
+    ///
+    /// A task that takes longer than `COMMIT_JOIN_LOG_INTERVAL` is logged and
+    /// awaited further.
+    pub(crate) async fn join_all(&self) {
+        let tasks = std::mem::take(self.lock().get_or_insert_with(Vec::new));
+        for mut task in tasks {
+            let result = loop {
+                match tokio::time::timeout(COMMIT_JOIN_LOG_INTERVAL, &mut task).await {
+                    Ok(result) => break result,
+                    Err(_) => {
+                        tracing::warn!("Still waiting for a DoIP connection commit task to finish");
+                    }
+                }
+            };
+            if let Err(error) = result
+                && error.is_panic()
+            {
+                tracing::error!(%error, "DoIP connection commit task panicked");
+            }
+        }
+    }
 }
 
-async fn spawn_connection_task(
+const COMMIT_JOIN_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Spawns `task` and registers it in one synchronous step, so a caller that
+/// is dropped right afterwards cannot leave a task that `shutdown` misses.
+fn spawn_connection_task(
     connection_tasks: &Arc<ConnectionTasks>,
     name: &str,
     task: impl Future<Output = ()> + Send + 'static,
 ) {
-    let task = cda_interfaces::spawn_named!(name, task);
-    connection_tasks.push(task).await;
+    connection_tasks.push(cda_interfaces::spawn_named!(name, task));
+}
+
+/// Spawns a commit `task` and registers it in one synchronous step. Unlike a
+/// connection task it is never aborted, so it runs to completion even if its
+/// caller is aborted; the transport stop awaits it with `join_all`.
+fn spawn_commit_task(
+    commit_tasks: &Arc<ConnectionTasks>,
+    name: &str,
+    task: impl Future<Output = ()> + Send + 'static,
+) {
+    commit_tasks.push(cda_interfaces::spawn_named!(name, task));
 }
 
 impl Drop for ConnectionTasks {
     fn drop(&mut self) {
         // Best effort cleanup, we cannot await the tasks in
         // here. A user should call 'shutdown' instead of relying on this.
-        for task in self.0.get_mut().drain(..) {
+        for task in self.lock().take().unwrap_or_default() {
             tracing::warn!("DoIP connection tasks dropped without `shutdown`, aborting tasks");
             task.abort();
         }
@@ -182,6 +307,8 @@ impl<T: EcuAddresses + DoipComParams> Clone for DoipGatewayState<T> {
             ecus: Arc::clone(&self.ecus),
             socket: Arc::clone(&self.socket),
             netmask: self.netmask,
+            topology: Arc::clone(&self.topology),
+            session: Arc::clone(&self.session),
         }
     }
 }
@@ -242,12 +369,23 @@ impl DoipGatewayOperation {
 ///
 /// Contains the IP address, ECU name, and logical address obtained from a
 /// `VehicleIdentificationResponse` or `EntityStatusResponse` message.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct DiscoveredGateway {
     pub(crate) ip: String,
     pub(crate) ecu_name: String,
     pub(crate) logical_address: u16,
     pub(crate) doip_protocol_version: ProtocolVersion,
+}
+
+impl From<&DiscoveredGateway> for KnownGateway {
+    fn from(gateway: &DiscoveredGateway) -> Self {
+        Self {
+            name: gateway.ecu_name.clone(),
+            logical_address: gateway.logical_address,
+            network_address: Some(gateway.ip.clone()),
+            doip_protocol_version: Some(u8::from(gateway.doip_protocol_version)),
+        }
+    }
 }
 
 /// Transport-level settings shared across all `DoIP` gateway connections.
@@ -259,6 +397,8 @@ pub(crate) struct DoipTransportConfig {
     pub(crate) tester_ip: String,
     /// TCP port for `DoIP` communication.
     pub(crate) port: u16,
+    /// Local UDP port (or range) VIRs are sent from, see `DoipConfig::vir_source_port`.
+    pub(crate) vir_source_port: VirSourcePort,
     /// TCP port for `DoIP` over TLS communication.
     pub(crate) tls_port: u16,
     /// Whether to send a `DiagnosticMessageAck` upon receiving a `DiagnosticMessage`.
@@ -307,14 +447,57 @@ pub(crate) struct GatewayConnectionConfig {
 }
 
 /// One-shot setup bundle consumed by `connection_handler` when bringing up a new gateway.
-/// Carries `GatewayConnectionConfig` plus the ECU list needed during initial channel creation
-/// and the `ConnectivityHandler` for propagating connection events.
+/// Carries `GatewayConnectionConfig` plus the ECU list needed during initial channel creation,
+/// the `ConnectivityHandler` for propagating connection events, and the [`EcuActivityReporter`] for
+/// the frames the receiver task does not route to an ECU.
 #[derive(Clone)]
 pub(crate) struct GatewaySetup {
     pub(crate) connection: GatewayConnectionConfig,
     pub(crate) ecus: Vec<u16>,
     pub(crate) ecu_names: Vec<String>,
     pub(crate) connectivity_handler: Arc<dyn EcuConnectivityHandler>,
+    pub(crate) variant_detection: VariantDetectionSender,
+    pub(crate) activity_reporter: EcuActivityReporter,
+}
+
+/// Reports UDS frames that the transport receives but does not pass on as the
+/// answer to a request, so that they still count as replies of the ECU.
+///
+/// The reported replies are used to update `last_seen` of the affected ECUs.
+#[derive(Clone)]
+pub(crate) struct EcuActivityReporter {
+    /// Handler notified about the reported replies.
+    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
+    /// Names of the ECUs behind one gateway, by logical address.
+    ecu_names_by_address: Arc<HashMap<u16, Vec<String>>>,
+}
+
+impl EcuActivityReporter {
+    pub(crate) fn new(
+        connectivity_handler: Arc<dyn EcuConnectivityHandler>,
+        ecu_names_by_address: HashMap<u16, Vec<String>>,
+    ) -> Self {
+        Self {
+            connectivity_handler,
+            ecu_names_by_address: Arc::new(ecu_names_by_address),
+        }
+    }
+
+    /// Reports a frame as a reply of `ecu_name`.
+    pub(crate) async fn report_activity_for_ecu_name(&self, ecu_name: &str) {
+        self.connectivity_handler.on_ecu_replied(ecu_name).await;
+    }
+
+    /// Reports a frame from `source_address` as a reply of the ECUs with that
+    /// logical address.
+    pub(crate) async fn report_activity_for_address(&self, source_address: u16) {
+        let Some(ecu_names) = self.ecu_names_by_address.get(&source_address) else {
+            return;
+        };
+        for ecu_name in ecu_names {
+            self.connectivity_handler.on_ecu_replied(ecu_name).await;
+        }
+    }
 }
 
 struct DoipEcu {
@@ -325,6 +508,7 @@ struct DoipEcu {
 struct DoipConnection {
     ecus: HashMap<u16, Arc<Mutex<DoipEcu>>>,
     ip: String,
+    activity: EcuActivityReporter,
 }
 
 impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
@@ -334,8 +518,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     /// and no task is started, so this is safe to call in any `init_mode`.
     ///
     /// # Errors
-    /// Returns `String` if initialization fails, e.g. when the configured
-    /// tester address/subnet cannot be parsed into a netmask.
+    /// Returns an error if the configured tester address or subnet mask is invalid.
     #[tracing::instrument(
         skip(doip_config, ecus, variant_detection, connectivity_handler),
         fields(
@@ -358,6 +541,8 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                 ecus,
                 socket: Arc::new(Mutex::new(None)),
                 netmask: create_netmask(&doip_config.tester_address, &doip_config.tester_subnet)?,
+                topology: TopologyState::new(DiscoveryStrategy::Vir),
+                session: Arc::new(RwLock::new(None)),
             },
             config: doip_config.clone(),
             variant_detection,
@@ -366,15 +551,38 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         })
     }
 
+    fn transport_config(&self) -> DoipTransportConfig {
+        let config = &self.config;
+        DoipTransportConfig {
+            tester_ip: config.tester_address.clone(),
+            port: config.gateway_port,
+            vir_source_port: config.vir_source_port,
+            tls_port: config.tls_port,
+            send_diagnostic_message_ack: config.send_diagnostic_message_ack,
+            send_timeout: Duration::from_millis(config.send_timeout_ms),
+            alive_check_interval: Duration::from_secs(config.alive_check_interval_secs),
+        }
+    }
+
+    /// Shares `topology` with this gateway: its plan selects the discovery on the
+    /// next start, and connected gateways and the end of the initial discovery are
+    /// reported to it.
+    #[must_use]
+    pub fn with_topology_runtime(mut self, topology: Arc<TopologyState>) -> Self {
+        self.state.topology = topology;
+        self
+    }
+
     async fn start(
         &self,
         operation: &mut DoipGatewayOperation,
     ) -> Result<(), DoipGatewaySetupError> {
-        let mut socket_guard = self.state.socket.lock().await;
+        // `start` and `stop` are serialized by the operation lock, so the socket
+        // lock is only held briefly and not while binding (which may retry).
         if operation.cancel.is_some()
             || operation.vam_listener.is_some()
             || operation.connection_tasks.is_some()
-            || socket_guard.is_some()
+            || self.state.socket.lock().await.is_some()
         {
             return Err(DoipGatewaySetupError::InvalidState(
                 "DoIP communication is already running".to_string(),
@@ -382,131 +590,327 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         }
 
         let config = &self.config;
-        let transport_config = DoipTransportConfig {
-            tester_ip: config.tester_address.clone(),
-            port: config.gateway_port,
-            tls_port: config.tls_port,
-            send_diagnostic_message_ack: config.send_diagnostic_message_ack,
-            send_timeout: Duration::from_millis(config.send_timeout_ms),
-            alive_check_interval: Duration::from_secs(config.alive_check_interval_secs),
-        };
-        let mask = self.state.netmask;
+        // Checked here and not at startup, so that communication can be enabled
+        // later (e.g. on demand) while the network interface is not up yet.
+        config
+            .check_tester_address_available()
+            .map_err(|error| DoipGatewaySetupError::InvalidConfiguration(error.to_string()))?;
+
+        let transport_config = self.transport_config();
         let cancel = CancellationToken::new();
         let shutdown = cancel.child_token().cancelled_owned().shared();
         let connection_tasks = Arc::new(ConnectionTasks::new());
         operation.cancel = Some(cancel.clone());
         operation.connection_tasks = Some(Arc::clone(&connection_tasks));
 
-        // TODO(persistence-init-mode): Implement as described in req~dt-ecu-list-persistence
-        let socket = socket_guard.insert(create_udp_vir_socket(
-            &config.tester_address,
-            config.gateway_port,
-        )?);
-        let gateways = vir_vam::get_vehicle_identification::<T, _>(
-            socket,
-            mask,
-            config.gateway_port,
-            &self.state.ecus,
-            shutdown.clone(),
-        )
-        .await
-        .map_err(|error| DoipGatewaySetupError::ResourceError(error.to_string()))?;
-        drop(socket_guard);
+        // Finishes the discovery on every early return, so a failed start does
+        // not leave it running.
+        let discovery = DiscoveryGuard::begin(&self.state.topology);
 
-        let mut gateway_ecu_map: HashMap<u16, Vec<u16>> = HashMap::new();
-        let mut gateway_ecu_name_map: HashMap<u16, Vec<String>> = HashMap::new();
-        for (ecu_name, ecu_lock) in self.state.ecus.iter() {
-            let ecu = ecu_lock.read().await;
-            gateway_ecu_map
-                .entry(ecu.logical_gateway_address())
-                .or_default()
-                .push(ecu.logical_address());
-            gateway_ecu_name_map
-                .entry(ecu.logical_gateway_address())
-                .or_default()
-                .push(ecu_name.clone());
-        }
-        for gateway in gateways {
-            let gateway_name = gateway.ecu_name.clone();
-            let gateway_ecu_names = gateway_ecu_name_map
-                .get(&gateway.logical_address)
-                .cloned()
-                .unwrap_or_default();
-            let variant_detection = self.variant_detection.clone();
-            let transport_config = transport_config.clone();
-            let doip_connections = Arc::clone(&self.state.doip_connections);
-            let logical_address_to_connection =
-                Arc::clone(&self.state.logical_address_to_connection);
-            let gateway_state = GatewayState {
-                doip_connections: Arc::clone(&doip_connections),
-                ecus: Arc::clone(&self.state.ecus),
-                gateway_ecu_map: gateway_ecu_map.clone(),
-                connection_tasks: Arc::clone(&connection_tasks),
-            };
-            let connectivity_handler = Arc::clone(&self.connectivity_handler);
-            spawn_connection_task(
-                &connection_tasks,
-                &format!("doip-gateway-connect-{gateway_name}"),
-                async move {
-                    match connections::handle_gateway_connection::<T>(
-                        gateway,
-                        &transport_config,
-                        &gateway_state,
-                        connectivity_handler,
-                    )
-                    .await
-                    {
-                        Ok(logical_address) => {
-                            let connection_index =
-                                doip_connections.read().await.iter().position(|connection| {
-                                    connection.ecus.contains_key(&logical_address)
-                                });
-                            if let Some(connection_index) = connection_index {
-                                logical_address_to_connection
-                                    .write()
-                                    .await
-                                    .insert(logical_address, connection_index);
-                            }
-                            if let Err(error) = variant_detection
-                                .send(VariantDetectionRequest::new(gateway_ecu_names))
-                                .await
-                            {
-                                tracing::warn!(
-                                    gateway = %gateway_name,
-                                    error = ?error,
-                                    "Failed to trigger variant detection after gateway connection"
-                                );
-                            }
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                gateway = %gateway_name,
-                                error = %error,
-                                "Failed to establish initial gateway connection"
-                            );
-                        }
-                    }
-                },
-            )
-            .await;
-        }
-
-        let listener = vir_vam::listen_for_vams(
+        // Set before anything connects, so every connect and the VAM listener of
+        // this start work on the same session. Also with discovery disabled: a
+        // direct connect registers in it.
+        let session = Arc::new(GatewaySession::new(
             transport_config,
-            mask,
-            self.state.clone(),
             Arc::clone(&connection_tasks),
+            cancel.clone(),
             self.variant_detection.clone(),
             Arc::clone(&self.connectivity_handler),
-            shutdown,
-        )
-        .await;
-        operation.vam_listener = Some(listener);
+            config.discovery,
+        ));
+        *self.state.session.write().await = Some(Arc::clone(&session));
+
+        if !config.discovery.listens_for_vams() {
+            tracing::info!(
+                "DoIP discovery is disabled, no VIR is sent, VAMs are ignored and persisted \
+                 gateways are not reconnected. ECUs have to be connected directly."
+            );
+            discovery.finish(false);
+            return Ok(());
+        }
+
+        let discovery_strategy = self.state.topology.discovery_strategy();
+        let listens_for_vams = self.state.topology.listens_for_vams();
+        // The VIR socket is bound only for the startup VIR broadcast, a reconnect
+        // searches from a socket of its own. A failed bind must never fail
+        // enabling the communication (and with it the CDA startup): without a VIR
+        // socket discovery is skipped, VAMs and direct connects still work.
+        let vir_socket = if matches!(discovery_strategy, DiscoveryStrategy::Vir)
+            && config.discovery.sends_vir()
+        {
+            bind_discovery_vir_socket(config).await
+        } else {
+            None
+        };
+        let vir_port = vir_socket.as_ref().map(|(_, port)| *port);
+        let mut socket_guard = self.state.socket.lock().await;
+        *socket_guard = vir_socket.map(|(socket, _)| socket);
+        // Spontaneous VAMs are sent to the discovery port. Bind its socket before
+        // the VIR is sent, so that responses of gateways that wrongly answer to the
+        // discovery port instead of the VIR source port are queued and handled.
+        let vam_socket = if listens_for_vams {
+            vir_vam::vam_listener_socket(&session.transport_config, vir_port, &self.state.socket)
+        } else {
+            None
+        };
+        match discovery_strategy {
+            DiscoveryStrategy::Vir if !config.discovery.sends_vir() => {
+                drop(socket_guard);
+                tracing::info!("DoIP discovery is VAM only, not broadcasting a VIR");
+                discovery.finish(false);
+            }
+            DiscoveryStrategy::Vir => {
+                let Some(socket) = socket_guard.as_mut() else {
+                    // Already logged by `bind_discovery_vir_socket`; no full discovery.
+                    drop(socket_guard);
+                    discovery.finish(false);
+                    return self
+                        .finish_start(operation, listens_for_vams, vam_socket, &session, shutdown)
+                        .await;
+                };
+                let gateways = vir_vam::get_vehicle_identification::<T, _>(
+                    socket,
+                    self.state.netmask,
+                    config.gateway_port,
+                    &self.state.ecus,
+                    shutdown.clone(),
+                )
+                .await
+                .map_err(|error| DoipGatewaySetupError::ResourceError(error.to_string()))?;
+                drop(socket_guard);
+
+                // No VIR fallback: the gateways were just announced.
+                let connects = self.state.spawn_connects_for_gateways(&session, gateways);
+                let state = self.state.clone();
+                let task_session = Arc::clone(&session);
+                // The connect task finishes the discovery, or its guard does if it is aborted.
+                spawn_connection_task(&connection_tasks, "doip-initial-discovery", async move {
+                    Self::finish_initial_discovery(&state, &task_session, discovery, connects)
+                        .await;
+                });
+            }
+            DiscoveryStrategy::Persisted { known, search } => {
+                drop(socket_guard);
+                let db_gateways = self.db_gateways().await;
+                let plan = reconnect::plan_reconnect(&known, &search, &db_gateways);
+                tracing::info!(
+                    unicast = plan.unicast.len(),
+                    vir = plan.vir_for.len(),
+                    discovery = ?config.discovery,
+                    "Reconnecting to persisted gateways without a full VIR discovery"
+                );
+                // Before the VAM listener starts, so every announcement of a covered
+                // gateway is deferred.
+                session.begin_reconnect(
+                    plan.unicast
+                        .iter()
+                        .map(|gateway| gateway.logical_address)
+                        .chain(plan.vir_for.iter().copied())
+                        .chain(plan.unusable.iter().copied())
+                        .collect(),
+                );
+                let connects = self
+                    .state
+                    .spawn_connects_for_gateways(&session, plan.unicast);
+                let state = self.state.clone();
+                let task_session = Arc::clone(&session);
+                spawn_connection_task(&connection_tasks, "doip-initial-reconnect", async move {
+                    Self::finish_reconnect(
+                        &state,
+                        &task_session,
+                        discovery,
+                        connects,
+                        plan.vir_for,
+                        plan.unusable,
+                    )
+                    .await;
+                });
+            }
+        }
+
+        self.finish_start(operation, listens_for_vams, vam_socket, &session, shutdown)
+            .await
+    }
+
+    /// Starts the spontaneous VAM listener on `vam_socket`, unless
+    /// `vam_handling_mode` disables it or no VAM socket could be bound.
+    async fn finish_start<F>(
+        &self,
+        operation: &mut DoipGatewayOperation,
+        listens_for_vams: bool,
+        vam_socket: Option<Arc<Mutex<Option<DoIPUdpSocket>>>>,
+        session: &Arc<GatewaySession>,
+        shutdown: futures::future::Shared<F>,
+    ) -> Result<(), DoipGatewaySetupError>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        if !listens_for_vams {
+            tracing::info!("Spontaneous VAM listener not started (vam_handling_mode)");
+        } else if let Some(vam_socket) = vam_socket {
+            let listener = vir_vam::listen_for_vams(
+                self.state.clone(),
+                vam_socket,
+                Arc::clone(session),
+                self.variant_detection.clone(),
+                shutdown,
+            )
+            .await;
+            operation.vam_listener = Some(listener);
+        }
+        // Otherwise already logged by `vam_listener_socket`.
         Ok(())
     }
 
+    /// Names of the database ECUs that are their own gateway, keyed by logical
+    /// address (several for duplicate ECUs).
+    async fn db_gateways(&self) -> HashMap<u16, Vec<String>> {
+        let mut by_address: HashMap<u16, Vec<String>> = HashMap::new();
+        for (name, ecu) in self.state.ecus.iter() {
+            let ecu = ecu.read().await;
+            if is_physical_gateway(ecu.logical_address(), ecu.logical_gateway_address()) {
+                by_address
+                    .entry(ecu.logical_address())
+                    .or_default()
+                    .push(name.clone());
+            }
+        }
+        by_address
+    }
+
+    /// Completes the startup VIR discovery: the connects of the announced
+    /// gateways were started by `start`. A gateway whose connect ends
+    /// Connected is recorded at the address it announced, also if a direct
+    /// connect in flight connected it (a direct connect itself is not
+    /// recorded). Then the discovery is marked complete, unless the session was
+    /// cancelled meanwhile: a start that was stopped did not search everything.
+    async fn finish_initial_discovery(
+        state: &DoipGatewayState<T>,
+        session: &GatewaySession,
+        discovery: DiscoveryGuard,
+        connects: Vec<(DiscoveredGateway, gateway_session::PendingConnect)>,
+    ) {
+        for (gateway, connect) in connects {
+            // A cancelled session must not write the shared topology.
+            // A discovery connect recorded the gateway itself already.
+            if connect.wait().await.is_ok()
+                && !session.cancel_token.is_cancelled()
+                && !state.topology.is_connected(gateway.logical_address)
+            {
+                state
+                    .topology
+                    .record_connected(KnownGateway::from(&gateway));
+            }
+        }
+        discovery.finish(!session.cancel_token.is_cancelled());
+    }
+
+    /// Completes a reconnect to persisted gateways: the direct connects were
+    /// started by `start`. Gateways that could not be reached at their persisted
+    /// address (and gateways that must be searched) are searched by one
+    /// VIR search for all of them, instead of one per gateway; the ECUs of
+    /// gateways still not found are reported disconnected. Then the discovery is
+    /// marked complete. Without VIR (`doip.discovery = VamOnly`) nothing is
+    /// searched: the gateways that failed their direct connect and the persisted
+    /// gateways without a usable address (`unusable`) are reported unreachable,
+    /// unless they are connected by then. A connect of one in flight (e.g. by
+    /// its announcement) is waited for first. The failed announcement connects
+    /// held back meanwhile (see `GatewaySession::defer_report`) are decided
+    /// together with the gateways above: reported, unless connected by then.
+    /// [[ dimpl~doip-persisted-reconnect, Reconnect to persisted gateways with VIR fallback, dimpl ]]
+    /// [[ dimpl~doip-reconnect-discovery-mode, The persisted reconnect follows doip.discovery, dimpl ]]
+    async fn finish_reconnect(
+        state: &DoipGatewayState<T>,
+        session: &Arc<GatewaySession>,
+        discovery: DiscoveryGuard,
+        connects: Vec<(DiscoveredGateway, gateway_session::PendingConnect)>,
+        vir_for: cda_interfaces::HashSet<u16>,
+        unusable: cda_interfaces::HashSet<u16>,
+    ) {
+        let attempted: cda_interfaces::HashSet<u16> = connects
+            .iter()
+            .map(|(gateway, _)| gateway.logical_address)
+            .collect();
+        let connected = connected_gateways(connects).await;
+        let mut candidates: cda_interfaces::HashSet<u16> =
+            attempted.difference(&connected).copied().collect();
+        if session.discovery.sends_vir() {
+            candidates.extend(vir_for);
+            if !candidates.is_empty() {
+                let found = Self::search_gateways(state, session, &candidates).await;
+                let connected =
+                    connected_gateways(state.spawn_connects_for_gateways(session, found)).await;
+                candidates.retain(|address| !connected.contains(address));
+            }
+        } else {
+            candidates.extend(unusable);
+        }
+        // Failed announcement connects held back meanwhile are decided here too.
+        candidates.extend(session.end_reconnect());
+        // An announcement may have connected a gateway meanwhile; it is not reported.
+        let mut unreachable = cda_interfaces::HashSet::default();
+        for logical_address in candidates {
+            if !state
+                .is_connected_after_in_flight(session, logical_address)
+                .await
+            {
+                unreachable.insert(logical_address);
+            }
+        }
+        state.report_unreachable(session, unreachable).await;
+        discovery.finish(false);
+    }
+
+    /// The gateways in `wanted` announced in answer to one VIR, sent from an
+    /// ephemeral socket (see [`reconnect::fallback_identification`]). A failure
+    /// is logged and finds nothing; a cancelled session searches nothing.
+    async fn search_gateways(
+        state: &DoipGatewayState<T>,
+        session: &GatewaySession,
+        wanted: &cda_interfaces::HashSet<u16>,
+    ) -> Vec<DiscoveredGateway> {
+        if session.cancel_token.is_cancelled() {
+            return Vec::new();
+        }
+        tracing::info!(
+            gateways = ?wanted,
+            "Searching gateways not reachable at their persisted address by VIR"
+        );
+        let shutdown = session
+            .cancel_token
+            .child_token()
+            .cancelled_owned()
+            .shared();
+        reconnect::fallback_identification(
+            &session.transport_config.tester_ip,
+            session.transport_config.vir_source_port,
+            state.netmask,
+            session.transport_config.port,
+            &state.ecus,
+            wanted,
+            shutdown,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "Fallback vehicle identification failed");
+            Vec::new()
+        })
+    }
+
     async fn stop(&self, operation: &mut DoipGatewayOperation) {
+        // Before the tasks are shut down, so no VAM or fallback connect starts after.
+        // The session is dropped, not reused: the next start creates its own.
+        let session = self.state.session.write().await.take();
+        if let Some(session) = &session {
+            session.cancel_token.cancel();
+        }
         operation.shutdown().await;
+        // The commits are not aborted: one that started before the cancel
+        // finishes, sees the cancel and reverts its own report. Joined before
+        // the maps are cleared, so no commit touches cleared state.
+        if let Some(session) = &session {
+            session.commit_tasks.join_all().await;
+        }
         self.state.socket.lock().await.take();
         self.state.doip_connections.write().await.clear();
         self.state
@@ -596,6 +1000,7 @@ impl<T: EcuAddresses + DoipComParams> PhysicalTransport for DoipDiagGateway<T> {
             target_address: message.target_address.to_be_bytes(),
             message: message.data,
         };
+        let activity = doip_conn.activity.clone();
 
         let handle = cda_interfaces::spawn_named!(
             &format!("ecu-data-receive-{}", transmission_params.ecu_name),
@@ -634,6 +1039,7 @@ impl<T: EcuAddresses + DoipComParams> PhysicalTransport for DoipDiagGateway<T> {
                         &transmission_params.ecu_name,
                         &doip_message,
                         transmission_params.timeout_ack,
+                        &activity,
                     )
                     .await
                     {
@@ -850,13 +1256,132 @@ impl<T: EcuAddresses + DoipComParams> FunctionalTransport for DoipDiagGateway<T>
 
 impl<T: EcuAddresses + DoipComParams> NetworkTopology for DoipDiagGateway<T> {
     async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
-        self.state
-            .doip_connections
+        self.state.connection_ip(logical_address).await
+    }
+}
+
+/// Time a direct connect may take on top of the connect and routing activation
+/// timeouts of the ECU. Covers the TLS handshake, which has no timeout of its own.
+const DIRECT_CONNECT_HEADROOM: Duration = Duration::from_secs(5);
+
+impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
+    /// Connects `ecu_name` to `address` without VIR/VAM discovery, then continues
+    /// like a discovered gateway: routing activation, TLS upgrade, ECU identification.
+    ///
+    /// The connect runs in a task of the current session, so that it is not left
+    /// half done when the caller gives up (client disconnect, HTTP timeout).
+    /// Disabling communication cancels it, without waiting for it.
+    async fn connect_direct(
+        &self,
+        ecu_name: &str,
+        address: IpAddr,
+        protocol_version: u8,
+    ) -> Result<(), DiagServiceError> {
+        let ecu_name = ecu_name.to_lowercase();
+        let protocol_version = ProtocolVersion::try_from(&protocol_version).map_err(|_| {
+            DiagServiceError::InvalidRequest(format!(
+                "Unsupported DoIP protocol version {protocol_version:#04x}"
+            ))
+        })?;
+        let ecu_lock = self
+            .state
+            .ecus
+            .get(&ecu_name)
+            .ok_or_else(|| DiagServiceError::NotFound(format!("ECU {ecu_name} not found")))?;
+        let (logical_address, is_gateway) = {
+            let ecu = ecu_lock.read().await;
+            (ecu.logical_address(), vir_vam::is_gateway(&*ecu))
+        };
+        if !is_gateway {
+            return Err(DiagServiceError::InvalidRequest(format!(
+                "ECU '{ecu_name}' is not a gateway, only gateway ECUs can be connected directly"
+            )));
+        }
+
+        let Some(session) = self
+            .state
+            .session
             .read()
             .await
-            .iter()
-            .find(|conn| conn.ecus.contains_key(&logical_address))
-            .map(|conn| conn.ip.clone())
+            .clone()
+            .filter(|session| !session.cancel_token.is_cancelled())
+        else {
+            return Err(DiagServiceError::CommunicationDisabled(
+                "DoIP communication is not enabled".to_owned(),
+            ));
+        };
+        let control = ConnectControl {
+            cancel: session.cancel_token.clone(),
+            headroom: DIRECT_CONNECT_HEADROOM,
+        };
+        let gateway = DiscoveredGateway {
+            ip: address.to_string(),
+            ecu_name: ecu_name.clone(),
+            logical_address,
+            doip_protocol_version: protocol_version,
+        };
+        let receiver = match self
+            .state
+            .start_direct_connect(&session, gateway, control)
+            .await
+        {
+            Ok(receiver) => receiver,
+            Err(DirectRejection::Connecting) => {
+                return Err(DiagServiceError::Conflict(format!(
+                    "ECU '{ecu_name}' is currently being connected"
+                )));
+            }
+            Err(DirectRejection::Connected) => {
+                let connected_ip = self
+                    .get_gateway_network_address(logical_address)
+                    .await
+                    .unwrap_or_else(|| "an unknown address".to_owned());
+                return Err(DiagServiceError::Conflict(format!(
+                    "ECU '{ecu_name}' is already connected on {connected_ip}"
+                )));
+            }
+        };
+        tracing::info!(
+            ecu_name = %ecu_name,
+            %address,
+            ?protocol_version,
+            "Connecting ECU directly"
+        );
+        let disabled = || {
+            DiagServiceError::CommunicationDisabled(
+                "DoIP communication was disabled while connecting".to_owned(),
+            )
+        };
+        match receiver.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(ConnectFailure::Error(error))) => {
+                tracing::warn!(ecu_name = %ecu_name, %address, %error, "Direct connection failed");
+                Err(error.into())
+            }
+            Ok(Err(ConnectFailure::Cancelled)) => {
+                tracing::warn!(
+                    ecu_name = %ecu_name,
+                    %address,
+                    error = "DoIP communication was disabled while connecting",
+                    "Direct connection failed"
+                );
+                Err(disabled())
+            }
+            Ok(Err(ConnectFailure::TaskEnded)) => {
+                tracing::error!(ecu_name = %ecu_name, "Direct connect task ended without a result");
+                Err(DiagServiceError::ResourceError(format!(
+                    "Connecting ECU '{ecu_name}' failed unexpectedly"
+                )))
+            }
+            // The task ended without a result: aborted by the transport stop.
+            Err(_) if session.cancel_token.is_cancelled() => Err(disabled()),
+            Err(_) => {
+                tracing::error!(ecu_name = %ecu_name, "Direct connect task failed");
+                Err(DiagServiceError::ResourceError(format!(
+                    "Connecting ECU '{ecu_name}' failed unexpectedly"
+                )))
+            }
+        }
     }
 }
 
@@ -893,11 +1418,13 @@ async fn wait_for_ack_or_response_until_timeout(
     ecu_name: &str,
     sent_message: &DiagnosticMessage,
     timeout: Duration,
+    activity: &EcuActivityReporter,
 ) -> Result<Option<DiagnosticResponse>, DiagServiceError> {
     async fn wait_for_ack_or_response(
         receiver: &mut broadcast::Receiver<Result<DiagnosticResponse, EcuError>>,
         ecu_name: &str,
         sent_message: &DiagnosticMessage,
+        activity: &EcuActivityReporter,
     ) -> Result<Option<DiagnosticResponse>, DiagServiceError> {
         loop {
             let response = match receiver.recv().await {
@@ -913,7 +1440,17 @@ async fn wait_for_ack_or_response_until_timeout(
                         "Error while waiting for ACK/NACK, {e}"
                     )));
                 }
-                Err(_) => {
+                // Lagging only drops the oldest messages; the channel is still
+                // open and the ACK may be among the retained ones.
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(
+                        ecu_name = %ecu_name,
+                        skipped,
+                        "ECU receiver lagged while waiting for ACK/NACK, continuing"
+                    );
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => {
                     tracing::error!(
                         ecu_name = %ecu_name,
                         "ECU receiver unexpectedly closed while waiting for ACK/NACK"
@@ -959,6 +1496,11 @@ async fn wait_for_ack_or_response_until_timeout(
                         ?response,
                         "Received response does not match sent message. Ignoring."
                     );
+                    // Not the answer to this request, but still a reply of the ECU:
+                    // the channel of the request's ECU only carries its frames.
+                    if matches!(response, DiagnosticResponse::Msg { .. }) {
+                        activity.report_activity_for_ecu_name(ecu_name).await;
+                    }
                 }
 
                 continue;
@@ -982,7 +1524,7 @@ async fn wait_for_ack_or_response_until_timeout(
 
     if let Ok(result) = tokio::time::timeout(
         timeout,
-        wait_for_ack_or_response(receiver, ecu_name, sent_message),
+        wait_for_ack_or_response(receiver, ecu_name, sent_message, activity),
     )
     .await
     {
@@ -1024,49 +1566,57 @@ async fn read_ecu_responses(
             // because it is unlikely that both fire at the exact same time.
             biased;
             res = receiver.recv() => {
-                if let Ok(res) = res {
-                    match res {
-                        Ok(event) => {
-                            if !try_send_transport_response(
-                                response_sender,
-                                diagnostic_response_to_transport(event),
-                            )
-                            .await
-                            {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                ecu_name = %ecu_name,
-                                error = %e,
-                                "Error while waiting for response message"
-                            );
-                            if !try_send_transport_response(
-                                response_sender,
-                                Err(DiagServiceError::NoResponse(format!(
-                                    "Error while waiting for message, {e}"
-                                ))),
-                            )
-                            .await
-                            {
-                                break;
-                            }
+                match res {
+                    Ok(Ok(event)) => {
+                        if !try_send_transport_response(
+                            response_sender,
+                            diagnostic_response_to_transport(event),
+                        )
+                        .await
+                        {
+                            break;
                         }
                     }
-                } else {
-                    tracing::error!(
-                        ecu_name = %ecu_name,
-                        "ECU receiver unexpectedly closed while waiting for response"
-                    );
-                    try_send_transport_response(
-                        response_sender,
-                        Err(DiagServiceError::NoResponse(
-                            "ECU receiver unexpectedly closed".to_owned(),
-                        )),
-                    )
-                    .await;
-                    break;
+                    Ok(Err(e)) => {
+                        tracing::error!(
+                            ecu_name = %ecu_name,
+                            error = %e,
+                            "Error while waiting for response message"
+                        );
+                        if !try_send_transport_response(
+                            response_sender,
+                            Err(DiagServiceError::NoResponse(format!(
+                                "Error while waiting for message, {e}"
+                            ))),
+                        )
+                        .await
+                        {
+                            break;
+                        }
+                    }
+                    // Lagging only drops the oldest messages; the channel is
+                    // still open, so keep reading the retained ones.
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            ecu_name = %ecu_name,
+                            skipped,
+                            "ECU receiver lagged while waiting for response, continuing"
+                        );
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::error!(
+                            ecu_name = %ecu_name,
+                            "ECU receiver unexpectedly closed while waiting for response"
+                        );
+                        try_send_transport_response(
+                            response_sender,
+                            Err(DiagServiceError::NoResponse(
+                                "ECU receiver unexpectedly closed".to_owned(),
+                            )),
+                        )
+                        .await;
+                        break;
+                    }
                 }
             }
             () = response_sender.closed() => {
@@ -1155,6 +1705,19 @@ async fn wait_for_ecu_response(
     .unwrap_or_default()
 }
 
+/// Waits for `connects` and returns the gateways that ended connected.
+async fn connected_gateways(
+    connects: Vec<(DiscoveredGateway, gateway_session::PendingConnect)>,
+) -> cda_interfaces::HashSet<u16> {
+    let mut connected = cda_interfaces::HashSet::default();
+    for (gateway, connect) in connects {
+        if connect.wait().await.is_ok() {
+            connected.insert(gateway.logical_address);
+        }
+    }
+    connected
+}
+
 fn create_netmask(tester_ip: &str, tester_subnet: &str) -> Result<u32, DoipGatewaySetupError> {
     let ip = tester_ip.parse::<std::net::Ipv4Addr>().map_err(|e| {
         DoipGatewaySetupError::InvalidAddress(format!(
@@ -1170,7 +1733,156 @@ fn create_netmask(tester_ip: &str, tester_subnet: &str) -> Result<u32, DoipGatew
     Ok(ip.to_bits() & subnet.to_bits())
 }
 
-/// Creates a UDP socket for `DoIP` communication.
+/// Binds the VIR socket for the startup VIR broadcast.
+/// Returns the socket and its local port, `None` if the bind failed. A failed bind is logged and never returned as error, so that it
+/// cannot fail enabling the communication (and with it the CDA startup).
+async fn bind_discovery_vir_socket(config: &DoipConfig) -> Option<(DoIPUdpSocket, u16)> {
+    if let Ok(bound) = bind_vir_socket(
+        &config.tester_address,
+        config.vir_source_port,
+        config.gateway_port,
+    )
+    .await
+    {
+        Some(bound)
+    } else {
+        // The bind error itself is logged by `bind_vir_socket`.
+        tracing::error!("No VIR is sent, gateways are only connected by VAMs or directly");
+        None
+    }
+}
+
+/// Number of bind attempts for a single configured VIR source port.
+pub(crate) const VIR_SINGLE_PORT_BIND_ATTEMPTS: u32 = 3;
+/// Delay between bind attempts for a single configured VIR source port.
+pub(crate) const VIR_SINGLE_PORT_BIND_RETRY_DELAY: Duration = Duration::from_millis(200);
+
+/// Binds the VIR socket as configured by `doip.vir_source_port`.
+/// Returns the socket and its local port.
+///
+/// A single port (fixed port or a range of one port) is retried
+/// [`VIR_SINGLE_PORT_BIND_ATTEMPTS`] times, e.g. to bridge a previous instance
+/// that is still releasing it. A range already tries all its ports and `0` lets
+/// the operating system choose, so both are bound once.
+pub(crate) async fn bind_vir_socket(
+    tester_ip: &str,
+    vir_source_port: VirSourcePort,
+    gateway_port: u16,
+) -> Result<(DoIPUdpSocket, u16), DoipGatewaySetupError> {
+    if !vir_source_port.is_in_dynamic_range() {
+        tracing::warn!(
+            %vir_source_port,
+            "doip.vir_source_port is outside the dynamic port range 49152-65535 required by \
+             ISO 13400-2"
+        );
+    }
+    let attempts = match vir_source_port {
+        VirSourcePort::Port(0) => 1,
+        VirSourcePort::Port(_) => VIR_SINGLE_PORT_BIND_ATTEMPTS,
+        VirSourcePort::Range { start, end } if start == end => VIR_SINGLE_PORT_BIND_ATTEMPTS,
+        VirSourcePort::Range { .. } => 1,
+    };
+    let mut attempt = 1;
+    loop {
+        match create_udp_vir_source_socket(tester_ip, vir_source_port, gateway_port) {
+            Ok((socket, vir_port)) => {
+                tracing::info!(tester_ip, vir_port, gateway_port, "Bound VIR socket");
+                return Ok((socket, vir_port));
+            }
+            Err(error) if attempt < attempts => {
+                tracing::warn!(
+                    %vir_source_port,
+                    attempt,
+                    attempts,
+                    %error,
+                    "Failed to bind VIR socket, retrying"
+                );
+                attempt = attempt.saturating_add(1);
+                tokio_ext::sleep_for(VIR_SINGLE_PORT_BIND_RETRY_DELAY).await;
+            }
+            Err(error) => {
+                tracing::error!(
+                    tester_ip,
+                    %vir_source_port,
+                    attempts,
+                    %error,
+                    "Failed to bind VIR socket"
+                );
+                return Err(error);
+            }
+        }
+    }
+}
+
+/// Maps the loopback tester address to the unspecified address so that
+/// broadcasts are received when testing locally.
+fn udp_bind_ip(tester_ip: &str) -> &str {
+    match tester_ip {
+        "127.0.0.1" => "0.0.0.0",
+        _ => tester_ip,
+    }
+}
+
+/// Creates an unbound, non-blocking UDP socket with `SO_BROADCAST` set.
+/// With `reuse`, `SO_REUSEADDR` (and `SO_REUSEPORT` on Unix) are set as well, so
+/// that several sockets can share the `DoIP` discovery port.
+fn new_udp_socket(reuse: bool) -> Result<socket2::Socket, DoipGatewaySetupError> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )
+    .map_err(|e| {
+        DoipGatewaySetupError::SocketCreationFailed(format!(
+            "DoipGateway: Failed to create socket: {e:?}"
+        ))
+    })?;
+
+    if reuse {
+        socket.set_reuse_address(true).map_err(|e| {
+            DoipGatewaySetupError::InvalidAddress(format!(
+                "DoipGateway: Failed to set reuse address: {e:?}"
+            ))
+        })?;
+        #[cfg(target_family = "unix")]
+        socket.set_reuse_port(true).map_err(|e| {
+            DoipGatewaySetupError::PortBindFailed(format!(
+                "DoipGateway: Failed to set reuse port: {e:?}"
+            ))
+        })?;
+    }
+    socket.set_broadcast(true).map_err(|e| {
+        DoipGatewaySetupError::SocketCreationFailed(format!(
+            "DoipGateway: Failed to set broadcast flag on socket: {e:?}"
+        ))
+    })?;
+    socket.set_nonblocking(true).map_err(|e| {
+        DoipGatewaySetupError::InvalidConfiguration(format!(
+            "DoipGateway: Failed to set non-blocking mode: {e:?}"
+        ))
+    })?;
+    Ok(socket)
+}
+
+fn udp_socket_addr(ip: &str, port: u16) -> Result<std::net::SocketAddr, DoipGatewaySetupError> {
+    format!("{ip}:{port}").parse().map_err(|e| {
+        DoipGatewaySetupError::InvalidAddress(format!(
+            "DoipGateway: Failed to create socket addr {ip}:{port}: {e:?}"
+        ))
+    })
+}
+
+fn into_doip_udp_socket(socket: socket2::Socket) -> Result<DoIPUdpSocket, DoipGatewaySetupError> {
+    let std_sock: std::net::UdpSocket = socket.into();
+    DoIPUdpSocket::new(std_sock, ProtocolVersion::DefaultValue).map_err(|e| {
+        DoipGatewaySetupError::SocketCreationFailed(format!(
+            "DoipGateway: Failed to create DoIP socket from std socket: {e:?}"
+        ))
+    })
+}
+
+/// Creates a UDP socket bound to the `DoIP` discovery port, shared with other
+/// sockets via `SO_REUSEADDR`/`SO_REUSEPORT`. Used to receive spontaneous VAMs.
 ///
 /// # Errors
 /// Returns errors when:
@@ -1192,62 +1904,101 @@ pub fn create_udp_vir_socket(
     tester_ip: &str,
     gateway_port: u16,
 ) -> Result<DoIPUdpSocket, DoipGatewaySetupError> {
-    let tester_ip = match tester_ip {
-        "127.0.0.1" => "0.0.0.0",
-        _ => tester_ip,
-    };
-    let broadcast_addr: std::net::SocketAddr =
-        format!("{tester_ip}:{gateway_port}").parse().map_err(|e| {
-            DoipGatewaySetupError::InvalidAddress(format!(
-                "DoipGateway: Failed to create broadcast addr: {e:?}"
-            ))
-        })?;
-
-    let socket = socket2::Socket::new(
-        socket2::Domain::IPV4,
-        socket2::Type::DGRAM,
-        Some(socket2::Protocol::UDP),
-    )
-    .map_err(|e| {
-        DoipGatewaySetupError::SocketCreationFailed(format!(
-            "DoipGateway: Failed to create socket: {e:?}"
-        ))
-    })?;
-
-    socket.set_reuse_address(true).map_err(|e| {
-        DoipGatewaySetupError::InvalidAddress(format!(
-            "DoipGateway: Failed to set reuse address: {e:?}"
-        ))
-    })?;
-    #[cfg(target_family = "unix")]
-    socket.set_reuse_port(true).map_err(|e| {
-        DoipGatewaySetupError::PortBindFailed(format!(
-            "DoipGateway: Failed to set reuse port: {e:?}"
-        ))
-    })?;
-    socket.set_broadcast(true).map_err(|e| {
-        DoipGatewaySetupError::SocketCreationFailed(format!(
-            "DoipGateway: Failed to set broadcast flag on socket: {e:?}"
-        ))
-    })?;
-    socket.set_nonblocking(true).map_err(|e| {
-        DoipGatewaySetupError::InvalidConfiguration(format!(
-            "DoipGateway: Failed to set non-blocking mode: {e:?}"
-        ))
-    })?;
-
-    socket.bind(&broadcast_addr.into()).map_err(|e| {
+    let tester_ip = udp_bind_ip(tester_ip);
+    let addr = udp_socket_addr(tester_ip, gateway_port)?;
+    let socket = new_udp_socket(true)?;
+    socket.bind(&addr.into()).map_err(|e| {
         DoipGatewaySetupError::SocketCreationFailed(format!(
             "DoipGateway: Failed to bind socket, ip {tester_ip}, port {gateway_port}: {e:?}"
         ))
     })?;
+    into_doip_udp_socket(socket)
+}
 
-    let std_sock: std::net::UdpSocket = socket.into();
-    DoIPUdpSocket::new(std_sock, ProtocolVersion::DefaultValue).map_err(|e| {
-        DoipGatewaySetupError::SocketCreationFailed(format!(
-            "DoipGateway: Failed to create DoIP socket from std socket: {e:?}"
-        ))
-    })
+/// Pseudo random offset into a port range, so that several instances do not
+/// all probe the same ports first. Not suitable for security purposes.
+fn random_port_offset(len: u32) -> u32 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    let random = u32::try_from(hasher.finish() & u64::from(u32::MAX)).unwrap_or_default();
+    random.checked_rem(len).unwrap_or_default()
+}
+
+/// Creates the UDP socket the VIR is sent from and its responses are received on,
+/// bound to `tester_ip` and a local port selected by `source_port`.
+///
+/// If the selected port equals `gateway_port`, the socket shares the discovery
+/// port (legacy behavior) like [`create_udp_vir_socket`]. Otherwise the port is
+/// bound exclusively; for a range, a free port is searched starting at a random
+/// offset.
+///
+/// Returns the socket and its local port.
+///
+/// # Errors
+/// Returns `DoipGatewaySetupError::PortBindFailed` if no port could be bound and
+/// the errors of [`create_udp_vir_socket`] for address and socket failures.
+pub fn create_udp_vir_source_socket(
+    tester_ip: &str,
+    source_port: VirSourcePort,
+    gateway_port: u16,
+) -> Result<(DoIPUdpSocket, u16), DoipGatewaySetupError> {
+    let bind_ip = udp_bind_ip(tester_ip);
+    let (start, end) = match source_port {
+        VirSourcePort::Port(port) if port == gateway_port => {
+            return create_udp_vir_socket(tester_ip, gateway_port).map(|s| (s, gateway_port));
+        }
+        VirSourcePort::Port(port) => (port, port),
+        VirSourcePort::Range { start, end } if start == 0 || start > end => {
+            return Err(DoipGatewaySetupError::InvalidConfiguration(format!(
+                "DoipGateway: Invalid VIR source port range {source_port}"
+            )));
+        }
+        VirSourcePort::Range { start, end } => (start, end),
+    };
+
+    let len = u32::from(end)
+        .saturating_sub(u32::from(start))
+        .saturating_add(1);
+    let offset = random_port_offset(len);
+    let mut last_error = None;
+    for step in 0..len {
+        let port = offset
+            .saturating_add(step)
+            .checked_rem(len)
+            .and_then(|delta| u16::try_from(u32::from(start).saturating_add(delta)).ok())
+            .unwrap_or(start);
+        // Never take the discovery port exclusively from within a range, that
+        // would prevent receiving spontaneous VAMs.
+        if port == gateway_port && start != end {
+            continue;
+        }
+        let socket = new_udp_socket(false)?;
+        match socket.bind(&udp_socket_addr(bind_ip, port)?.into()) {
+            Ok(()) => {
+                let local_port = socket
+                    .local_addr()
+                    .ok()
+                    .and_then(|addr| addr.as_socket())
+                    .map_or(port, |addr| addr.port());
+                return into_doip_udp_socket(socket).map(|s| (s, local_port));
+            }
+            // Any bind failure moves on to the next port of the range.
+            Err(e) => {
+                tracing::debug!(
+                    bind_ip,
+                    port,
+                    error = %e,
+                    "Failed to bind VIR source port, trying next"
+                );
+                last_error = Some(e);
+            }
+        }
+    }
+    Err(DoipGatewaySetupError::PortBindFailed(format!(
+        "DoipGateway: No VIR source port in {source_port} could be bound on ip {bind_ip}: \
+         {last_error:?}"
+    )))
 }
 
 impl<T: EcuAddresses + DoipComParams> Clone for DoipDiagGateway<T> {
@@ -1320,6 +2071,15 @@ impl<T: EcuAddresses + DoipComParams> TransportControl for DoipDiagGateway<T> {
     async fn state(&self) -> TransportState {
         self.lifecycle.coordinator.state().await
     }
+
+    async fn connect_ecu_direct(
+        &self,
+        ecu_name: &str,
+        endpoint: DoipEndpoint,
+    ) -> Result<(), DiagServiceError> {
+        self.connect_direct(ecu_name, endpoint.address, endpoint.protocol_version)
+            .await
+    }
 }
 
 async fn send_with_retries(
@@ -1361,26 +2121,42 @@ mod tests {
     use std::{net::UdpSocket, sync::Arc, time::Duration};
 
     use cda_interfaces::{
-        DiagServiceError, EcuConnectivityHandler, HashMap, HashMapExtensions, PendingNrc,
-        PhysicalTransport, ServicePayload, TransmissionParameters, TransportResponse,
-        UDS_ID_RESPONSE_BITMASK, VariantDetectionSender,
-        communication_control::{GatewayLifecycle, TransportState},
+        DiagServiceError, HashMap, HashMapExtensions, PendingNrc, PhysicalTransport,
+        ServicePayload, TransmissionParameters, TransportResponse, UDS_ID_RESPONSE_BITMASK,
+        VariantDetectionSender,
+        communication_control::{DoipEndpoint, GatewayLifecycle, TransportControl, TransportState},
         nrc, service_ids,
+        util::test_utils::{RecordingConnectivityHandler, wait_until},
     };
     use doip_definitions::{
         header::ProtocolVersion,
         payload::{DiagnosticMessage, DoipPayload},
     };
     use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+    use tokio_util::sync::CancellationToken;
 
     use crate::{
         ConnectionTasks, DiagnosticResponse, DoIPUdpSocket, DoipConfig, DoipConnection,
-        DoipDiagGateway, DoipEcu, DoipGatewayState, read_ecu_responses, spawn_connection_task,
-        test_helpers::TestEcu, wait_for_ack_or_response_until_timeout,
+        DoipDiagGateway, DoipEcu, DoipGatewayState,
+        config::DiscoveryMode,
+        gateway_session::{ConnectFailure, GatewaySession, PendingConnect},
+        read_ecu_responses, spawn_connection_task,
+        test_helpers::{
+            FakeGateway, OrderRecorder, TestEcu, activity_reporter, connect_control, discovered,
+            discovered_at, gateway_with_gateways, no_activity, session_for, session_with,
+            session_with_discovery,
+        },
+        wait_for_ack_or_response_until_timeout,
     };
 
     const ECU_ADDR: u16 = 0x0E80;
     const GATEWAY_ADDR: u16 = 0x1234;
+
+    fn finished_connect(result: Result<(), ConnectFailure>) -> PendingConnect {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let _ = sender.send(result);
+        PendingConnect::new(receiver)
+    }
     const TESTER_ADDR: u16 = 0x0E00;
     const PAYLOAD: [u8; 2] = [0xF1, 0x90];
     const REQUEST_DATA: [u8; 3] = [service_ids::READ_DATA_BY_IDENTIFIER, PAYLOAD[0], PAYLOAD[1]];
@@ -1390,15 +2166,6 @@ mod tests {
         PAYLOAD[1],
         0x01,
     ];
-
-    struct TestConnectivityHandler;
-
-    #[async_trait::async_trait]
-    impl EcuConnectivityHandler for TestConnectivityHandler {
-        async fn on_gateway_connected(&self, _ecu_names: &[String]) {}
-
-        async fn on_gateway_disconnected(&self, _ecu_names: &[String]) {}
-    }
 
     /// Builds a minimal `DoipDiagGateway` whose single ECU is backed by the
     /// caller-supplied broadcast receiver and mpsc sender.
@@ -1420,6 +2187,7 @@ mod tests {
         let conn = Arc::new(DoipConnection {
             ecus,
             ip: "127.0.0.1".to_owned(),
+            activity: no_activity(),
         });
 
         // DoIPUdpSocket is never touched during send()
@@ -1439,13 +2207,17 @@ mod tests {
             ecus: Arc::new(HashMap::new()),
             socket: Arc::new(Mutex::new(Some(udp_socket))),
             netmask: 0,
+            topology: cda_interfaces::topology::TopologyState::new(
+                cda_interfaces::topology::DiscoveryStrategy::Vir,
+            ),
+            session: Arc::new(RwLock::new(None)),
         };
 
         DoipDiagGateway {
             state,
             config: DoipConfig::default(),
             variant_detection: VariantDetectionSender::new(mpsc::channel(1).0),
-            connectivity_handler: Arc::new(TestConnectivityHandler),
+            connectivity_handler: Arc::new(RecordingConnectivityHandler::default()),
             lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Enabled)),
         }
     }
@@ -1454,15 +2226,49 @@ mod tests {
     async fn registering_connection_task_does_not_wait_for_connection() {
         let tasks = Arc::new(ConnectionTasks::new());
 
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            spawn_connection_task(&tasks, "pending-connection", std::future::pending()),
-        )
-        .await
-        .expect("task registration must not await connection completion");
+        spawn_connection_task(&tasks, "pending-connection", std::future::pending());
 
-        assert_eq!(tasks.0.lock().await.len(), 1);
+        assert_eq!(tasks.lock().as_ref().map(Vec::len), Some(1));
         tasks.shutdown().await;
+    }
+
+    /// A task pushed after shutdown (e.g. a VAM or fallback connect racing with
+    /// the transport stop) must not outlive it.
+    #[tokio::test]
+    async fn connection_task_pushed_after_shutdown_is_aborted() {
+        let tasks = Arc::new(ConnectionTasks::new());
+        tasks.shutdown().await;
+        let task = tokio::spawn(std::future::pending::<()>());
+        let abort = task.abort_handle();
+        tasks.push(task);
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(10)).await;
+        assert!(abort.is_finished());
+    }
+
+    /// A start that fails before any gateway is connected must not leave the
+    /// discovery running, or waiters would hang until their timeout.
+    /// [[ test~doip-aborted-discovery-finishes, The discovery is finished when the task that owns it is aborted, test ]]
+    #[tokio::test]
+    async fn aborted_discovery_task_finishes_the_discovery() {
+        let topology = cda_interfaces::topology::TopologyState::new(
+            cda_interfaces::topology::DiscoveryStrategy::Vir,
+        );
+        let discovery = super::DiscoveryGuard::begin(&topology);
+        let tasks = Arc::new(ConnectionTasks::new());
+        spawn_connection_task(&tasks, "pending-discovery", async move {
+            let _discovery = discovery;
+            std::future::pending::<()>().await;
+        });
+        tasks.shutdown().await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), topology.settled())
+                .await
+                .ok()
+                .flatten()
+                .is_some(),
+            "the aborted task's guard settled the discovery"
+        );
     }
 
     /// Constructing a gateway must never create or bind a UDP socket,
@@ -1476,7 +2282,7 @@ mod tests {
             &DoipConfig::default(),
             Arc::new(HashMap::new()),
             VariantDetectionSender::new(mpsc::channel(1).0),
-            Arc::new(TestConnectivityHandler),
+            Arc::new(RecordingConnectivityHandler::default()),
         )
         .await
         .unwrap();
@@ -1489,6 +2295,922 @@ mod tests {
             cda_interfaces::communication_control::TransportControl::state(&gateway).await,
             TransportState::Disabled
         );
+    }
+
+    const DIRECT_ECU_ADDR: u16 = 0x1234;
+
+    /// Gateway with the gateway ECU `ecu_a`, configured by `config`.
+    async fn direct_gateway(config: &DoipConfig) -> DoipDiagGateway<TestEcu> {
+        let mut ecus = HashMap::new();
+        ecus.insert(
+            "ecu_a".to_owned(),
+            RwLock::new(TestEcu::new(DIRECT_ECU_ADDR, DIRECT_ECU_ADDR)),
+        );
+        DoipDiagGateway::<TestEcu>::new(
+            config,
+            Arc::new(ecus),
+            VariantDetectionSender::new(mpsc::channel(1).0),
+            Arc::new(RecordingConnectivityHandler::default()),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Gateway with one known ECU `ecu_a` that is already connected on `10.0.0.5`.
+    async fn make_connected_direct_gateway(enabled: bool) -> DoipDiagGateway<TestEcu> {
+        let gateway = direct_gateway(&DoipConfig::default()).await;
+
+        let (doip_tx, _doip_rx) = mpsc::channel(1);
+        let (_tx, rx) = broadcast::channel(1);
+        let mut conn_ecus = HashMap::new();
+        conn_ecus.insert(
+            DIRECT_ECU_ADDR,
+            Arc::new(Mutex::new(DoipEcu {
+                sender: doip_tx,
+                receiver: rx,
+            })),
+        );
+        gateway
+            .state
+            .doip_connections
+            .write()
+            .await
+            .push(Arc::new(DoipConnection {
+                ecus: conn_ecus,
+                ip: "10.0.0.5".to_owned(),
+                activity: no_activity(),
+            }));
+        gateway
+            .state
+            .logical_address_to_connection
+            .write()
+            .await
+            .insert(DIRECT_ECU_ADDR, 0);
+        if enabled {
+            mark_enabled(&gateway).await;
+        }
+        gateway
+    }
+
+    /// Makes the lifecycle look like it is enabled, with a session of its own,
+    /// returns the token that disabling communication would cancel.
+    async fn mark_enabled(gateway: &DoipDiagGateway<TestEcu>) -> CancellationToken {
+        let cancel = CancellationToken::new();
+        let connection_tasks = Arc::new(ConnectionTasks::new());
+        let mut operation = gateway.lifecycle.operation.lock().await;
+        operation.cancel = Some(cancel.clone());
+        operation.connection_tasks = Some(Arc::clone(&connection_tasks));
+        *gateway.state.session.write().await = Some(Arc::new(GatewaySession::new(
+            gateway.transport_config(),
+            connection_tasks,
+            cancel.clone(),
+            gateway.variant_detection.clone(),
+            Arc::clone(&gateway.connectivity_handler),
+            gateway.config.discovery,
+        )));
+        cancel
+    }
+
+    /// Whether a connect of the direct ECU is in flight in the current session.
+    async fn is_connecting(gateway: &DoipDiagGateway<TestEcu>) -> bool {
+        gateway
+            .state
+            .session
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|session| session.try_acquire_connect_guard(DIRECT_ECU_ADDR).is_none())
+    }
+
+    /// Enabled gateway with the gateway ECU `ecu_a` that is not connected yet.
+    /// Connecting it goes to `port` on localhost.
+    async fn make_unconnected_direct_gateway(port: u16) -> DoipDiagGateway<TestEcu> {
+        let gateway = direct_gateway(&DoipConfig {
+            gateway_port: port,
+            ..DoipConfig::default()
+        })
+        .await;
+        mark_enabled(&gateway).await;
+        gateway
+    }
+
+    fn direct_endpoint() -> DoipEndpoint {
+        DoipEndpoint {
+            address: "127.0.0.1".parse().unwrap(),
+            protocol_version: 0x02,
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_connect_rejects_already_connected_ecu() {
+        let gateway = make_connected_direct_gateway(true).await;
+
+        let result = gateway
+            .connect_ecu_direct(
+                "ecu_a",
+                DoipEndpoint {
+                    address: "10.0.0.9".parse().unwrap(),
+                    protocol_version: 0x02,
+                },
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            Err(DiagServiceError::Conflict(
+                "ECU 'ecu_a' is already connected on 10.0.0.5".to_owned()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_connect_rejects_unknown_ecu() {
+        let gateway = make_connected_direct_gateway(true).await;
+
+        let result = gateway
+            .connect_ecu_direct(
+                "missing",
+                DoipEndpoint {
+                    address: "10.0.0.9".parse().unwrap(),
+                    protocol_version: 0x02,
+                },
+            )
+            .await;
+
+        assert!(matches!(result, Err(DiagServiceError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn direct_connect_requires_enabled_communication() {
+        let gateway = make_connected_direct_gateway(false).await;
+
+        let result = gateway
+            .connect_ecu_direct(
+                "ecu_a",
+                DoipEndpoint {
+                    address: "10.0.0.9".parse().unwrap(),
+                    protocol_version: 0x02,
+                },
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DiagServiceError::CommunicationDisabled(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn direct_connect_rejects_unknown_protocol_version() {
+        let gateway = make_connected_direct_gateway(true).await;
+
+        let result = gateway
+            .connect_ecu_direct(
+                "ecu_a",
+                DoipEndpoint {
+                    address: "10.0.0.9".parse().unwrap(),
+                    protocol_version: 0x42,
+                },
+            )
+            .await;
+
+        assert!(matches!(result, Err(DiagServiceError::InvalidRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn direct_connect_rejects_non_gateway_ecu() {
+        let mut ecus = HashMap::new();
+        ecus.insert(
+            "ecu_a".to_owned(),
+            RwLock::new(TestEcu::new(DIRECT_ECU_ADDR, DIRECT_ECU_ADDR)),
+        );
+        ecus.insert(
+            "ecu_b".to_owned(),
+            RwLock::new(TestEcu::new(0x5678, DIRECT_ECU_ADDR)),
+        );
+        let gateway = DoipDiagGateway::<TestEcu>::new(
+            &DoipConfig::default(),
+            Arc::new(ecus),
+            VariantDetectionSender::new(mpsc::channel(1).0),
+            Arc::new(RecordingConnectivityHandler::default()),
+        )
+        .await
+        .unwrap();
+        mark_enabled(&gateway).await;
+
+        let result = gateway
+            .connect_ecu_direct(
+                "ecu_b",
+                DoipEndpoint {
+                    address: "10.0.0.9".parse().unwrap(),
+                    protocol_version: 0x02,
+                },
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            Err(DiagServiceError::InvalidRequest(
+                "ECU 'ecu_b' is not a gateway, only gateway ECUs can be connected directly"
+                    .to_owned()
+            ))
+        );
+        assert!(gateway.state.doip_connections.read().await.is_empty());
+    }
+
+    async fn enabled_gateway_with_discovery(
+        discovery: DiscoveryMode,
+    ) -> (DoipDiagGateway<TestEcu>, Duration) {
+        let gateway = DoipDiagGateway::<TestEcu>::new(
+            &DoipConfig {
+                discovery,
+                gateway_port: 0,
+                ..DoipConfig::default()
+            },
+            Arc::new(HashMap::new()),
+            VariantDetectionSender::new(mpsc::channel(1).0),
+            Arc::new(RecordingConnectivityHandler::default()),
+        )
+        .await
+        .unwrap();
+
+        let start = std::time::Instant::now();
+        cda_interfaces::communication_control::TransportControl::enable(&gateway)
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(
+            cda_interfaces::communication_control::TransportControl::state(&gateway).await,
+            TransportState::Enabled
+        );
+        (gateway, elapsed)
+    }
+
+    #[tokio::test]
+    async fn connection_ip_is_the_address_the_gateway_was_connected_on() {
+        let gateway = make_connected_direct_gateway(true).await;
+
+        assert_eq!(
+            gateway
+                .state
+                .connection_ip(DIRECT_ECU_ADDR)
+                .await
+                .as_deref(),
+            Some("10.0.0.5")
+        );
+        assert_eq!(gateway.state.connection_ip(0x4321).await, None);
+    }
+
+    #[tokio::test]
+    async fn direct_connect_is_rejected_while_the_ecu_is_being_connected() {
+        let (_listener, port) = silent_gateway();
+        let gateway = make_unconnected_direct_gateway(port).await;
+        let first = tokio::spawn({
+            let gateway = gateway.clone();
+            async move { gateway.connect_ecu_direct("ecu_a", direct_endpoint()).await }
+        });
+        wait_until("direct connect to acquire the ECU lock", || async {
+            is_connecting(&gateway).await
+        })
+        .await;
+
+        let result = gateway.connect_ecu_direct("ecu_a", direct_endpoint()).await;
+
+        assert_eq!(
+            result,
+            Err(DiagServiceError::Conflict(
+                "ECU 'ecu_a' is currently being connected".to_owned()
+            ))
+        );
+        cda_interfaces::communication_control::TransportControl::disable(&gateway)
+            .await
+            .unwrap();
+        assert!(matches!(
+            first.await.unwrap(),
+            Err(DiagServiceError::CommunicationDisabled(_))
+        ));
+    }
+
+    /// A gateway that accepts the connection but never answers the routing activation.
+    fn silent_gateway() -> (std::net::TcpListener, u16) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (listener, port)
+    }
+
+    #[tokio::test]
+    async fn disabling_communication_cancels_a_running_connect() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let gateway = make_unconnected_direct_gateway(port).await;
+        let cancel = gateway
+            .lifecycle
+            .operation
+            .lock()
+            .await
+            .cancel
+            .clone()
+            .unwrap();
+
+        let connecting = tokio::spawn({
+            let gateway = gateway.clone();
+            async move { gateway.connect_ecu_direct("ecu_a", direct_endpoint()).await }
+        });
+        wait_until("direct connect to acquire the ECU lock", || async {
+            is_connecting(&gateway).await
+        })
+        .await;
+        let (_socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("the connect should reach the gateway")
+            .unwrap();
+        cancel.cancel();
+
+        let result = tokio::time::timeout(Duration::from_secs(2), connecting)
+            .await
+            .expect("cancelling must not wait for the connect timeouts")
+            .unwrap();
+        assert!(matches!(
+            result,
+            Err(DiagServiceError::CommunicationDisabled(_))
+        ));
+        assert!(
+            gateway
+                .state
+                .logical_address_to_connection
+                .read()
+                .await
+                .is_empty()
+        );
+        assert!(
+            !is_connecting(&gateway).await,
+            "the registration must be released"
+        );
+        let connection_tasks = gateway
+            .lifecycle
+            .operation
+            .lock()
+            .await
+            .connection_tasks
+            .clone()
+            .unwrap();
+        wait_until("connection tasks to finish after cancellation", || async {
+            connection_tasks
+                .lock()
+                .as_ref()
+                .is_some_and(|tasks| tasks.iter().all(tokio::task::JoinHandle::is_finished))
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn disable_does_not_wait_for_a_running_connect() {
+        let (_listener, port) = silent_gateway();
+        let gateway = make_unconnected_direct_gateway(port).await;
+
+        let connecting = tokio::spawn({
+            let gateway = gateway.clone();
+            async move { gateway.connect_ecu_direct("ecu_a", direct_endpoint()).await }
+        });
+        wait_until("direct connect to acquire the ECU lock", || async {
+            is_connecting(&gateway).await
+        })
+        .await;
+
+        // The routing activation timeout of the test ECU is 5 s.
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            cda_interfaces::communication_control::TransportControl::disable(&gateway),
+        )
+        .await
+        .expect("disable must not wait for the connect")
+        .unwrap();
+
+        let result = connecting.await.unwrap();
+        assert!(matches!(
+            result,
+            Err(DiagServiceError::CommunicationDisabled(_))
+        ));
+        assert!(
+            gateway
+                .state
+                .logical_address_to_connection
+                .read()
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn giving_up_on_the_request_does_not_abort_the_connect() {
+        let (_listener, port) = silent_gateway();
+        let gateway = make_unconnected_direct_gateway(port).await;
+        let cancel = gateway
+            .lifecycle
+            .operation
+            .lock()
+            .await
+            .cancel
+            .clone()
+            .unwrap();
+
+        // The caller goes away, like a client that disconnects or an HTTP timeout.
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            gateway.connect_ecu_direct("ecu_a", direct_endpoint()),
+        )
+        .await;
+        assert!(result.is_err(), "the connect is still waiting for the ECU");
+
+        assert!(
+            is_connecting(&gateway).await,
+            "the connect keeps running and keeps the gateway registered"
+        );
+        let second = gateway.connect_ecu_direct("ecu_a", direct_endpoint()).await;
+        assert!(matches!(second, Err(DiagServiceError::Conflict(_))));
+
+        cancel.cancel();
+        wait_until(
+            "cancelled direct connect to release the ECU lock",
+            || async { !is_connecting(&gateway).await },
+        )
+        .await;
+    }
+
+    /// Without VIR, a reconnect reports the gateways that failed their direct
+    /// connect and the persisted gateways without a usable address, and does
+    /// not search (nor report) the gateways not attempted or not persisted.
+    /// [[ test~doip-vam-only-reconnect-without-search, Without VIR a reconnect searches no gateway and reports only failed connects, test ]]
+    /// [[ test~doip-vam-only-reconnect-reports-unusable, Without VIR a persisted gateway without a usable address is reported unreachable, test ]]
+    #[tokio::test]
+    async fn vam_only_reconnect_reports_failed_and_unusable_gateways_without_search() {
+        let fake = FakeGateway::start().await;
+        let gateway =
+            gateway_with_gateways(&[("gw1", 0x1000), ("gw2", 0x2000), ("gw3", 0x3000)]).await;
+        let session = session_with_discovery(&fake, DiscoveryMode::VamOnly);
+        let discovery = crate::DiscoveryGuard::begin(&gateway.state.topology);
+
+        // gw1's direct connect failed, 0x2000 is persisted without a usable
+        // address, 0x3000 not persisted.
+        DoipDiagGateway::finish_reconnect(
+            &gateway.state,
+            &session,
+            discovery,
+            vec![(
+                discovered("gw1", 0x1000),
+                finished_connect(Err(ConnectFailure::Cancelled)),
+            )],
+            [0x2000, 0x3000].into_iter().collect(),
+            std::iter::once(0x2000).collect(),
+        )
+        .await;
+
+        let mut unreachable = gateway.state.topology.unreachable();
+        unreachable.sort_unstable();
+        assert_eq!(unreachable, [0x1000, 0x2000]);
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(1), gateway.state.topology.settled())
+                .await
+                .ok()
+                .flatten()
+                .expect("the discovery must be finished");
+        assert!(!outcome.full_vir_discovery);
+    }
+
+    /// Without VIR, a persisted gateway without a usable address that an
+    /// announcement connected while the reconnect was running is not reported
+    /// unreachable, neither if it is connected already nor if its connect is
+    /// still in flight.
+    #[tokio::test]
+    async fn vam_only_reconnect_does_not_report_gateways_connected_by_an_announcement() {
+        let fake = FakeGateway::start().await;
+        let gateway =
+            gateway_with_gateways(&[("gw1", 0x1000), ("gw2", 0x2000), ("gw3", 0x3000)]).await;
+        let recorder = OrderRecorder::new(&gateway.state.topology);
+        let session = session_with(&fake, Arc::clone(&recorder) as _, DiscoveryMode::VamOnly);
+        *gateway.state.session.write().await = Some(Arc::clone(&session));
+        let names = crate::gateway_session::ecu_names_by_gateway(&gateway.state.ecus).await;
+        let announce = |name: &'static str, logical_address: u16| {
+            crate::vir_vam::handle_announcement(
+                &gateway.state,
+                &session,
+                discovered(name, logical_address),
+                &names,
+                &gateway.variant_detection,
+            )
+        };
+        // gw2 is connected by its announcement, gw3's connect is in flight.
+        announce("gw2", 0x2000).await;
+        wait_until("announced gateway to connect", || async {
+            gateway.state.has_connection(0x2000).await
+        })
+        .await;
+        fake.block_connects();
+        announce("gw3", 0x3000).await;
+        wait_until(
+            "second announced gateway to reach the fake gateway",
+            || async { fake.connects() == 2 },
+        )
+        .await;
+        let discovery = crate::DiscoveryGuard::begin(&gateway.state.topology);
+
+        // gw1's unicast failed, gw2 and gw3 are persisted without a usable address.
+        let reconnect = DoipDiagGateway::finish_reconnect(
+            &gateway.state,
+            &session,
+            discovery,
+            vec![(
+                discovered("gw1", 0x1000),
+                finished_connect(Err(ConnectFailure::Cancelled)),
+            )],
+            cda_interfaces::HashSet::default(),
+            [0x2000, 0x3000].into_iter().collect(),
+        );
+        // Released only once the reconnect waits for gw3's connect.
+        tokio::join!(reconnect, async {
+            cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(50)).await;
+            fake.release_connects();
+        });
+
+        assert_eq!(gateway.state.topology.unreachable(), [0x1000]);
+        assert_eq!(
+            recorder.unreachable_at_disconnect.lock().unwrap().len(),
+            1,
+            "only gw1's ECUs are reported disconnected"
+        );
+        assert_eq!(
+            gateway
+                .state
+                .logical_address_to_connection
+                .read()
+                .await
+                .len(),
+            2
+        );
+        session.connection_tasks.shutdown().await;
+    }
+
+    /// The startup VIR result is recorded at its announced address when it ends
+    /// connected, also if a direct connect in flight connected the gateway.
+    #[tokio::test]
+    async fn startup_vir_address_is_recorded_after_a_direct_connect() {
+        let fake = FakeGateway::start().await;
+        fake.block_connects();
+        let gateway = gateway_with_gateways(&[("gw", 0x1000)]).await;
+        let session = session_for(&fake);
+        let direct = gateway
+            .state
+            .start_direct_connect(
+                &session,
+                discovered("gw", 0x1000),
+                connect_control(&session),
+            )
+            .await
+            .expect("the direct connect must start");
+        wait_until("direct connect to reach the fake gateway", || async {
+            fake.connects() == 1
+        })
+        .await;
+        let vir_result = discovered_at("gw", 0x1000, "0.0.0.0");
+        let connect = gateway
+            .state
+            .spawn_gateway_connect(&session, vir_result.clone());
+        let discovery = crate::DiscoveryGuard::begin(&gateway.state.topology);
+
+        fake.release_connects();
+        assert!(direct.await.unwrap().is_ok());
+        DoipDiagGateway::finish_initial_discovery(
+            &gateway.state,
+            &session,
+            discovery,
+            vec![(vir_result, connect)],
+        )
+        .await;
+
+        assert_eq!(
+            fake.connects(),
+            1,
+            "the direct connect connected the gateway"
+        );
+        let connected = gateway.state.topology.connected();
+        assert_eq!(connected.len(), 1);
+        assert_eq!(
+            connected.first().and_then(|g| g.network_address.as_deref()),
+            Some("0.0.0.0")
+        );
+        session.connection_tasks.shutdown().await;
+    }
+
+    /// A start that was stopped meanwhile is not recorded as a complete
+    /// discovery, and does not record gateways.
+    #[tokio::test]
+    async fn cancelled_initial_discovery_is_not_complete() {
+        let fake = FakeGateway::start().await;
+        let gateway = gateway_with_gateways(&[("gw", 0x1000)]).await;
+        let session = session_for(&fake);
+        let vir_result = discovered("gw", 0x1000);
+        let connect = gateway
+            .state
+            .spawn_gateway_connect(&session, vir_result.clone());
+        let discovery = crate::DiscoveryGuard::begin(&gateway.state.topology);
+        session.cancel_token.cancel();
+
+        DoipDiagGateway::finish_initial_discovery(
+            &gateway.state,
+            &session,
+            discovery,
+            vec![(vir_result, connect)],
+        )
+        .await;
+
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(1), gateway.state.topology.settled())
+                .await
+                .ok()
+                .flatten()
+                .expect("the discovery must be finished");
+        assert!(!outcome.full_vir_discovery);
+        assert_eq!(
+            gateway.state.topology.connected(),
+            [] as [cda_interfaces::topology::KnownGateway; 0]
+        );
+        session.connection_tasks.shutdown().await;
+    }
+
+    /// With discovery disabled a reconnect plan connects nothing, and the
+    /// discovery is still finished. The session accepts a direct connect,
+    /// which is not recorded in the topology.
+    /// [[ test~doip-direct-connect-not-recorded, A direct connect is not recorded in the topology, test ]]
+    #[tokio::test]
+    async fn disabled_spawns_no_gateway_connects_but_accepts_a_direct_connect() {
+        let fake = FakeGateway::start().await;
+        let topology = cda_interfaces::topology::TopologyState::new(
+            cda_interfaces::topology::DiscoveryStrategy::Persisted {
+                known: vec![cda_interfaces::topology::KnownGateway {
+                    name: "ecu_a".to_owned(),
+                    logical_address: DIRECT_ECU_ADDR,
+                    network_address: Some("127.0.0.1".to_owned()),
+                    doip_protocol_version: Some(0x02),
+                }],
+                search: Vec::new(),
+            },
+        );
+        let gateway = direct_gateway(&DoipConfig {
+            discovery: DiscoveryMode::Disabled,
+            gateway_port: fake.port(),
+            ..DoipConfig::default()
+        })
+        .await
+        .with_topology_runtime(topology);
+        TransportControl::enable(&gateway).await.unwrap();
+
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(1), gateway.state.topology.settled())
+                .await
+                .ok()
+                .flatten()
+                .expect("the discovery must be finished");
+        assert!(!outcome.full_vir_discovery);
+        assert_eq!(fake.connects(), 0);
+
+        let result = gateway.connect_ecu_direct("ecu_a", direct_endpoint()).await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            gateway
+                .state
+                .connection_ip(DIRECT_ECU_ADDR)
+                .await
+                .as_deref(),
+            Some("127.0.0.1")
+        );
+        assert!(
+            gateway.state.topology.connected().is_empty(),
+            "a direct connect must not be persisted"
+        );
+        TransportControl::disable(&gateway).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn enable_fails_clearly_if_the_tester_address_is_not_assigned() {
+        let gateway = DoipDiagGateway::<TestEcu>::new(
+            &DoipConfig {
+                // TEST-NET-1 (RFC 5737) is never assigned to a host interface.
+                tester_address: "192.0.2.1".to_owned(),
+                discovery: DiscoveryMode::Disabled,
+                ..DoipConfig::default()
+            },
+            Arc::new(HashMap::new()),
+            VariantDetectionSender::new(mpsc::channel(1).0),
+            Arc::new(RecordingConnectivityHandler::default()),
+        )
+        .await
+        .expect("construction must not check the network");
+
+        let error = cda_interfaces::communication_control::TransportControl::enable(&gateway)
+            .await
+            .expect_err("enable must fail");
+
+        assert!(
+            matches!(&error, cda_interfaces::communication_control::CommControlError::InitFailed(message) if message.contains("tester_address")),
+            "{error:?}"
+        );
+        assert_eq!(
+            cda_interfaces::communication_control::TransportControl::state(&gateway).await,
+            TransportState::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn vir_source_socket_binds_fixed_os_chosen_and_range_ports() {
+        use crate::{config::VirSourcePort, create_udp_vir_source_socket};
+
+        // Port 0: the operating system picks a port.
+        let (_os, os_port) =
+            create_udp_vir_source_socket("127.0.0.1", VirSourcePort::Port(0), 13400).unwrap();
+        assert_ne!(os_port, 0);
+
+        // A fixed port is bound exclusively, a second bind fails.
+        let free_port = UdpSocket::bind("0.0.0.0:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (_fixed, fixed_port) =
+            create_udp_vir_source_socket("127.0.0.1", VirSourcePort::Port(free_port), 13400)
+                .unwrap();
+        assert_eq!(fixed_port, free_port);
+        assert!(
+            create_udp_vir_source_socket("127.0.0.1", VirSourcePort::Port(free_port), 13400)
+                .is_err()
+        );
+
+        // A range containing the occupied port picks the other one.
+        let (start, end) = match free_port.checked_add(1) {
+            Some(next) => (free_port, next),
+            None => (free_port.saturating_sub(1), free_port),
+        };
+        match create_udp_vir_source_socket("127.0.0.1", VirSourcePort::Range { start, end }, 13400)
+        {
+            Ok((_range, range_port)) => {
+                assert!((start..=end).contains(&range_port));
+                assert_ne!(range_port, free_port);
+            }
+            // The neighbouring port may be in use by another process.
+            Err(error) => assert!(matches!(
+                error,
+                crate::DoipGatewaySetupError::PortBindFailed(_)
+            )),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_vams_do_not_retrigger_variant_detection_within_debounce() {
+        let gateway = DoipDiagGateway::<TestEcu>::new(
+            &DoipConfig::default(),
+            Arc::new(HashMap::new()),
+            VariantDetectionSender::new(mpsc::channel(1).0),
+            Arc::new(RecordingConnectivityHandler::default()),
+        )
+        .await
+        .unwrap();
+        let new_session = || {
+            GatewaySession::new(
+                gateway.transport_config(),
+                Arc::new(ConnectionTasks::new()),
+                CancellationToken::new(),
+                gateway.variant_detection.clone(),
+                Arc::clone(&gateway.connectivity_handler),
+                gateway.config.discovery,
+            )
+        };
+        let session = new_session();
+
+        // Triggered by the initial connection (discovery, VAM or direct connect).
+        session.mark_variant_detection(0x1000);
+        // Repeated announcements within the debounce window are ignored.
+        assert!(!session.try_mark_variant_detection(0x1000));
+        tokio::time::advance(crate::gateway_session::VARIANT_DETECTION_VAM_DEBOUNCE / 2).await;
+        assert!(!session.try_mark_variant_detection(0x1000));
+        // Other gateways are not affected.
+        assert!(session.try_mark_variant_detection(0x2000));
+
+        // The window does not slide with ignored VAMs, later VAMs trigger again.
+        tokio::time::advance(crate::gateway_session::VARIANT_DETECTION_VAM_DEBOUNCE / 2).await;
+        assert!(session.try_mark_variant_detection(0x1000));
+        assert!(!session.try_mark_variant_detection(0x1000));
+
+        // A new start (after disabling communication) forgets the triggers.
+        assert!(new_session().try_mark_variant_detection(0x1000));
+    }
+
+    #[tokio::test]
+    async fn vir_source_socket_on_gateway_port_is_shared() {
+        use crate::{config::VirSourcePort, create_udp_vir_source_socket};
+
+        let gateway_port = UdpSocket::bind("0.0.0.0:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (_vir, vir_port) = create_udp_vir_source_socket(
+            "127.0.0.1",
+            VirSourcePort::Port(gateway_port),
+            gateway_port,
+        )
+        .unwrap();
+        assert_eq!(vir_port, gateway_port);
+        // The VAM listener must still be able to bind the discovery port.
+        assert!(crate::create_udp_vir_socket("0.0.0.0", gateway_port).is_ok());
+    }
+
+    #[tokio::test]
+    async fn occupied_vir_source_port_does_not_fail_enable() {
+        // Hold the fixed VIR source port exclusively.
+        let occupied = UdpSocket::bind("0.0.0.0:0").unwrap();
+        let port = occupied.local_addr().unwrap().port();
+        let gateway = DoipDiagGateway::<TestEcu>::new(
+            &DoipConfig {
+                gateway_port: 0,
+                vir_source_port: crate::config::VirSourcePort::Port(port),
+                ..DoipConfig::default()
+            },
+            Arc::new(HashMap::new()),
+            VariantDetectionSender::new(mpsc::channel(1).0),
+            Arc::new(RecordingConnectivityHandler::default()),
+        )
+        .await
+        .unwrap();
+
+        let start = std::time::Instant::now();
+        cda_interfaces::communication_control::TransportControl::enable(&gateway)
+            .await
+            .unwrap();
+        // The single port is retried before giving up.
+        assert!(
+            start.elapsed()
+                >= crate::VIR_SINGLE_PORT_BIND_RETRY_DELAY
+                    .saturating_mul(crate::VIR_SINGLE_PORT_BIND_ATTEMPTS.saturating_sub(1))
+        );
+        assert_eq!(
+            cda_interfaces::communication_control::TransportControl::state(&gateway).await,
+            TransportState::Enabled
+        );
+        // No VIR socket, but VAMs are still received on the discovery port.
+        assert!(gateway.state.socket.lock().await.is_none());
+        assert!(
+            gateway
+                .lifecycle
+                .operation
+                .lock()
+                .await
+                .vam_listener
+                .is_some()
+        );
+        cda_interfaces::communication_control::TransportControl::disable(&gateway)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn disabled_discovery_starts_without_binding_a_socket() {
+        let (gateway, _) = enabled_gateway_with_discovery(DiscoveryMode::Disabled).await;
+
+        assert!(gateway.state.socket.lock().await.is_none());
+        assert!(
+            gateway
+                .lifecycle
+                .operation
+                .lock()
+                .await
+                .vam_listener
+                .is_none()
+        );
+        cda_interfaces::communication_control::TransportControl::disable(&gateway)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn vam_only_discovery_listens_without_waiting_for_a_vir_round() {
+        let (gateway, elapsed) = enabled_gateway_with_discovery(DiscoveryMode::VamOnly).await;
+
+        // No VIR is sent, so no VIR socket is bound.
+        assert!(gateway.state.socket.lock().await.is_none());
+        assert!(
+            gateway
+                .lifecycle
+                .operation
+                .lock()
+                .await
+                .vam_listener
+                .is_some()
+        );
+        // The VIR round waits one second for VAMs, VAM only mode must skip it.
+        assert!(elapsed < Duration::from_millis(500), "took {elapsed:?}");
+        cda_interfaces::communication_control::TransportControl::disable(&gateway)
+            .await
+            .unwrap();
     }
 
     fn transmission_params() -> TransmissionParameters {
@@ -1711,6 +3433,7 @@ mod tests {
             "test-ecu",
             &msg,
             Duration::from_secs(1),
+            &no_activity(),
         )
         .await;
         assert!(
@@ -1734,6 +3457,7 @@ mod tests {
             "test-ecu",
             &msg,
             Duration::from_secs(1),
+            &no_activity(),
         )
         .await;
 
@@ -1765,6 +3489,7 @@ mod tests {
             "test-ecu",
             &msg,
             Duration::from_secs(1),
+            &no_activity(),
         )
         .await;
 
@@ -1794,6 +3519,7 @@ mod tests {
             "test-ecu",
             &msg,
             Duration::from_secs(1),
+            &no_activity(),
         )
         .await;
 
@@ -1801,6 +3527,113 @@ mod tests {
             matches!(result, Err(DiagServiceError::Nack(_))),
             "expected Nack, got {result:?}"
         );
+    }
+
+    /// Messages that piled up between requests until the receiver lagged must
+    /// not leak into the next request. If the pre-send drain stops at the lag,
+    /// the stale messages stay queued: the ACK then overwrites one of them
+    /// (lagging the receiver again) and any stale NACK read before the ACK
+    /// fails a request the gateway acknowledged.
+    #[tokio::test]
+    async fn stale_nack_from_lagged_receiver_does_not_fail_next_request() {
+        use doip_definitions::payload::{DiagnosticMessageNack, DiagnosticNackCode};
+
+        let (tx, mut rx) = make_broadcast_pair();
+        let msg = diag_msg();
+
+        // More messages than the channel holds, so the receiver lags.
+        for _ in 0..20 {
+            tx.send(Ok(DiagnosticResponse::Nack(DiagnosticMessageNack {
+                source_address: ECU_ADDR.to_be_bytes(),
+                target_address: TESTER_ADDR.to_be_bytes(),
+                nack_code: DiagnosticNackCode::TransportProtocolError,
+            })))
+            .expect("Failed to send stale nack");
+        }
+
+        // Same sequence as the request path: drain, send, wait for the ACK.
+        cda_interfaces::util::tokio_ext::clear_pending_messages(&mut rx);
+        tx.send(Ok(DiagnosticResponse::Ack((ECU_ADDR, vec![]))))
+            .expect("Failed to send ack");
+
+        let result = wait_for_ack_or_response_until_timeout(
+            &mut rx,
+            "test-ecu",
+            &msg,
+            Duration::from_secs(1),
+            &no_activity(),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Ok(None)),
+            "expected Ok(None), got {result:?}"
+        );
+    }
+
+    /// A lagged receiver is still open: waiting for the ACK must continue with
+    /// the retained messages instead of reporting the receiver as closed.
+    #[tokio::test]
+    async fn wait_for_ack_or_response_continues_after_lag() {
+        let (tx, mut rx) = broadcast::channel(2);
+        let msg = diag_msg();
+
+        tx.send(Ok(DiagnosticResponse::AliveCheckResponse))
+            .expect("Failed to send alive check response");
+        tx.send(Ok(DiagnosticResponse::AliveCheckResponse))
+            .expect("Failed to send alive check response");
+        tx.send(Ok(DiagnosticResponse::AliveCheckResponse))
+            .expect("Failed to send alive check response");
+        tx.send(Ok(DiagnosticResponse::Ack((ECU_ADDR, vec![]))))
+            .expect("Failed to send ack");
+
+        let result = wait_for_ack_or_response_until_timeout(
+            &mut rx,
+            "test-ecu",
+            &msg,
+            Duration::from_secs(1),
+            &no_activity(),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Ok(None)),
+            "expected Ok(None), got {result:?}"
+        );
+    }
+
+    /// A lagged receiver is still open: reading responses must continue with
+    /// the retained messages instead of failing the request as closed.
+    #[tokio::test]
+    async fn read_ecu_responses_continues_after_lag() {
+        let (tx, mut rx) = broadcast::channel(2);
+        let (resp_tx, mut resp_rx) = make_response_channel();
+
+        for _ in 0..3 {
+            tx.send(Ok(ecu_msg_response()))
+                .expect("Failed to send response");
+        }
+        // Keep tx alive so the channel does not close while reading.
+        let _tx = tx;
+
+        let handle = tokio::spawn(async move {
+            read_ecu_responses(&mut rx, "test-ecu", &resp_tx, None).await;
+        });
+
+        let item = tokio::time::timeout(Duration::from_secs(1), resp_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("closed");
+        assert!(
+            matches!(item, Ok(Some(TransportResponse::UdsResponse(_)))),
+            "expected Message, got {item:?}"
+        );
+
+        drop(resp_rx);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("task did not exit")
+            .expect("task panicked");
     }
 
     /// A `GenericNack` returns `Err(Nack(_))`.
@@ -1821,6 +3654,7 @@ mod tests {
             "test-ecu",
             &msg,
             Duration::from_secs(1),
+            &no_activity(),
         )
         .await;
 
@@ -1841,6 +3675,7 @@ mod tests {
             "test-ecu",
             &msg,
             Duration::from_millis(200),
+            &no_activity(),
         )
         .await;
 
@@ -1863,6 +3698,7 @@ mod tests {
             "test-ecu",
             &msg,
             Duration::from_secs(1),
+            &no_activity(),
         )
         .await;
 
@@ -1889,6 +3725,7 @@ mod tests {
             "test-ecu",
             &msg,
             Duration::from_secs(1),
+            &no_activity(),
         )
         .await;
 
@@ -1897,6 +3734,42 @@ mod tests {
             matches!(result, Ok(None)),
             "expected Ok(None), got {result:?}"
         );
+    }
+
+    /// A UDS frame with another SID before the ACK does not answer the request
+    /// and is skipped, but it is reported as a reply of the request's ECU.
+    #[tokio::test]
+    async fn wait_for_ack_or_response_reports_skipped_frame_as_reply() {
+        let (tx, mut rx) = make_broadcast_pair();
+        let msg = diag_msg();
+        let handler = Arc::new(RecordingConnectivityHandler::default());
+        // No address map: the request's ECU is reported by its name.
+        let activity = activity_reporter(&handler, &[]);
+
+        tx.send(Ok(DiagnosticResponse::Msg {
+            source_address: ECU_ADDR,
+            target_address: TESTER_ADDR,
+            data: vec![service_ids::SESSION_CONTROL | UDS_ID_RESPONSE_BITMASK, 0x01],
+        }))
+        .expect("Failed to send unrelated response");
+        tx.send(Ok(DiagnosticResponse::Ack((ECU_ADDR, vec![]))))
+            .expect("Failed to send ack");
+
+        let result = wait_for_ack_or_response_until_timeout(
+            &mut rx,
+            "test-ecu",
+            &msg,
+            Duration::from_secs(1),
+            &activity,
+        )
+        .await;
+
+        drop(tx);
+        assert!(
+            matches!(result, Ok(None)),
+            "expected Ok(None), got {result:?}"
+        );
+        assert_eq!(handler.replied(), vec!["test-ecu".to_owned()]);
     }
 
     #[tokio::test]

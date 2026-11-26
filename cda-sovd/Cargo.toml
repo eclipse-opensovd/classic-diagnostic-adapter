@@ -13,6 +13,7 @@
 name = "cda-sovd"
 version = "0.1.0"
 edition.workspace = true
+rust-version.workspace = true
 publish = false
 description = "SOVD webserver used in CDA"
 homepage.workspace = true
@@ -73,7 +74,6 @@ axum = { workspace = true, features = [
 ] }
 axum-extra = { workspace = true, features = ["typed-header", "with-rejection"] }
 bytes = { workspace = true }
-chrono = { workspace = true }
 http = { workspace = true }
 indexmap = { workspace = true }
 mime = { workspace = true }
@@ -97,13 +97,13 @@ tower-http = { workspace = true, features = [
 tracing = { workspace = true }
 percent-encoding = { workspace = true }
 
-[build-dependencies]
-cda-build = { workspace = true }
-
 [features]
 default = []
 auth = []
 dlt-tracing = ["cda-interfaces/dlt-tracing"]
+# Offers the SOVD operation to connect an ECU directly to an IP address, bypassing
+# VIR/VAM discovery. Intended for ECU development, leave it out of builds for vehicles.
+doip-direct-connect = []
 
 [dev-dependencies]
 cda-interfaces = { workspace = true, features = ["test-utils"] }

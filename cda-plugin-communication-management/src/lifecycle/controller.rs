@@ -878,7 +878,7 @@ mod tests {
 
     use async_trait::async_trait;
     use cda_interfaces::communication_control::{
-        TransportControl, TransportState, error::CommControlError,
+        DetectionPhase, TransportControl, TransportState, error::CommControlError,
     };
     use tokio::sync::Notify;
 
@@ -1667,7 +1667,7 @@ mod tests {
         fn name(&self) -> &'static str {
             "failing-detector"
         }
-        async fn detect(&self) -> Result<(), CommControlError> {
+        async fn detect(&self, _phase: DetectionPhase) -> Result<(), CommControlError> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             if self.fail.load(Ordering::Relaxed) {
                 Err(CommControlError::InitFailed("simulated failure".to_owned()))
@@ -1686,7 +1686,7 @@ mod tests {
         fn name(&self) -> &'static str {
             "blocking-detector"
         }
-        async fn detect(&self) -> Result<(), CommControlError> {
+        async fn detect(&self, _phase: DetectionPhase) -> Result<(), CommControlError> {
             self.entered.notify_one();
             self.proceed.notified().await;
             Ok(())

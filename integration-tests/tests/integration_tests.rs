@@ -11,5 +11,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![allow(
+    clippy::mod_module_files,
+    reason = "Cargo builds every top-level file in tests/ as a test target of its own, so the \
+              modules of this target live in directories with a mod.rs"
+)]
+
 mod sovd;
 mod util;

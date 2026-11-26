@@ -13,6 +13,8 @@
 
 //! Integration tests for the local filesystem storage backend.
 
+use std::{future::poll_fn, task::Poll, time::Duration};
+
 use cda_interfaces::storage_api::{
     Collection as _, CollectionName, RandomAccessData as _, Storage, StorageError,
 };
@@ -633,4 +635,60 @@ async fn list_normalizes_mixed_case_filenames_to_match_metadata_and_read() {
     let mut buf = vec![0u8; "mixed case data".len()];
     handle.read_at(0, &mut buf).unwrap();
     assert_eq!(&buf, b"mixed case data");
+}
+
+/// [[ test~storage-commit-cancel-safe, A commit whose caller is dropped while awaiting the detached commit still completes and releases the transaction flag, test ]]
+#[tokio::test]
+async fn commit_completes_when_caller_is_dropped() {
+    let (storage, _dir) = create_test_storage();
+    let name = CollectionName::DiagnosticDatabase;
+    let collection = storage.get_or_create_collection(&name).await.unwrap();
+
+    // Seed a value; its read handle holds the shared data lock, so the commit has to wait.
+    let mut tx = storage.begin_transaction().unwrap();
+    let mut data: &[u8] = b"old";
+    collection.write(&mut tx, "seed", &mut data).await.unwrap();
+    tx.commit().await.unwrap();
+    let guard_holder = collection.read("seed").await.unwrap();
+
+    let mut tx = storage.begin_transaction().unwrap();
+    let mut data: &[u8] = b"new";
+    collection.write(&mut tx, "key", &mut data).await.unwrap();
+
+    // The first poll synchronously spawns the detached commit, then waits for it. The read
+    // handle prevents that commit from completing, so dropping this pending future cancels only
+    // its caller.
+    let mut commit = Box::pin(tx.commit());
+    let first_poll = poll_fn(|cx| Poll::Ready(commit.as_mut().poll(cx))).await;
+    assert!(
+        matches!(first_poll, Poll::Pending),
+        "commit unexpectedly completed while the read lock was held"
+    );
+    drop(commit);
+
+    // The detached commit still owns the active transaction.
+    assert!(matches!(
+        storage.begin_transaction(),
+        Err(StorageError::TransactionBusy)
+    ));
+
+    drop(guard_holder);
+
+    // The detached commit finishes; wait until the next transaction can begin.
+    let next = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Ok(tx) = storage.begin_transaction() {
+                return tx;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("transaction flag was never released");
+    next.rollback();
+
+    let handle = collection.read("key").await.unwrap();
+    let mut buf = vec![0u8; 3];
+    assert_eq!(handle.read_at(0, &mut buf).unwrap(), 3);
+    assert_eq!(&buf, b"new");
 }

@@ -9,21 +9,46 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-STABLE := 1.88.0
-NIGHTLY := nightly-2026-07-21
+# The pinned stable toolchain is the MSRV, declared once as `rust-version` in Cargo.toml.
+# It is also read by cargo's resolver and Dependabot, so it must be a full version.
+CARGO_TOML := Cargo.toml
+ifeq ($(shell grep -qx '\[workspace\]' '$(CARGO_TOML)' 2>/dev/null && echo ok),)
+$(error make must be run from the repository root (or with make -C <repo-root>), current dir: $(CURDIR))
+endif
+STABLE := $(shell sed -n 's/^rust-version = "\([^"]*\)"$$/\1/p' '$(CARGO_TOML)')
+ifeq ($(shell printf '%s' '$(STABLE)' | grep -Ex '[0-9]+\.[0-9]+\.[0-9]+'),)
+$(error rust-version in $(CARGO_TOML) must be a full version like 1.88.0, found "$(STABLE)")
+endif
+NIGHTLY := nightly-2026-11-12
 CARGO_DENY_VERSION := 0.20.2
 CARGO_LLVM_COV_VERSION := 0.9.1
 PROTOC_VERSION := 34.1
+UV_VERSION := 0.13.6
+
+# tools installed by setup-devenv (uv, protoc) are placed in ~/.local/bin
+export PATH := $(HOME)/.local/bin:$(PATH)
+
+# on macOS the xcode tools cause a build failure in bazel due to a fullpath being used
+# this selects the macOS bazel targets if it detects the platform
+HOST_OS := $(if $(filter Windows_NT,$(OS)),Windows,$(shell uname -s))
+BAZEL_BUILD_CONFIG :=
+BAZEL_CAN_BUILD_CONFIG :=
+ifeq ($(HOST_OS),Darwin)
+BAZEL_BUILD_CONFIG := --config=macos-clt
+else ifeq ($(HOST_OS),Linux)
+BAZEL_CAN_BUILD_CONFIG := --config=can
+endif
 
 .DEFAULT_GOAL := build
 
 .PHONY: build release check test integration-test integration-test-can integration-test-mixed \
 	build-all-features build-mbedtls build-minimal build-minimal-cda \
+	bazel-build bazel-check actions-update-lockfile \
 	lint lint-all-features lint-nightly lint-nightly-all-features fmt fmt-check \
 	precommit precommit-all-features \
-	coverage coverage-can integration-coverage deny \
-	generate-config generate-flatbuffers generate-protos docs rustdoc \
-	tool-versions setup-devenv doctor run profile depgraph clean clean-doc help
+	coverage coverage-can integration-coverage deny deny-unused-ignores \
+	generate-config generate-test-config generate-flatbuffers generate-protos docs rustdoc \
+	tool-versions setup-devenv install-uv install-protoc doctor run heap-profiling depgraph clean clean-doc help update
 
 build:
 	cargo +$(STABLE) build --locked $(ARGS)
@@ -35,16 +60,16 @@ check:
 	cargo +$(STABLE) check --workspace
 
 test:
-	cargo +$(STABLE) test --locked --workspace $(ARGS)
+	cargo +$(STABLE) test --locked --workspace --features opensovd-cda/doip-direct-connect $(ARGS)
 
 integration-test:
-	cargo +$(STABLE) test --locked -p integration-tests --features integration-tests -- --show-output
+	cargo +$(STABLE) test --locked -p integration-tests --features integration-tests $(ARGS)
 
 integration-test-can:
-	CDA_INTEGRATION_TEST_USE_CAN=true cargo +$(STABLE) test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
+	CDA_INTEGRATION_TEST_USE_CAN=true cargo +$(STABLE) test --locked -p integration-tests --features can-integration-tests --test integration_tests
 
 integration-test-mixed:
-	CDA_INTEGRATION_TEST_USE_MIXED=true cargo +$(STABLE) test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
+	CDA_INTEGRATION_TEST_USE_MIXED=true cargo +$(STABLE) test --locked -p integration-tests --features can-integration-tests --test integration_tests
 
 build-all-features:
 	$(MAKE) build ARGS="--all-features $(ARGS)"
@@ -57,6 +82,29 @@ build-minimal:
 
 build-minimal-cda:
 	$(MAKE) build ARGS="--no-default-features --package opensovd-cda $(ARGS)"
+
+bazel-build:
+	bazel build $(BAZEL_BUILD_CONFIG) //:cda_mbedtls //:opensovd-cda
+ifneq ($(BAZEL_CAN_BUILD_CONFIG),)
+	bazel build $(BAZEL_BUILD_CONFIG) $(BAZEL_CAN_BUILD_CONFIG) //:opensovd-cda
+endif
+	cd bazel/vendor-consumer-test && bazel build $(BAZEL_BUILD_CONFIG) //:fancy-cda
+ifneq ($(BAZEL_CAN_BUILD_CONFIG),)
+	cd bazel/vendor-consumer-test && bazel build $(BAZEL_BUILD_CONFIG) $(BAZEL_CAN_BUILD_CONFIG) //:fancy-cda
+endif
+
+bazel-check:
+	python3 bazel/check_mbedtls_revision.py
+	bazel query //...
+	@openssl_targets="$$(bazel cquery 'filter("(^|[:/])openssl($|[:/])", deps(//:cda_mbedtls))' --output=label)" || exit $$?; \
+	if [ -n "$$openssl_targets" ]; then \
+		printf '%s\n' '::error::mbedTLS target graph contains OpenSSL targets:' "$$openssl_targets"; \
+		exit 1; \
+	fi
+
+actions-update-lockfile:
+	# Install with: gh extension install github/gh-actions-lock
+	gh actions-lock
 
 lint:
 	cargo +$(STABLE) clippy --all-targets $(ARGS) -- --deny=warnings
@@ -83,7 +131,7 @@ precommit-all-features:
 	uv run --locked --group tools prek run --all-files --group CI --group @ungrouped --show-diff-on-failure
 
 coverage:
-	cargo +$(STABLE) llvm-cov --workspace --lcov --output-path lcov.info -- --show-output
+	cargo +$(STABLE) llvm-cov --workspace --features opensovd-cda/doip-direct-connect --lcov --output-path lcov.info -- --show-output
 
 coverage-can:
 	cargo +$(STABLE) llvm-cov -p opensovd-cda -p cda-comm-can --features opensovd-cda/can-socketcand,cda-comm-can/can-socketcand --lcov --output-path lcov-can-unit.info -- --show-output
@@ -92,10 +140,20 @@ integration-coverage:
 	CDA_INTEGRATION_TEST_COVERAGE=true cargo +$(STABLE) llvm-cov --features integration-tests --lcov --output-path lcov.info
 
 deny:
-	cargo +$(STABLE) deny check $(ARGS)
+	cargo +$(STABLE) deny $(if $(FORMAT),--format $(FORMAT)) check $(ARGS)
+
+deny-unused-ignores:
+	$(MAKE) --no-print-directory deny ARGS="advisories -A vulnerability -A unmaintained -A unsound -A notice -A yanked -D advisory-not-detected"
+
+# Update dependencies via Nightly, because dependency cooldown is only available with Rust 1.100.
+update:
+	cargo +$(NIGHTLY) update
 
 generate-config:
 	cargo +$(STABLE) run --locked --all-features -- generate-config --output $(or $(OUTPUT),opensovd-cda.toml)
+
+generate-test-config:
+	cargo +$(STABLE) test --locked --workspace --all-features --test integration_tests -- --exact --ignored util::config::tests::generate_compose_configs
 
 generate-flatbuffers:
 	$(MAKE) build ARGS="-p cda-database --features gen-flatbuffers $(ARGS)"
@@ -119,13 +177,25 @@ tool-versions:
 
 setup-devenv:
 	@command -v rustup >/dev/null 2>&1 || { printf '%s\n' 'rustup is required: https://rustup.rs'; exit 1; }
-	@command -v uv >/dev/null 2>&1 || { printf '%s\n' 'uv is required: https://docs.astral.sh/uv/'; exit 1; }
+	$(MAKE) install-uv install-protoc
 	rustup toolchain install $(STABLE) --profile minimal --component clippy --component rustfmt --component llvm-tools
 	rustup toolchain install $(NIGHTLY) --profile minimal --component clippy --component rustfmt
 	cargo +$(STABLE) install --locked --version $(CARGO_DENY_VERSION) cargo-deny
 	cargo +$(STABLE) install --locked --version $(CARGO_LLVM_COV_VERSION) cargo-llvm-cov
 	uv sync --locked --group tools
 	$(MAKE) doctor
+
+install-uv:
+	@command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/$(UV_VERSION)/install.sh | sh
+
+install-protoc:
+	@command -v protoc >/dev/null 2>&1 || { \
+		case "$$(uname -s)" in Linux) os=linux ;; Darwin) os=osx ;; *) printf '%s\n' 'install protoc manually: https://protobuf.dev'; exit 1 ;; esac; \
+		case "$$(uname -m)" in x86_64) arch=x86_64 ;; aarch64|arm64) arch=aarch_64 ;; *) printf '%s\n' 'install protoc manually: https://protobuf.dev'; exit 1 ;; esac; \
+		zip="$$(mktemp -d)/protoc.zip"; \
+		curl -fsSL -o "$$zip" "https://github.com/protocolbuffers/protobuf/releases/download/v$(PROTOC_VERSION)/protoc-$(PROTOC_VERSION)-$$os-$$arch.zip" && \
+		unzip -qo "$$zip" -d "$$HOME/.local"; \
+	}
 
 doctor:
 	@missing=0; \
@@ -177,8 +247,8 @@ doctor:
 run:
 	cargo +$(STABLE) run --locked --release -- $(ARGS)
 
-profile:
-	RUSTFLAGS="-C force-frame-pointers=yes" cargo +$(STABLE) build --profile release-with-debug --bin opensovd-cda --features heap-profiling
+heap-profiling:
+	RUSTFLAGS="--cfg heap_profiling -C force-frame-pointers=yes" cargo +$(STABLE) build --profile release-with-debug --bin opensovd-cda
 
 depgraph:
 	cargo +$(STABLE) depgraph --target-deps --dedup-transitive-deps --workspace-only | dot -Tpng > depgraph.png
@@ -195,13 +265,16 @@ help:
 		'release ARGS="..."           Build the release profile' \
 		'check                        Check the workspace' \
 		'test ARGS="..."              Run workspace unit tests' \
-		'integration-test             Run DoIP integration tests' \
-		'integration-test-can         Run serial CAN integration tests' \
-		'integration-test-mixed       Run serial mixed DoIP/CAN integration tests' \
+		'integration-test ARGS="..."  Run DoIP integration tests' \
+		'integration-test-can         Run CAN integration tests' \
+		'integration-test-mixed       Run mixed DoIP/CAN integration tests' \
 		'build-all-features           Build with all features' \
 		'build-mbedtls                Build CDA with only mbedTLS' \
 		'build-minimal                Build the workspace without default features' \
 		'build-minimal-cda            Build CDA without default features' \
+		'bazel-build                  Build platform-supported primary and vendor targets' \
+		'bazel-check                  Validate the Bazel configuration and target graph' \
+		'actions-update-lockfile      Regenerate .github/workflows/actions.lock' \
 		'lint ARGS="..."              Run stable Clippy' \
 		'lint-all-features            Run stable Clippy with all features' \
 		'lint-nightly ARGS="..."      Run pinned-nightly Clippy' \
@@ -213,8 +286,11 @@ help:
 		'coverage                     Generate unit-test LCOV coverage' \
 		'coverage-can                 Generate CAN unit-test LCOV coverage' \
 		'integration-coverage         Generate integration-test LCOV coverage' \
-		'deny ARGS="..."              Run all or selected cargo-deny checks' \
+		'deny ARGS="..."              Run all or selected cargo-deny checks (FORMAT=json for JSON)' \
+		'deny-unused-ignores          Fail on advisory ignores in deny.toml that are no longer needed' \
+		'update                       Update Cargo.lock dependencies' \
 		'generate-config              Regenerate opensovd-cda.toml' \
+		'generate-test-config         Generate testcontainer/cda-test-config*.toml for docker compose' \
 		'generate-flatbuffers         Regenerate FlatBuffers sources' \
 		'generate-protos              Regenerate protobuf sources' \
 		'docs                         Rebuild Sphinx documentation' \
@@ -223,6 +299,6 @@ help:
 		'setup-devenv                 Install pinned development tools' \
 		'doctor                       Check development prerequisites' \
 		'run ARGS="..."               Run the release binary' \
-		'profile                      Build the heap-profiling binary' \
+		'heap-profiling               Build the heap-profiling binary' \
 		'depgraph                     Generate depgraph.png' \
 		'clean / clean-doc            Clean all artifacts or Rustdoc artifacts'

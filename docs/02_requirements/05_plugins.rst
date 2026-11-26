@@ -42,15 +42,71 @@ protection mutation authority.
 
 .. _requirements-plugins-security:
 
-Security
---------
+Security Plugin
+----------------
 
-A SOVD security plugin must be able to:
+.. req:: Security Plugin - Authentication
+    :id: req~plugin-security-authentication
+    :links: arch~plugin-security-core-traits
+    :status: draft
 
-* Validate and verify the JWT token from incoming HTTP Requests
-* Utilize additional headers from the request
-* Reject the incoming request
-* Enhance the SOVD-request-context with data, this context can then be used in other addons
+    A SOVD security plugin must be able to:
+
+    * Validate and verify the JWT token from incoming HTTP requests
+    * Utilize additional headers from the request
+    * Reject the incoming request
+    * Enhance the SOVD-request-context with data, this context can then be used in other addons
+
+
+.. req:: Security Plugin - Service Validation
+    :id: req~plugin-security-validate-service
+    :links: arch~plugin-security-validate-service
+    :status: draft
+
+    A SOVD security plugin must be able to validate a resolved diagnostic service request against
+    security policy before it is executed, and reject it if it is not allowed.
+
+
+.. req:: Security Plugin - Request Send Authorization
+    :id: req~plugin-security-validate-request-send
+    :links: arch~plugin-security-validate-request-send
+    :status: draft
+
+    A security plugin must be able to authorize, immediately before transmission, whether a fully
+    resolved UDS request (addressed to a single ECU or sent functionally/broadcast to multiple ECUs)
+    is currently allowed to be sent.
+
+    This determination must be customizable by the vendor, since it may depend on proprietary,
+    vendor-specific state that is not known to the CDA core (e.g. state obtained through a
+    vendor-specific API external to the CDA).
+
+    To make this determination, the plugin must be given:
+
+    * The authentication token/credentials of the caller that triggered the request.
+    * The current holder of the relevant lock (vehicle, functional group, or ECU/component lock,
+      see :need:`req~sovd-api-lock-api`), if any.
+
+    If the plugin rejects the request, the request must not be transmitted to the ECU, and the
+    rejection must be reported as a distinct "request not allowed" outcome, separate from the
+    outcome of :need:`req~plugin-security-validate-service`.
+
+    The plugin must be able to return parameters with the rejection (e.g. why the request was
+    denied), which must be reported to the client together with the "request not allowed"
+    outcome.
+
+    **Rationale**
+
+    Some vendors require diagnostic requests to be gated on state that only the vendor's own systems
+    can evaluate (e.g. vehicle safety state, proprietary lock/ownership state). Since this state is
+    not standardized, the decision must be delegated to a vendor-provided plugin implementation rather
+    than being hard-coded in the CDA core.
+
+
+.. note::
+   The security plugin authenticates SOVD clients on the HTTP level (e.g. JWT). This is
+   independent of the UDS service Authentication (SID 29\ :sub:`16`), which authenticates a
+   client towards an ECU, see :need:`req~sovd-api-authentication-modes`. The plugin may
+   still allow or reject ``PUT /modes/authentication`` requests like any other request.
 
 Paths
 -----
@@ -64,10 +120,8 @@ A SOVD plugin must be able to:
 UDS
 ---
 
-An UDS plugin must be able to:
-
-* Intercept UDS requests before they are sent to the ECU
-* Intercept UDS responses
+An UDS plugin must be able to intercept UDS requests before they are sent to the ECU
+(see :need:`req~plugin-security-validate-request-send`) and intercept UDS responses.
 
 DoIP
 ----
@@ -263,7 +317,7 @@ Vehicle Topology Plugin
       performing any live detection or vehicle communication. Subsequent behavior is governed by
       :need:`req~dt-deferred-initialization` (``init_mode``) as if no persisted topology had ever existed.
     - ``clear_persisted=false``, ``trigger_detection=true``: a live detection run is performed and its
-      results are merged (upserted) into the existing persisted topology, without first removing entries
+      results are merged (persisted) into the existing persisted topology, without first removing entries
       for gateways/ECUs not seen during this run.
     - ``clear_persisted=false``, ``trigger_detection=false``: no operation is performed; this combination
       must be rejected as an invalid request.
@@ -277,3 +331,39 @@ Vehicle Topology Plugin
     Decoupling the clearing of persisted data from triggering live detection allows clients to, for
     example, force the CDA back into a quiet state without any vehicle communication (clear only), or
     refresh persisted data incrementally without discarding previously known entries (detect only).
+
+
+.. req:: Vehicle Topology Plugin - Connect ECU
+    :id: req~plugin-vehicle-topology-connect-ecu
+    :links: arch~plugin-vehicle-topology-connect-ecu
+    :status: draft
+
+    The ``doip-connect-ecu`` operation, following
+    the standard SOVD operations semantics, shall be available at
+    ``POST /apps/sovd2uds/operations/doip-connect-ecu/executions``.
+    It must accept the parameters ``ecu``, ``ip`` and ``protocol_version`` and shall provide
+    a mechanism to establish a connection to a DoIP gateway ECU without utilizing VIR/VAM.
+    Requests for an ECU that is not a gateway must be rejected with ``400 Bad Request``.
+
+    The operation must only be available if it is built in (build feature ``doip-direct-connect``)
+    and enabled by a configuration entry. If the configuration entry is set in a build without the
+    operation, the CDA must log an error and continue without offering the operation.
+
+    The operation must require the vehicle lock to be held by the requesting client.
+
+    The operation must only ever establish a connection for an ECU that has none. An existing connection
+    must never be changed or replaced by this operation, even if that connection is currently not active
+    (e.g. because the gateway is offline). In that case, or if a connection for the ECU is currently
+    being established, the request must be rejected with ``409 Conflict``.
+
+    The time that establishing the connection may take must be limited. Neither a client giving up on the
+    request nor a connection that is still being established may leave the connection in an
+    inconsistent state, and the latter must not delay disabling communication or shutdown.
+
+    After the connection has been established, routing activation, TLS upgrade and ECU identification
+    must behave exactly as for a gateway that was discovered via VIR/VAM.
+
+    **Rationale**
+
+    For cases where VIR/VAM discovery is not possible or unreliable, a mechanism has to exist
+    to connect an ECU directly on a given IP address.

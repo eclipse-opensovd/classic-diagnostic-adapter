@@ -140,6 +140,7 @@ pub(crate) mod diag_service {
         openapi,
         sovd::{
             WebserverEcuState,
+            binary_encoding::BinaryEncodingParam,
             components::ecu::{DiagServicePathParam, data_request},
             error::{ApiError, ErrorWrapper},
         },
@@ -153,6 +154,7 @@ pub(crate) mod diag_service {
             Query<sovd_configurations::ConfigurationsQuery>,
             ApiError,
         >,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverEcuState {
             ecu_name,
             uds,
@@ -182,6 +184,7 @@ pub(crate) mod diag_service {
             Some(body),
             (security_plugin, &locks, true),
             include_schema,
+            binary_encoding,
         )
         .await
     }

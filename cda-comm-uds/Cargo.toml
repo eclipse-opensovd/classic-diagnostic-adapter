@@ -13,6 +13,7 @@
 name = "cda-comm-uds"
 version = "0.1.0"
 edition.workspace = true
+rust-version.workspace = true
 publish = false
 description = "UDS communication layer used in CDA"
 homepage.workspace = true
@@ -53,5 +54,6 @@ dlt-tracing = ["cda-interfaces/dlt-tracing"]
 cda-build = { workspace = true }
 
 [dev-dependencies]
+cda-interfaces = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 cda-plugin-communication-management = { workspace = true, features = ["test-utils"] }

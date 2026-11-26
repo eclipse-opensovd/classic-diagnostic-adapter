@@ -13,6 +13,7 @@
 name = "cda-comm-doip"
 version = "0.1.0"
 edition.workspace = true
+rust-version.workspace = true
 publish = false
 description = "DoIP communication layer used in CDA"
 homepage.workspace = true
@@ -64,5 +65,6 @@ openssl-vendored = ["openssl", "openssl/vendored"]
 dlt-tracing = ["cda-interfaces/dlt-tracing"]
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "time", "sync", "test-util"] }
+cda-interfaces = { workspace = true, features = ["test-utils"] }
+tokio = { workspace = true, features = ["macros", "rt", "time", "sync", "net", "io-util", "test-util"] }
 serde_json = { workspace = true }

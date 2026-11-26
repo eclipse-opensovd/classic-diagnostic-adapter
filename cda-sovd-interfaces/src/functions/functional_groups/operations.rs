@@ -39,6 +39,9 @@ pub mod service {
         pub parameters: HashMap<String, serde_json::Map<String, serde_json::Value>>,
         /// Errors that occurred during the operation
         /// JSON pointers reference /parameters/{ecu-name} or /parameters/{ecu-name}/{field}
+        ///
+        /// Intentionally named `errors` (array) instead of the single `error` defined by
+        /// ISO 17978-3, Table 183, see `arch~sovd-api-functional-communication-operations`.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         pub errors: Vec<DataError<T>>,
         #[schemars(skip)]
@@ -65,6 +68,9 @@ pub struct FgAsyncGetByIdResponse<T> {
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub parameters: HashMap<String, serde_json::Map<String, serde_json::Value>>,
     /// Errors that occurred during execution, with JSON pointers to per-ECU entries.
+    ///
+    /// Intentionally named `errors` instead of `error` (ISO 17978-3, Table 189), see
+    /// `arch~sovd-api-functional-communication-operations`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<DataError<T>>,
     #[schemars(skip)]

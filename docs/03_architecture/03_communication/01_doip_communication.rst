@@ -241,6 +241,7 @@ Vehicle Identification
 
 .. arch:: Vehicle Identification
     :id: arch~doip-vehicle-identification
+    :links: testset~doip-vehicle-identification
     :status: draft
 
     Vehicle identification is the process by which the CDA discovers DoIP entities
@@ -249,15 +250,30 @@ Vehicle Identification
 
     **Discovery Process**
 
-    1. A UDP socket is created and bound to the configured tester address and gateway port
-       (default: 13400). The socket is configured with broadcast capability and address reuse.
-    2. A Vehicle Identification Request (VIR, payload type ``0x0001``) is broadcast to
+    1. A UDP socket (VIR socket) is created and bound to the configured tester address and the
+       port selected by ``doip.vir_source_port``: a fixed port, ``0`` (chosen by the operating
+       system) or a free port of an inclusive range (default: ``49152-65535``, as required by
+       ISO 13400-2 REQ 4.DoIP-135). The socket is configured with broadcast capability. Only if
+       the selected port equals the gateway port (legacy behavior), address reuse is enabled so
+       the port can be shared with the spontaneous VAM listener. A warning is logged if the
+       configured port is outside the dynamic port range. A single configured port is bound up to
+       3 times, 200 ms apart; a range tries each of its ports once. If no port can be bound, an
+       error is logged and no VIR is sent; enabling the communication does not fail, gateways are
+       still connected by VAMs or directly. The VIR socket is only bound if a VIR is sent.
+    2. Before the VIR is sent, the socket of the spontaneous VAM listener is bound to
+       ``0.0.0.0`` and the gateway port, so that responses of DoIP entities which answer to the
+       gateway port instead of the VIR source port are not lost. The VIR socket is reused as
+       listener socket only if it is bound to ``0.0.0.0`` and the gateway port. If the listener
+       socket cannot be bound, an error is logged and spontaneous VAMs are ignored, without
+       failing the communication.
+    3. A Vehicle Identification Request (VIR, payload type ``0x0001``) is broadcast to
        ``255.255.255.255`` on the gateway port.
-    3. Vehicle Announcement Messages (VAM, payload type ``0x0004``) are collected within a
-       timeout window.
-    4. VAM responses are filtered by subnet mask: only responses from IP addresses within the
+    4. Vehicle Announcement Messages (VAM, payload type ``0x0004``) are received on the VIR
+       socket, the DoIP entities answer to the VIR source port (ISO 13400-2 REQ 4.DoIP-137),
+       and collected within a timeout window.
+    5. VAM responses are filtered by subnet mask: only responses from IP addresses within the
        tester's subnet (``tester_address AND tester_subnet``) are accepted.
-    5. Each accepted VAM is matched against known ECU logical addresses from the diagnostic databases.
+    6. Each accepted VAM is matched against known ECU logical addresses from the diagnostic databases.
 
     **Vehicle Announcement Message Content**
 
@@ -280,7 +296,13 @@ Vehicle Identification
     - Gateways reconnecting after a temporary disconnection
 
     When a new or known VAM is received, the system establishes or re-uses the connection
-    and triggers variant detection for the associated ECUs.
+    and triggers variant detection for the associated ECUs. For an already connected gateway,
+    variant detection is not triggered again if it was triggered for this gateway within the
+    last 3 seconds (by discovery, a direct connect or a previous VAM). This suppresses the
+    repeated vehicle announcements of a DoIP entity (``A_DoIP_Announce_Num`` VAMs every
+    ``A_DoIP_Announce_Interval``) and VIR responses received on both the VIR socket and the
+    VAM listener socket. The window does not move with ignored VAMs, so later VAMs still
+    trigger variant detection, e.g. to bring an ECU marked offline back online.
 
     .. uml::
         :caption: Vehicle Identification Sequence
@@ -290,12 +312,14 @@ Vehicle Identification
         skinparam sequenceArrowThickness 2
 
         participant "CDA" as CDA
-        participant "UDP Socket\n(port 13400)" as UDP
+        participant "VIR Socket\n(vir_source_port)" as UDP
+        participant "VAM Listener Socket\n(0.0.0.0:13400)" as VAML
         participant "DoIP Entity A" as GWA
         participant "DoIP Entity B" as GWB
 
         == Initial Discovery ==
-        CDA -> UDP: Create socket\n(broadcast, address reuse)
+        CDA -> UDP: Create socket\n(broadcast)
+        CDA -> VAML: Create socket\n(broadcast, address reuse)
         CDA -> UDP: VIR broadcast to\n255.255.255.255:13400
 
         UDP -> GWA: Vehicle Identification\nRequest (0x0001)
@@ -308,10 +332,10 @@ Vehicle Identification
         CDA -> CDA: Match logical addresses\nto MDD databases
 
         == Spontaneous Listener (background) ==
-        CDA -> UDP: Listen for spontaneous VAMs
+        CDA -> VAML: Listen for spontaneous VAMs
         ...
-        GWA --> UDP: Spontaneous VAM\n(entity came online)
-        UDP --> CDA: New VAM received
+        GWA --> VAML: Spontaneous VAM\n(entity came online)
+        VAML --> CDA: New VAM received
         CDA -> CDA: Establish connection\nand trigger variant detection
         @enduml
 
@@ -321,34 +345,41 @@ Spontaneous VAM Handling Mode
 
 .. arch:: Spontaneous VAM Handling Mode
     :id: arch~doip-vam-handling-mode
+    :links: dimpl~doip-vam-handling-mode, testset~doip-vam-handling-mode
     :status: draft
 
     The spontaneous VAM listener's behavior is governed by the configured
     ``communication.vam_handling_mode``:
 
-    - **always** (default): the listener is active and any spontaneous VAM whose logical address matches a
+    - **Always** (default): the listener is active and any spontaneous VAM whose logical address matches a
       known ECU from the diagnostic databases triggers connection establishment and variant detection, as
       described in the Spontaneous VAM Listener section above.
-    - **persisted-only**: the listener is active only while a persisted ECU topology exists (see
+    - **PersistedOnly**: the listener is active only while a persisted ECU topology exists (see
       :need:`arch~dt-ecu-list-persistence`); this is a one-time check of whether the persistence bucket is
       present, not a per-VAM lookup of the responding entity's logical address. When a topology exists,
-      spontaneous VAMs are handled identically to **always** mode, including VAMs from entities not yet
+      spontaneous VAMs are handled identically to **Always** mode, including VAMs from entities not yet
       present in the persisted topology -- such entities are discovered and added like any other. When no
       persisted topology exists, the listener discards all spontaneous VAMs (logged only) until a topology
-      has been persisted (via startup detection or ``networkreset``, see
-      :need:`arch~plugin-vehicle-topology-reset-persistence`), at which point it starts handling spontaneous
+      has been persisted, at which point it starts handling spontaneous
       VAMs normally without requiring a restart. When ``communication.ecu_list_persistence.enabled`` is
       ``false`` (see :need:`arch~dt-ecu-list-persistence`), a persisted topology can never exist, so this
-      mode is functionally identical to **never** in that configuration.
-    - **never**: the spontaneous VAM listener task is not started. Gateways can only be (re-)discovered via
+      mode is functionally identical to **Never** in that configuration.
+    - **Never**: the spontaneous VAM listener task is not started. Gateways can only be (re-)discovered via
       an explicit ``networkreset`` execution (see :need:`arch~plugin-vehicle-topology-reset-persistence`) or
       via the DoIP connection retry mechanism operating on already-established connections (see
       ``CP_DoIPConnectionRetryDelay`` / ``CP_DoIPConnectionRetryAttempts``).
+
+    The mode is configured as ``communication.vam_handling_mode = "Always" | "PersistedOnly" | "Never"``.
+    Whether a persisted topology exists is tracked in memory: it is set when a non-empty topology is loaded at
+    startup or written after a detection run. In ``PersistedOnly`` mode, the listener checks this flag for
+    every received announcement, so handling starts as soon as a topology has been persisted.
 
     Independent of ``vam_handling_mode``, the spontaneous VAM listener task itself is only started once
     ECU/DoIP communication has actually been initialized (see :need:`arch~dt-deferred-initialization`).
     While ``init_mode`` is ``OnDemand`` or ``Disabled`` and its trigger has not yet fired, no listener task
     exists, regardless of the configured mode.
+    With ``doip.discovery = Disabled`` the listener is not started either, regardless of the configured
+    mode.
 
     .. uml::
         :caption: Spontaneous VAM Handling Mode
@@ -361,11 +392,11 @@ Spontaneous VAM Handling Mode
         participant "Spontaneous VAM\nListener" as Listener
         participant "Persisted Topology" as Persist
 
-        == communication.vam_handling_mode = always ==
+        == communication.vam_handling_mode = Always ==
         GW --> Listener: spontaneous VAM
         Listener -> Listener: connect + trigger variant detection
 
-        == communication.vam_handling_mode = persisted-only ==
+        == communication.vam_handling_mode = PersistedOnly ==
         Listener -> Persist: does a persisted topology exist?
         alt persisted topology exists
             Persist --> Listener: yes
@@ -377,7 +408,7 @@ Spontaneous VAM Handling Mode
             Listener -> Listener: discard (log only)
         end
 
-        == communication.vam_handling_mode = never ==
+        == communication.vam_handling_mode = Never ==
         note over Listener: listener task not started
         @enduml
 
@@ -616,7 +647,8 @@ Diagnostic Message Exchange
 
     The only exception is TesterPresent NRCs (``7F 3E xx``), which are intercepted at
     the DoIP decoding layer and routed to a dedicated ``TesterPresentNRC`` event so the
-    receiver can log-and-drop them without polluting per-ECU channels.
+    receiver can log them, report them as a reply of the ECU (see :need:`arch~dt-ecu-states`)
+    and drop them without polluting per-ECU channels.
 
     Multiple intermediate responses may be received before the final response:
 
@@ -849,6 +881,7 @@ Connection Management
 
 .. arch:: DoIP Connection Management
     :id: arch~doip-connection-management
+    :links: testset~doip-connection-management
     :status: draft
 
     The CDA manages DoIP TCP connections with automatic recovery from connection failures.

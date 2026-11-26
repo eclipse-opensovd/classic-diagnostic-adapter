@@ -108,6 +108,8 @@ note bottom of HttpProtection
   Registry is cloneable. Each owner token is opaque,
   non-cloneable, and can lift only its own protection.
   First installed matching protection wins.
+  Always accessible routes, fixed at startup via Setup,
+  are exempt from every global protection.
 end note
 
 note bottom of Worker

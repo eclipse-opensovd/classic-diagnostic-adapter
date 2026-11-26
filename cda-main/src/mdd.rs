@@ -101,6 +101,7 @@ struct EcuLoadContext<'a> {
     com_params: &'a Arc<ComParams>,
     fallback_to_base_variant: bool,
     strict_parameter_validation: bool,
+    components_config: &'a cda_interfaces::datatypes::ComponentsConfig,
 }
 
 /// Result of building an ECU manager and associated metadata.
@@ -440,6 +441,9 @@ fn create_ecu_manager<S: SecurityPlugin>(
         },
         ctx.func_description_cfg,
     )
+    .map(|manager| {
+        manager.with_additional_field_filters(ctx.components_config.additional_fields.clone())
+    })
     .map_err(|e| MddLoadingError::EcuManagerFailed {
         ecu: ctx.ecu_name.clone(),
         reason: format!("{e:?}"),
@@ -560,6 +564,7 @@ fn load_single_mdd<S: SecurityPlugin>(
         com_params: &com_params,
         fallback_to_base_variant: config.database.fallback_to_base_variant,
         strict_parameter_validation: config.strict.parameter_validation(),
+        components_config: &config.components,
     };
 
     let per_ecu_cfg = ecu_config_map.get(&ecu_name.to_lowercase());
@@ -723,6 +728,9 @@ mod tests {
         let func_description_cfg = FunctionalDescriptionConfig::default();
         let protocol = Protocol::new("UDS_Ethernet_DoIP".to_owned());
         let com_params = Arc::new(ComParams::default());
+        let components_config = cda_interfaces::datatypes::ComponentsConfig {
+            additional_fields: HashMap::new(),
+        };
         let ctx = EcuLoadContext {
             mdd_path: mddfile.display().to_string(),
             mddfile: &mddfile,
@@ -736,6 +744,7 @@ mod tests {
             com_params: &com_params,
             fallback_to_base_variant: false,
             strict_parameter_validation: false,
+            components_config: &components_config,
         };
 
         let result = build_diagnostic_database(&mut HashMap::new(), &ctx);

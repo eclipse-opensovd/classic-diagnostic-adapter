@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use crate::{
     DiagComm, DiagServiceError, DoipComParams, DynamicPlugin, EcuAddresses, EcuState,
     EcuStateManager, HashMap, SecurityAccess, TesterPresentType, UdsComParams, VariantState,
+    authentication::{AuthenticationState, AuthenticationSubFunction},
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
         ComponentOperationsInfo, DataTransferMetaData, DtcCode, DtcExtendedInfo,
@@ -31,6 +32,9 @@ pub struct FlashTransferStartParams<'a> {
     pub file_path: &'a str,
     pub offset: u64,
     pub length: u64,
+    /// Subject of the client starting the transfer. Only this client may exit the
+    /// transfer, and releasing its lock aborts it.
+    pub owner: &'a str,
     pub transfer_meta_data: DataTransferMetaData,
 }
 
@@ -120,6 +124,9 @@ pub trait UdsSession: UdsTransport {
     /// While diagnostic communication is not enabled, nothing is sent and no
     /// activation is requested; the reset is deferred until communication is
     /// enabled again (see [`ResetOutcome::Deferred`]).
+    ///
+    /// A reset is housekeeping that must always be able to complete, so it is sent without
+    /// service validation or pre-send authorization.
     /// # Errors
     /// * `DiagServiceError::NotFound` if the ECU does not
     ///     exist or the state chart/default session cannot be found.
@@ -128,11 +135,7 @@ pub trait UdsSession: UdsTransport {
     ///     response when resetting the session.
     ///
     /// Forwards errors from the `set_ecu_session` and `send` functions.
-    async fn reset_ecu_session(
-        &self,
-        ecu_name: &str,
-        security_plugin: &DynamicPlugin,
-    ) -> Result<ResetOutcome, DiagServiceError>;
+    async fn reset_ecu_session(&self, ecu_name: &str) -> Result<ResetOutcome, DiagServiceError>;
 }
 
 /// UDS security access interface.
@@ -164,6 +167,9 @@ pub trait UdsSecurity: UdsTransport {
     /// While diagnostic communication is not enabled, nothing is sent and no
     /// activation is requested; the reset is deferred until communication is
     /// enabled again (see [`ResetOutcome::Deferred`]).
+    ///
+    /// A reset is housekeeping that must always be able to complete, so it is sent without
+    /// service validation or pre-send authorization.
     /// # Errors
     /// * `DiagServiceError::NotFound` if the ECU does not exist or
     ///     the state chart/default session cannot be found.
@@ -175,7 +181,6 @@ pub trait UdsSecurity: UdsTransport {
     async fn reset_ecu_security_access(
         &self,
         ecu_name: &str,
-        security_plugin: &DynamicPlugin,
     ) -> Result<ResetOutcome, DiagServiceError>;
 
     /// Get the name of the parameter used to send the key for the given ECU and security level.
@@ -186,6 +191,64 @@ pub trait UdsSecurity: UdsTransport {
         ecu_name: &str,
         level: &str,
     ) -> Result<String, DiagServiceError>;
+}
+
+/// UDS Authentication (SID 0x29) interface.
+///
+/// Client-driven: every call results in exactly one UDS Authentication request.
+/// Certificates, challenges and proofs of ownership are passed through as parameters.
+#[async_trait]
+pub trait UdsAuthentication: UdsTransport {
+    /// Send the Authentication service for the given sub-function.
+    ///
+    /// The service is resolved by its sub-function coded constant, the request
+    /// parameters are encoded and the response decoded via the diagnostic description.
+    /// The tracked authentication state is updated from a positive response; a
+    /// negative response leaves it and a running expiration unchanged. With
+    /// `expiration`, `deAuthenticate` is sent once it elapses, if the request
+    /// completed the authentication.
+    /// # Errors
+    /// * `DiagServiceError::InvalidRequest` if an expiration is given for `deAuthenticate`.
+    /// * `DiagServiceError::NotFound` if the ECU or a matching service does not exist.
+    ///
+    /// Forwards errors from the `send` function.
+    async fn authenticate(
+        &self,
+        ecu_name: &str,
+        sub_function: AuthenticationSubFunction,
+        parameters: Option<UdsPayloadData>,
+        security_plugin: &DynamicPlugin,
+        expiration: Option<Duration>,
+    ) -> Result<Self::Response, DiagServiceError>;
+
+    /// Send `deAuthenticate` if the tracked state is authenticated. The tracked
+    /// state is only reset on a positive response; otherwise it stays
+    /// authenticated, so a later reset tries again.
+    ///
+    /// While diagnostic communication is not enabled, nothing is sent; the tracked state
+    /// is kept and the reset is deferred (see [`ResetOutcome::Deferred`]).
+    /// # Errors
+    /// * `DiagServiceError::NotFound` if the ECU or the `deAuthenticate` service
+    ///   does not exist.
+    /// * `DiagServiceError::UnexpectedResponse` on a negative response.
+    ///
+    /// Forwards errors from the `send` function.
+    async fn reset_ecu_authentication(
+        &self,
+        ecu_name: &str,
+    ) -> Result<ResetOutcome, DiagServiceError>;
+
+    /// Returns the tracked authentication state of the ECU.
+    /// # Errors
+    /// * `DiagServiceError::NotFound` if the ECU does not exist.
+    async fn get_ecu_authentication_state(
+        &self,
+        ecu_name: &str,
+    ) -> Result<AuthenticationState, DiagServiceError>;
+
+    /// Returns true if the diagnostic description of the ECU contains at least
+    /// one Authentication service.
+    async fn has_authentication_services(&self, ecu_name: &str) -> bool;
 }
 
 /// UDS tester present interface for keeping ECU sessions alive.
@@ -227,7 +290,7 @@ pub trait UdsDataTransfer {
     /// # Errors
     /// * `DiagServiceError::NotFound`
     ///  * The ECU with the given name does not exist.
-    ///  * The transfer with the given ID does not exist.
+    ///  * The transfer with the given ID does not exist or was started by another `owner`.
     /// * `DiagServiceError::InvalidRequest`
     ///   * The transfer is not in a state where it can be exited, e.g. it is still in progress.
     ///   * Failures on retrieving the transfer exit status.
@@ -235,7 +298,12 @@ pub trait UdsDataTransfer {
         &self,
         ecu_name: &str,
         id: &str,
+        owner: &str,
     ) -> Result<(), DiagServiceError>;
+    /// Abort and remove the flash transfer of the given ECU if it was started by `owner`.
+    /// Transfers of other owners are left untouched. Used when the lock under which the
+    /// transfer was started ends, so no further `TransferData` blocks are sent.
+    async fn ecu_flash_transfer_abort(&self, ecu_name: &str, owner: &str);
     /// Fetch all flash transfers for the given ECU.
     /// # Errors
     /// * `DiagServiceError::NotFound`
@@ -284,6 +352,7 @@ pub trait UdsDtc: UdsTransport {
         include_snapshot: bool,
         include_schema: bool,
         memory_selection: Option<u8>,
+        binary_encoding: crate::BinaryEncoding,
     ) -> Result<DtcExtendedInfo, DiagServiceError>;
 
     /// Clear the faults for the given ECU
@@ -542,7 +611,7 @@ pub trait UdsFunctionalGroup: UdsTransport {
     /// * `security_plugin` - Security plugin to validate the request against
     /// * `sid` - Service identifier (SID) for the diagnostic service
     /// * `service_name` - Human-readable name of the service
-    /// * `params` - Optional parameters for the service as key-value pairs
+    /// * `params` - Optional parameters for the service
     /// * `map_to_json` - Whether to map the response to JSON format
     ///
     /// # Returns
@@ -557,7 +626,7 @@ pub trait UdsFunctionalGroup: UdsTransport {
         security_plugin: &DynamicPlugin,
         sid: u8,
         service_name: &str,
-        params: Option<HashMap<String, serde_json::Value>>,
+        params: Option<UdsPayloadData>,
         map_to_json: bool,
     ) -> Result<Self::Response, DiagServiceError>;
 
@@ -575,7 +644,7 @@ pub trait UdsFunctionalGroup: UdsTransport {
     /// * `security_plugin` - Security plugin to validate the request against
     /// * `sid` - Service identifier (SID) for the diagnostic service
     /// * `service_name` - Human-readable name of the service
-    /// * `params` - Optional parameters for the service as key-value pairs
+    /// * `params` - Optional parameters for the service
     /// * `map_to_json` - Whether to map the response to JSON format
     ///
     /// # Returns
@@ -593,7 +662,7 @@ pub trait UdsFunctionalGroup: UdsTransport {
         security_plugin: &DynamicPlugin,
         sid: u8,
         service_name: &str,
-        params: Option<HashMap<String, serde_json::Value>>,
+        params: Option<UdsPayloadData>,
         mode_expiration: Option<Duration>,
         map_to_json: bool,
     ) -> Result<HashMap<String, Result<Self::Response, DiagServiceError>>, DiagServiceError>;
@@ -613,6 +682,17 @@ pub trait UdsVariant {
     /// Will return Err if the ECU does not exist.
     async fn get_ecu_state(&self, ecu_name: &str) -> Result<EcuState, DiagServiceError>;
 
+    /// Make sure the ECU state reflects its actual reachability and return it.
+    ///
+    /// If the ECU is currently marked offline, variant detection is run as a
+    /// reachability probe (coalesced with any detection already in flight),
+    /// so an ECU that came back is reported online. ECUs that are already
+    /// online or flagged as duplicates are returned unchanged.
+    /// # Errors
+    /// Will return Err if the ECU does not exist or communication is not
+    /// enabled yet (activation is requested in that case).
+    async fn ensure_ecu_online(&self, ecu_name: &str) -> Result<EcuState, DiagServiceError>;
+
     /// Get the logical address of the given ECU.
     /// # Errors
     /// Will return Err if the ECU does not exist.
@@ -627,6 +707,16 @@ pub trait UdsVariant {
         &self,
         ecu_name: &str,
     ) -> Option<tokio::sync::watch::Receiver<VariantState>>;
+
+    /// Get the time of the last reply of the given ECU,
+    /// from the current or, if restored from a persisted topology, a previous
+    /// session. `None` if the ECU was never contacted.
+    /// # Errors
+    /// Will return Err if the ECU does not exist.
+    async fn get_last_seen(
+        &self,
+        ecu_name: &str,
+    ) -> Result<Option<std::time::SystemTime>, DiagServiceError>;
 }
 
 /// UDS communication interface - composite supertrait combining all UDS subtraits.
@@ -635,6 +725,7 @@ pub trait UdsEcu:
     UdsTransport
     + UdsSession
     + UdsSecurity
+    + UdsAuthentication
     + UdsTesterPresent
     + UdsDataTransfer
     + UdsDtc
@@ -686,8 +777,10 @@ pub mod mock {
     use super::{FlashTransferStartParams, ResetOutcome};
     use crate::{
         Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuState, HashMap, SecurityAccess,
-        TesterPresentType, UdsDataTransfer, UdsDtc, UdsEcu, UdsFunctionalGroup, UdsQuery,
-        UdsSecurity, UdsSession, UdsTesterPresent, UdsTransport, UdsVariant, VariantState,
+        TesterPresentType, UdsAuthentication, UdsDataTransfer, UdsDtc, UdsEcu, UdsFunctionalGroup,
+        UdsQuery, UdsSecurity, UdsSession, UdsTesterPresent, UdsTransport, UdsVariant,
+        VariantState,
+        authentication::{AuthenticationState, AuthenticationSubFunction},
         datatypes::{
             ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
             ComponentOperationsInfo, DataTransferMetaData, DtcCode, DtcExtendedInfo,
@@ -762,7 +855,6 @@ pub mod mock {
             async fn reset_ecu_session(
                 &self,
                 ecu_name: &str,
-                security_plugin: &DynamicPlugin,
             ) ->  Result<ResetOutcome, DiagServiceError>;
         }
 
@@ -771,7 +863,6 @@ pub mod mock {
             async fn reset_ecu_security_access(
                 &self,
                 ecu_name: &str,
-                security_plugin: &DynamicPlugin,
             ) ->  Result<ResetOutcome, DiagServiceError>;
             #[mockall::concretize]
             async fn set_ecu_security_access(
@@ -788,6 +879,28 @@ pub mod mock {
                 ecu_name: &str,
                 level: &str,
             ) -> Result<String, DiagServiceError>;
+        }
+
+        #[async_trait]
+        impl UdsAuthentication for UdsEcu {
+            #[mockall::concretize]
+            async fn authenticate(
+                &self,
+                ecu_name: &str,
+                sub_function: AuthenticationSubFunction,
+                parameters: Option<UdsPayloadData>,
+                security_plugin: &DynamicPlugin,
+                expiration: Option<Duration>,
+            ) -> Result<<MockUdsEcu as UdsTransport>::Response, DiagServiceError>;
+            async fn reset_ecu_authentication(
+                &self,
+                ecu_name: &str,
+            ) -> Result<ResetOutcome, DiagServiceError>;
+            async fn get_ecu_authentication_state(
+                &self,
+                ecu_name: &str,
+            ) -> Result<AuthenticationState, DiagServiceError>;
+            async fn has_authentication_services(&self, ecu_name: &str) -> bool;
         }
 
         #[async_trait]
@@ -820,7 +933,9 @@ pub mod mock {
                 &self,
                 ecu_name: &str,
                 id: &str,
+                owner: &str,
             ) -> Result<(), DiagServiceError>;
+            async fn ecu_flash_transfer_abort(&self, ecu_name: &str, owner: &str);
             async fn ecu_flash_transfer_status(
                 &self,
                 ecu_name: &str,
@@ -852,6 +967,7 @@ pub mod mock {
                 include_snapshot: bool,
                 include_schema: bool,
                 memory_selection: Option<u8>,
+                binary_encoding: crate::BinaryEncoding,
             ) -> Result<DtcExtendedInfo, DiagServiceError>;
             async fn delete_dtcs(
                 &self,
@@ -988,7 +1104,7 @@ pub mod mock {
                 security_plugin: &DynamicPlugin,
                 sid: u8,
                 service_name: &str,
-                params: Option<HashMap<String, serde_json::Value>>,
+                params: Option<UdsPayloadData>,
                 map_to_json: bool,
             ) -> Result<<MockUdsEcu as UdsTransport>::Response, DiagServiceError>;
              async fn set_functional_state(
@@ -997,7 +1113,7 @@ pub mod mock {
                 security_plugin: &DynamicPlugin,
                 sid: u8,
                 service_name: &str,
-                params: Option<HashMap<String, serde_json::Value>>,
+                params: Option<UdsPayloadData>,
                 mode_expiration: Option<Duration>,
                 map_to_json: bool,
             ) -> Result<HashMap<String, Result<<MockUdsEcu as UdsTransport>::Response,
@@ -1014,6 +1130,10 @@ pub mod mock {
                 &self,
                 ecu_name: &str,
             ) -> Result<EcuState, DiagServiceError>;
+            async fn ensure_ecu_online(
+                &self,
+                ecu_name: &str,
+            ) -> Result<EcuState, DiagServiceError>;
             async fn get_logical_address(
                 &self,
                 ecu_name: &str,
@@ -1022,6 +1142,10 @@ pub mod mock {
                 &self,
                 ecu_name: &str,
             ) -> Option<tokio::sync::watch::Receiver<crate::VariantState>>;
+            async fn get_last_seen(
+                &self,
+                ecu_name: &str,
+            ) -> Result<Option<std::time::SystemTime>, DiagServiceError>;
         }
 
         #[async_trait]

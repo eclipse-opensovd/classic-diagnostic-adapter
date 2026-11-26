@@ -22,6 +22,7 @@ Eclipse OpenSOVD Classic Diagnostic Adapter
    02_requirements/index.rst
    03_architecture/index.rst
    04_adr/index.rst
+   05_verification/index.rst
    49_generated/index.rst
 
 

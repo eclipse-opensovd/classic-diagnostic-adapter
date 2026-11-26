@@ -22,6 +22,7 @@ pub mod docs;
 pub mod error;
 pub mod functions;
 pub mod locking;
+pub mod version_info;
 
 fn default_true() -> bool {
     true
@@ -31,12 +32,15 @@ pub trait Payload {
     fn get_data_map(&self) -> HashMap<String, serde_json::Value>;
 }
 
+/// A sub-resource entry of a collection.
+/// Spec Table 43: `id` and `name` are mandatory, `translation_id` is optional.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct Resource {
     pub href: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
+    pub id: String,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translation_id: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Debug, schemars::JsonSchema)]
@@ -67,7 +71,8 @@ pub struct ResourceResponse {
 #[derive(Serialize, Debug, schemars::JsonSchema)]
 pub struct ObjectDataItem<T> {
     pub id: String,
-    pub data: serde_json::Map<String, serde_json::Value>,
+    /// Spec Table 85: `AnyValue`, so scalars and arrays are valid as well as objects.
+    pub data: serde_json::Value,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<DataError<T>>,
     #[schemars(skip)]
@@ -85,6 +90,26 @@ pub struct ArrayDataItem {
 pub struct IncludeSchemaQuery {
     #[serde(rename = "include-schema", default)]
     pub include_schema: bool,
+}
+
+/// Capability document of the vehicle root, `/vehicle/v15`.
+/// ISO 17978-3 7.6.3: each property is a link to a supported resource.
+pub mod vehicle {
+    pub mod get {
+        #[derive(serde::Serialize, schemars::JsonSchema)]
+        pub struct Response {
+            pub id: String,
+            pub name: String,
+            pub components: String,
+            pub apps: String,
+            pub functions: String,
+            pub locks: String,
+            pub data: String,
+            #[schemars(skip)]
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub schema: Option<schemars::Schema>,
+        }
+    }
 }
 
 pub mod sovd2uds {
@@ -168,6 +193,8 @@ pub mod common {
 
         pub const DTC_SETTING_NAME: &str = "DTC setting";
         pub const DTC_SETTING_ID: &str = "dtcsetting";
+        pub const AUTHENTICATION_NAME: &str = "Authentication";
+        pub const AUTHENTICATION_ID: &str = "authentication";
 
         pub type Query = crate::IncludeSchemaQuery;
         pub mod get {
@@ -176,16 +203,18 @@ pub mod common {
             use crate::Items;
 
             /// Used in the GET `/components/ecu/{ecu_id|functional_group}/modes/{mode_id}` endpoint
+            ///
+            /// Spec Table 234: `name` and `translation_id` are optional, `value` is mandatory.
             #[derive(Serialize, Deserialize, schemars::JsonSchema)]
             pub struct Mode<T> {
                 /// The name of the mode, optional in accordance with sovd standard
+                #[serde(default, skip_serializing_if = "Option::is_none")]
                 pub name: Option<String>,
                 /// The translation ID for the name
-                #[serde(skip_serializing_if = "Option::is_none")]
+                #[serde(default, skip_serializing_if = "Option::is_none")]
                 pub translation_id: Option<String>,
                 /// The value of the mode.
-                #[serde(skip_serializing_if = "Option::is_none")]
-                pub value: Option<T>,
+                pub value: T,
                 /// The schema of the mode resource.
                 #[schemars(skip)]
                 #[serde(skip_serializing_if = "Option::is_none")]

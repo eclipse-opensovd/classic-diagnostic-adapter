@@ -11,15 +11,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#![cfg_attr(
-    nightly,
-    allow(
-        unknown_lints,
-        clippy::duration_suboptimal_units,
-        reason = "Literal duration for test clarity. Lint not available in all toolchains"
-    )
-)]
-
 use cda_interfaces::ResetOutcome;
 
 use super::*;
@@ -73,6 +64,51 @@ async fn test_ecu_lock_cleanup_calls_reset() {
     assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
     assert_eq!(session_resets.load(Ordering::SeqCst), 1);
     assert_eq!(security_resets.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn lock_release_waits_for_in_flight_authentication_before_cleanup() {
+    let (mock_uds, ecu_name, locks, session_resets, security_resets) = setup_ecu_lock_test();
+    let lock_id = create_ecu_lock(&mock_uds, &locks, &ecu_name, Duration::from_secs(60)).await;
+    let Ok(authentication) = locks
+        .authentication_write_guard(&TestSecurityPlugin.claims(), &ecu_name, false)
+        .await
+    else {
+        panic!("ECU lock must admit authentication");
+    };
+
+    let locks_for_delete = Arc::clone(&locks);
+    let ecu_for_delete = ecu_name.clone();
+    let deletion = tokio::spawn(async move {
+        delete_handler(
+            &locks_for_delete,
+            LockScope::Ecu {
+                name: ecu_for_delete,
+            },
+            &lock_id,
+            &TestSecurityPlugin.claims(),
+            false,
+        )
+        .await
+    });
+
+    wait_until("lock removed before authentication completes", || async {
+        !locks.has_non_vehicle_locks().await
+    })
+    .await;
+    assert_eq!(session_resets.load(Ordering::SeqCst), 0);
+    assert_eq!(security_resets.load(Ordering::SeqCst), 0);
+
+    drop(authentication);
+    assert_eq!(deletion.await.unwrap().status(), StatusCode::NO_CONTENT);
+    assert_eq!(session_resets.load(Ordering::SeqCst), 1);
+    assert_eq!(security_resets.load(Ordering::SeqCst), 1);
+    assert!(
+        locks
+            .authentication_write_guard(&TestSecurityPlugin.claims(), &ecu_name, false)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -149,19 +185,29 @@ async fn test_vehicle_lock_cleanup_timeout_cleans() {
 }
 
 fn expect_ecu_lock_cleanup_multiple(uds_ecu: &mut MockUdsEcu, ecus: &Vec<String>) {
-    // Expect reset methods to be called for each ECU during cleanup
+    // Expect the owner's transfer abort and the reset methods for each ECU during cleanup
     for ecu in ecus {
         uds_ecu
-            .expect_reset_ecu_session()
+            .expect_ecu_flash_transfer_abort()
             .with(eq(ecu.clone()), always())
             .times(1)
-            .returning(|_, _| Ok(ResetOutcome::Completed));
+            .returning(|_, _| ());
+        uds_ecu
+            .expect_reset_ecu_authentication()
+            .with(eq(ecu.clone()))
+            .times(1)
+            .returning(|_| Ok(ResetOutcome::Completed));
+        uds_ecu
+            .expect_reset_ecu_session()
+            .with(eq(ecu.clone()))
+            .times(1)
+            .returning(|_| Ok(ResetOutcome::Completed));
 
         uds_ecu
             .expect_reset_ecu_security_access()
-            .with(eq(ecu.clone()), always())
+            .with(eq(ecu.clone()))
             .times(1)
-            .returning(|_, _| Ok(ResetOutcome::Completed));
+            .returning(|_| Ok(ResetOutcome::Completed));
     }
 }
 
@@ -206,18 +252,28 @@ pub(super) fn setup_ecu_lock_test() -> (
                 .times(1)
                 .returning(|_| Ok(()));
             cleanup
-                .expect_reset_ecu_session()
-                .with(eq(cleanup_ecu_name.clone()), always())
+                .expect_ecu_flash_transfer_abort()
+                .with(eq(cleanup_ecu_name.clone()), eq("test_user"))
                 .times(1)
-                .returning(move |_, _| {
+                .returning(|_, _| ());
+            cleanup
+                .expect_reset_ecu_authentication()
+                .with(eq(cleanup_ecu_name.clone()))
+                .times(1)
+                .returning(|_| Ok(ResetOutcome::Completed));
+            cleanup
+                .expect_reset_ecu_session()
+                .with(eq(cleanup_ecu_name.clone()))
+                .times(1)
+                .returning(move |_| {
                     session_resets.fetch_add(1, Ordering::SeqCst);
                     Ok(ResetOutcome::Completed)
                 });
             cleanup
                 .expect_reset_ecu_security_access()
-                .with(eq(cleanup_ecu_name.clone()), always())
+                .with(eq(cleanup_ecu_name.clone()))
                 .times(1)
-                .returning(move |_, _| {
+                .returning(move |_| {
                     security_resets.fetch_add(1, Ordering::SeqCst);
                     Ok(ResetOutcome::Completed)
                 });
@@ -278,7 +334,7 @@ pub(super) async fn create_ecu_lock(
     lock_response.id
 }
 
-fn setup_functional_group_lock_test() -> (MockUdsEcu, String, Arc<Locks>) {
+pub(super) fn setup_functional_group_lock_test() -> (MockUdsEcu, String, Arc<Locks>) {
     let mut mock_uds = MockUdsEcu::default();
     let fg_name = "test_fg".to_string();
     let tp_type = TesterPresentType::Functional(fg_name.clone());
@@ -738,4 +794,55 @@ async fn ecu_lock_expiry_under_functional_lock_skips_cleanup() {
         0,
         "cleanup must be skipped on expiry while the functional-group lock still covers this ECU"
     );
+}
+
+#[tokio::test]
+async fn test_reset_deauthenticates_before_session_and_continues_on_failure() {
+    let mut seq = mockall::Sequence::new();
+    let mut uds = MockUdsEcu::default();
+    uds.expect_reset_ecu_authentication()
+        .with(eq("test_ecu"))
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| Err(cda_interfaces::DiagServiceError::Timeout));
+    uds.expect_reset_ecu_session()
+        .with(eq("test_ecu"))
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| Ok(ResetOutcome::Completed));
+    uds.expect_reset_ecu_security_access()
+        .with(eq("test_ecu"))
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| Ok(ResetOutcome::Completed));
+
+    crate::sovd::locks::cleanup::reset_ecu_session_and_security(&uds, "test_ecu", "test").await;
+}
+
+#[tokio::test]
+async fn test_release_ecu_aborts_owner_transfer_before_reset() {
+    let mut seq = mockall::Sequence::new();
+    let mut uds = MockUdsEcu::default();
+    uds.expect_ecu_flash_transfer_abort()
+        .with(eq("test_ecu"), eq("owner"))
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_, _| ());
+    uds.expect_reset_ecu_authentication()
+        .with(eq("test_ecu"))
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| Ok(ResetOutcome::Completed));
+    uds.expect_reset_ecu_session()
+        .with(eq("test_ecu"))
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| Ok(ResetOutcome::Completed));
+    uds.expect_reset_ecu_security_access()
+        .with(eq("test_ecu"))
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| Ok(ResetOutcome::Completed));
+
+    crate::sovd::locks::cleanup::release_ecu(&uds, "test_ecu", "owner", "test").await;
 }

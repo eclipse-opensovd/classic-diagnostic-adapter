@@ -22,3 +22,5 @@ Architecture Decision Records
    04_wal_format
    05_error_handling_library
    06_deferred_initialization.rst
+   07_uds_authentication_mode
+   08_iso17978_deviations

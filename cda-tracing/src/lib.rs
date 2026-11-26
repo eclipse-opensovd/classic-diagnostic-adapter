@@ -122,18 +122,21 @@ pub fn new() -> Layered<EnvFilter, Registry> {
     tracing_subscriber::registry().with(EnvFilter::from_default_env())
 }
 
+/// Creates a new terminal subscriber layer.
+/// # Errors
+/// Returns an error if the configured timestamp format is invalid.
 pub fn new_term_subscriber<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>(
     config: &LoggingConfig,
-) -> BoxedLayer<S> {
+) -> Result<BoxedLayer<S>, TracingSetupError> {
     // Ensure tracing is initialized
     let term_subscriber = tracing_subscriber::fmt::layer::<S>()
         .with_file(false)
         .with_line_number(false)
         .with_target(true)
         .event_format(
-            subscriber::CdaFormatter::new(tracing_subscriber::fmt::time::ChronoUtc::new(
+            subscriber::CdaFormatter::new(subscriber::UtcTime::new(
                 config.timestamp_format.clone(),
-            ))
+            )?)
             .with_nested_context_fields(false)
             .with_span_id(false),
         )
@@ -147,7 +150,7 @@ pub fn new_term_subscriber<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>
         term_subscriber.with_filter(filter_fn)
     };
 
-    term_subscriber.boxed()
+    Ok(term_subscriber.boxed())
 }
 
 /// Creates a new file subscriber layer.
@@ -156,6 +159,7 @@ pub fn new_term_subscriber<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>
 pub fn new_file_subscriber<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>(
     config: &LogFileConfig,
 ) -> Result<(TracingWorkerGuard, BoxedLayer<S>), TracingSetupError> {
+    let timer = subscriber::UtcTime::new(config.date_format.clone())?;
     let appender = subscriber::file_log_writer(
         config.path.clone(),
         config.name.clone(),
@@ -174,12 +178,9 @@ pub fn new_file_subscriber<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>
                 | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
         )
         .event_format(
-            subscriber::CdaFormatter::new(
-                // todo: make this configurable
-                tracing_subscriber::fmt::time::ChronoUtc::new("%F %T%.3f".to_owned()),
-            )
-            .with_nested_context_fields(true)
-            .with_color(false),
+            subscriber::CdaFormatter::new(timer)
+                .with_nested_context_fields(true)
+                .with_color(false),
         )
         .with_writer(non_blocking_appender);
 
@@ -320,14 +321,6 @@ impl Default for LogFileConfig {
 impl Default for TokioTracingConfig {
     fn default() -> Self {
         Self {
-            #[cfg_attr(
-                nightly,
-                allow(
-                    unknown_lints,
-                    clippy::duration_suboptimal_units,
-                    reason = "from_hours not available in Rust 1.88"
-                )
-            )]
             retention: std::time::Duration::from_secs(60 * 60), // 1h
             server: "127.0.0.1:6669".to_owned(),
             recording_path: None,

@@ -27,11 +27,30 @@ pub enum LockExclusivityPolicy {
     NonExclusiveByDefault,
 }
 
+/// Precondition for acquiring ECU and functional-group locks.
+///
+/// [[ dimpl~sovd-api-lock-acquisition-policy-config, Configurable lock acquisition policy, dimpl ]]
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Serialize, schemars::JsonSchema, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LockAcquisitionPolicy {
+    /// ECU and functional-group locks may be acquired without a vehicle lock.
+    #[default]
+    Unrestricted,
+    /// ECU and functional-group locks require an active vehicle lock, held by any client.
+    VehicleLockRequired,
+}
+
 /// Lock priority behavior and limits.
 #[derive(Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, PartialEq, Eq)]
 pub struct LockConfig {
     /// Default used when `x-sovd2uds-isexclusive` is omitted.
     pub lock_exclusivity_policy: LockExclusivityPolicy,
+    /// Whether an active vehicle lock must exist before ECU or functional-group locks
+    /// can be acquired.
+    #[serde(default)]
+    pub lock_acquisition_policy: LockAcquisitionPolicy,
     /// Maximum duration of one vendor priority-policy evaluation.
     pub priority_policy_timeout_ms: u64,
     /// Number of fresh policy evaluations allowed after a stale state snapshot.
@@ -90,6 +109,7 @@ impl Default for LockConfig {
     fn default() -> Self {
         Self {
             lock_exclusivity_policy: LockExclusivityPolicy::ExclusiveByDefault,
+            lock_acquisition_policy: LockAcquisitionPolicy::default(),
             priority_policy_timeout_ms: 5_000,
             priority_policy_stale_retries: default_priority_policy_stale_retries(),
             priority_lifecycle_timeout_ms: default_priority_lifecycle_timeout_ms(),
@@ -136,6 +156,30 @@ mod tests {
             .expect("policy should serialize");
 
         assert_eq!(value, "non_exclusive_by_default");
+    }
+
+    /// [[ test~sovd-api-lock-acquisition-policy-config, Acquisition policy defaults to unrestricted and parses its values, test ]]
+    #[test]
+    fn acquisition_policy_defaults_to_unrestricted_when_omitted() {
+        let config: LockConfig = serde_json::from_value(serde_json::json!({
+            "lock_exclusivity_policy": "exclusive_by_default",
+            "priority_policy_timeout_ms": 1
+        }))
+        .expect("config without acquisition policy should deserialize");
+
+        assert_eq!(
+            config.lock_acquisition_policy,
+            LockAcquisitionPolicy::Unrestricted
+        );
+    }
+
+    #[test]
+    fn acquisition_policy_value_deserializes() {
+        let policy = serde_json::from_str::<LockAcquisitionPolicy>(r#""vehicle_lock_required""#)
+            .expect("policy value should deserialize");
+
+        assert_eq!(policy, LockAcquisitionPolicy::VehicleLockRequired);
+        assert!(serde_json::from_str::<LockAcquisitionPolicy>(r#""invalid""#).is_err());
     }
 
     #[test]

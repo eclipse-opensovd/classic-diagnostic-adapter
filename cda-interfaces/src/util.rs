@@ -12,6 +12,58 @@
  */
 use crate::{DiagServiceError, service_ids};
 
+/// Earliest timestamp RFC 3339 can express, `0000-01-01T00:00:00Z`: it only allows
+/// four-digit years. The latest is [`jiff::Timestamp::MAX`], `9999-12-30T22:00:00Z`.
+const RFC3339_MIN: jiff::Timestamp = jiff::Timestamp::constant(-62_167_219_200, 0);
+
+/// `time` as [`jiff::Timestamp`], `None` if it is outside the range RFC 3339 can express.
+fn rfc3339_timestamp(time: std::time::SystemTime) -> Option<jiff::Timestamp> {
+    jiff::Timestamp::try_from(time)
+        .ok()
+        .filter(|timestamp| *timestamp >= RFC3339_MIN)
+}
+
+/// Whether [`system_time_to_rfc3339`] can format `time` without clamping it, i.e.
+/// it lies between `0000-01-01T00:00:00Z` and `9999-12-30T22:00:00Z`.
+#[must_use]
+pub fn is_rfc3339_representable(time: std::time::SystemTime) -> bool {
+    rfc3339_timestamp(time).is_some()
+}
+
+/// Formats a point in time as an RFC 3339 timestamp as used by the SOVD API.
+///
+/// The timestamp is always expressed in UTC with second precision and the `Z`
+/// suffix, e.g. `2026-01-02T03:04:05Z`. Points in time RFC 3339 cannot express
+/// (see [`is_rfc3339_representable`]) are clamped to the nearest one it can.
+#[must_use]
+pub fn system_time_to_rfc3339(time: std::time::SystemTime) -> String {
+    let timestamp = rfc3339_timestamp(time).unwrap_or(if time < std::time::UNIX_EPOCH {
+        RFC3339_MIN
+    } else {
+        jiff::Timestamp::MAX
+    });
+    jiff::fmt::temporal::DateTimePrinter::new()
+        .precision(Some(0))
+        .timestamp_to_string(&timestamp)
+}
+
+/// Parses an RFC 3339 timestamp. `None` if it is invalid, outside the range RFC 3339
+/// can express, or not representable as [`SystemTime`](std::time::SystemTime) on this
+/// platform, e.g. before 1601 on Windows.
+#[must_use]
+pub fn rfc3339_to_system_time(value: &str) -> Option<std::time::SystemTime> {
+    let since_epoch = value
+        .parse::<jiff::Timestamp>()
+        .ok()
+        .filter(|timestamp| *timestamp >= RFC3339_MIN)?
+        .as_duration();
+    if since_epoch.is_negative() {
+        std::time::UNIX_EPOCH.checked_sub(since_epoch.unsigned_abs())
+    } else {
+        std::time::UNIX_EPOCH.checked_add(since_epoch.unsigned_abs())
+    }
+}
+
 pub mod tracing {
     #[must_use]
     pub fn print_hex(data: &[u8], max_size: usize) -> String {
@@ -52,8 +104,15 @@ pub mod tokio_ext {
         }};
     }
 
+    /// Discards every message currently queued in `receiver`.
+    ///
+    /// A lagged receiver reports `Lagged` before its retained messages, so
+    /// draining continues past it; stopping there would leave stale messages
+    /// queued for the next reader.
     pub fn clear_pending_messages<M: Clone>(receiver: &mut tokio::sync::broadcast::Receiver<M>) {
-        while receiver.try_recv().is_ok() {}
+        use tokio::sync::broadcast::error::TryRecvError;
+
+        while let Ok(_) | Err(TryRecvError::Lagged(_)) = receiver.try_recv() {}
     }
 
     /// Sleeps for the given `duration`.
@@ -81,6 +140,9 @@ pub mod tokio_ext {
         }
     }
 }
+
+#[cfg(feature = "test-utils")]
+pub mod test_utils;
 
 pub mod dlt_ext {
     #[macro_export]
@@ -530,6 +592,50 @@ pub fn normalize_hex(value: &str) -> String {
         .collect()
 }
 
+/// Notation of a hex coded byte string, e.g. to answer in the notation of a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HexNotation {
+    /// One leading `0x` for all bytes, e.g. `0x22F190`.
+    PrefixedCompact,
+    /// No prefix, e.g. `22F190` or `22 F1 90`.
+    Compact,
+    /// `0x` before every byte, e.g. `0x22 0xF1 0x90`, the default hex output
+    /// of [`crate::BinaryEncoding::Hex`].
+    PerByte,
+}
+
+impl HexNotation {
+    /// Detects the notation of a hex value. Spaces and commas between the
+    /// bytes are not part of the notation; mixed notations fall back to
+    /// [`HexNotation::PerByte`].
+    #[must_use]
+    pub fn detect(value: &str) -> Self {
+        let has_prefix = |t: &str| try_strip_hex_prefix(t).is_some();
+        let mut tokens = value
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|t| !t.is_empty());
+        let first_prefixed = tokens.next().is_some_and(has_prefix);
+        let more_prefixed = tokens.any(has_prefix);
+        match (first_prefixed, more_prefixed) {
+            (false, false) => HexNotation::Compact,
+            (true, false) => HexNotation::PrefixedCompact,
+            _ => HexNotation::PerByte,
+        }
+    }
+
+    /// Encodes `data` as upper case hex in this notation. Empty data is an
+    /// empty string.
+    #[must_use]
+    pub fn encode(self, data: &[u8]) -> String {
+        match self {
+            HexNotation::PerByte => crate::BinaryEncoding::Hex.encode(data),
+            HexNotation::Compact => hex::encode_upper(data),
+            HexNotation::PrefixedCompact if data.is_empty() => String::new(),
+            HexNotation::PrefixedCompact => format!("0x{}", hex::encode_upper(data)),
+        }
+    }
+}
+
 /// Compare a byte-field parameter against a variant pattern's expected value.
 ///
 /// A decoded `ByteField` serializes as space-separated `0x`-prefixed bytes
@@ -556,7 +662,77 @@ pub fn byte_field_matches_hex_pattern(received: &str, expected: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, UNIX_EPOCH};
+
     use super::*;
+
+    #[test]
+    fn formats_utc_with_z_suffix_and_second_precision() {
+        let time = UNIX_EPOCH + Duration::from_millis(1_767_323_045_678);
+        assert_eq!(system_time_to_rfc3339(time), "2026-01-02T03:04:05Z");
+    }
+
+    #[test]
+    fn formats_unix_epoch() {
+        assert_eq!(system_time_to_rfc3339(UNIX_EPOCH), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn formats_out_of_range_time_clamped() {
+        // About 20000 years after the epoch, beyond the RFC 3339 year range.
+        let after = UNIX_EPOCH + Duration::from_secs(632_448_000_000);
+        assert_eq!(system_time_to_rfc3339(after), "9999-12-30T22:00:00Z");
+        // One second before year 0, which RFC 3339 cannot express.
+        let before = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(62_167_219_201))
+            .unwrap();
+        assert_eq!(system_time_to_rfc3339(before), "0000-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn rfc3339_representable_range() {
+        let year_0 = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(62_167_219_200))
+            .unwrap();
+        assert!(is_rfc3339_representable(year_0));
+        // use 1 second resolution for representability check as for example Windows does
+        // not support 1ns steps.
+        assert!(!is_rfc3339_representable(
+            year_0.checked_sub(Duration::from_secs(1)).unwrap()
+        ));
+        // 9999-12-30T22:00:00Z, the latest time jiff can represent.
+        let latest = UNIX_EPOCH + Duration::from_secs(253_402_207_200);
+        assert!(is_rfc3339_representable(latest));
+        assert!(!is_rfc3339_representable(latest + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn rejects_years_rfc3339_cannot_express() {
+        assert!(rfc3339_to_system_time("0000-01-01T00:00:00Z").is_some());
+        assert_eq!(rfc3339_to_system_time("-000001-12-31T23:59:59Z"), None);
+        assert_eq!(rfc3339_to_system_time("+010000-01-01T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn parses_rfc3339_with_offset() {
+        assert_eq!(
+            rfc3339_to_system_time("2026-01-02T04:04:05+01:00"),
+            Some(UNIX_EPOCH + Duration::from_secs(1_767_323_045))
+        );
+    }
+
+    #[test]
+    fn parses_rfc3339_before_and_after_the_epoch() {
+        assert_eq!(
+            rfc3339_to_system_time("2026-01-02T03:04:05Z"),
+            Some(UNIX_EPOCH + Duration::from_secs(1_767_323_045))
+        );
+        assert_eq!(
+            rfc3339_to_system_time("1969-12-31T23:59:58.5Z"),
+            UNIX_EPOCH.checked_sub(Duration::from_millis(1_500))
+        );
+        assert_eq!(rfc3339_to_system_time("not a time"), None);
+    }
 
     /// A task that never finishes is cancelled, and one that already
     /// panicked is reported instead of propagating the panic.
@@ -568,6 +744,27 @@ mod tests {
         let panicked = tokio::spawn(async { panic!("task panicked") });
         tokio::task::yield_now().await;
         tokio_ext::abort_and_join(panicked, "panicked").await;
+    }
+
+    /// A receiver that fell behind reports `Lagged` before the retained
+    /// messages; draining must continue past it so nothing stale is left.
+    #[test]
+    fn clear_pending_messages_drains_lagged_receiver() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<u8>(2);
+        for value in 0..5 {
+            tx.send(value).expect("Failed to send message");
+        }
+
+        tokio_ext::clear_pending_messages(&mut rx);
+
+        let next = rx.try_recv();
+        assert!(
+            matches!(
+                next,
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "expected an empty receiver after clearing, got {next:?}"
+        );
     }
 
     #[test]
@@ -585,6 +782,37 @@ mod tests {
         // Degenerate frames.
         assert!(!uds_response_matches_request_sid(0x22, &[]));
         assert!(!uds_response_matches_request_sid(0x22, &[0x7F]));
+    }
+
+    /// [[ test~sovd-api-generic-service-hex-style, Hex notation of the request is mirrored in the response, test ]]
+    #[test]
+    fn hex_notation_detect() {
+        for (value, notation) in [
+            ("0x22F190", HexNotation::PrefixedCompact),
+            ("0X22f190", HexNotation::PrefixedCompact),
+            ("0x22 F1 90", HexNotation::PrefixedCompact),
+            ("0x22", HexNotation::PrefixedCompact),
+            ("22F190", HexNotation::Compact),
+            ("22 F1 90", HexNotation::Compact),
+            ("22,F1,90", HexNotation::Compact),
+            ("", HexNotation::Compact),
+            ("0x22 0xF1 0x90", HexNotation::PerByte),
+            ("0x22,0xF1", HexNotation::PerByte),
+            ("22 0xF1", HexNotation::PerByte),
+            ("0x22 F1 0x90", HexNotation::PerByte),
+        ] {
+            assert_eq!(HexNotation::detect(value), notation, "{value}");
+        }
+    }
+
+    #[test]
+    fn hex_notation_encode() {
+        let data = [0x62, 0xF1, 0x0A];
+        assert_eq!(HexNotation::PrefixedCompact.encode(&data), "0x62F10A");
+        assert_eq!(HexNotation::Compact.encode(&data), "62F10A");
+        assert_eq!(HexNotation::PerByte.encode(&data), "0x62 0xF1 0x0A");
+        assert_eq!(HexNotation::PrefixedCompact.encode(&[]), "");
+        assert_eq!(HexNotation::Compact.encode(&[]), "");
     }
 
     #[test]

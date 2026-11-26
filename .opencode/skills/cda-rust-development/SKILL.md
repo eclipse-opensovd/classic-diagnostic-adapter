@@ -18,15 +18,23 @@ SPDX-License-Identifier: Apache-2.0
 
 # CDA Rust Development
 
-Rust Cargo workspace (edition 2024, MSRV 1.88).
+Rust Cargo workspace (edition 2024, MSRV 1.88.0). The MSRV is declared once as `rust-version`
+(full version) in the root `Cargo.toml` and inherited by every crate via
+`rust-version.workspace = true`. The `Makefile` derives `STABLE` from it, the integration tests
+pass it to the CDA image, and the `check-rust-version` pre-commit hook verifies the copies that
+cannot read it (`MODULE.bazel` files, the Dockerfile default). Change the version only there.
 
 ## Commands
 
-Use the `Makefile` targets; they pin the toolchains (`STABLE`, `NIGHTLY` in the `Makefile`).
-Do not call `cargo +nightly` or the `cargo lint` alias directly, they may use a different
-toolchain. Extra cargo arguments go through `ARGS="..."`.
+Always use the `make` targets below for building, testing, linting and formatting; never run
+bare `cargo build/test/clippy/fmt`, `cargo +nightly` or the `cargo lint` alias. The `Makefile`
+pins the toolchains (`STABLE`, `NIGHTLY`); the local default toolchain may be newer and then
+reports clippy lints CI does not have, or formats differently. If lints fire in code you did not
+touch, first check that you used `make`. Extra cargo arguments go through `ARGS="..."`, e.g.
+`make lint ARGS="-p cda-sovd"`.
 
 ```sh
+make check                    # cargo check of the workspace
 make build                    # or `make release`
 make test                     # workspace tests
 make integration-test         # needs Docker (CAN: make integration-test-can)
@@ -49,12 +57,18 @@ Logging level: `RUST_LOG=debug` (default `info`).
 - No `std::thread::sleep` / `tokio::time::sleep`; use `tokio_ext::sleep_for`.
 - NEVER import `std::future::Future`; it is already in the prelude.
 - Errors: `thiserror` only, no `anyhow` (ADR-005). Error messages start with a capital letter.
+- Several checks on the same value (`Option`/`Result`/enum plus extra conditions): use one
+  `match` with guards (`None if cond =>`, `Some(x) if ... =>`, `_ => Ok(())`) instead of
+  separate `if`/early-return blocks re-inspecting it; keep arm order if it matters. A single
+  check stays `if let` / `let ... else`.
 - Logging: `tracing` macros; `#[tracing::instrument]` for significant spans.
 - Modules: `foo.rs` + `foo/`, never `foo/mod.rs`.
 - Comments: `//` only, explain why, no banner comments, no non-ASCII characters (except `µ`, `§`).
   Document public items with `///`.
 - New dependencies must go through `[workspace.dependencies]` and pass `cargo deny`
   (allowed: Apache-2.0, BSD-3-Clause, ISC, MIT, Unicode-3.0, Zlib).
+- Dependency versions must support the MSRV. Never pass `--ignore-rust-version` or use
+  `cargo update --precise` to force a version that requires a newer Rust.
 
 ## Before finishing a change
 

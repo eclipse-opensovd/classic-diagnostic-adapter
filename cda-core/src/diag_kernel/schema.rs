@@ -67,7 +67,7 @@ impl<S: SecurityPlugin> EcuSchemas for EcuManager<S> {
                 .next()
                 .and_then(SchemaDescription::into_schema),
             _ => Some(schemars::json_schema!({
-                "any-of": responses.into_iter()
+                "anyOf": responses.into_iter()
                     .filter_map(SchemaDescription::into_schema)
                     .collect::<Vec<_>>(),
                 "type": "array"
@@ -400,6 +400,33 @@ fn normal_dop_to_schema(
                 "default": default_value,
                 "type": type_
             });
+            if datatype.base_datatype() == datatypes::DataType::ByteField {
+                // Base64 is the default, `SchemaDescription::with_binary_encoding`
+                // switches it to the encoding selected for the request.
+                param_schema.insert(
+                    "format".to_owned(),
+                    cda_interfaces::BinaryEncoding::Base64
+                        .json_schema_format()
+                        .into(),
+                );
+                // Database defaults are hex coded, convert them so the default
+                // matches the declared format.
+                match cda_interfaces::BinaryEncoding::Hex.decode(default_value) {
+                    Ok(bytes) => {
+                        param_schema.insert(
+                            "default".to_owned(),
+                            cda_interfaces::BinaryEncoding::Base64.encode(&bytes).into(),
+                        );
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            error = ?e,
+                            "Mapping {ctx}: Byte field default is not valid hex, omitting it"
+                        );
+                        param_schema.remove("default");
+                    }
+                }
+            }
             add_phys_constr_range(normal_dop, &mut param_schema);
             schema.insert(name, param_schema.into());
         }
@@ -456,7 +483,7 @@ fn dop_variant_to_schema(
         datatypes::DataOperationVariant::EnvDataDesc(env_data_desc_dop) => {
             let variants = env_data_desc_to_variants(&env_data_desc_dop, ctx, ecu_db, request);
             if !variants.is_empty() {
-                schema.insert(name, schemars::json_schema!({ "any-of": variants }).into());
+                schema.insert(name, schemars::json_schema!({ "anyOf": variants }).into());
             }
         }
         datatypes::DataOperationVariant::EnvData(_env_data_dop) => {
@@ -529,14 +556,13 @@ fn map_dynamic_length_field_to_schema(
     ecu_db: &DiagnosticDatabase,
     request: Option<&datatypes::Request<'_>>,
 ) -> Result<Option<serde_json::Value>, DiagServiceError> {
-    if let Some(structure_dop) = dynamic_length_field
+    let items_schema: Option<serde_json::Value> = if let Some(structure_dop) = dynamic_length_field
         .field()
         .and_then(|f| f.basic_structure())
         .and_then(|s| s.specific_data_as_structure())
         .map(datatypes::StructureDop)
     {
-        Ok(map_struct_to_schema(&structure_dop, ctx, ecu_db, request)
-            .map(|s| serde_json::Value::Array(vec![s.into()])))
+        map_struct_to_schema(&structure_dop, ctx, ecu_db, request).map(Into::into)
     } else if let Some(env_data_desc) = dynamic_length_field
         .field()
         .and_then(|f| f.env_data_desc())
@@ -545,18 +571,18 @@ fn map_dynamic_length_field_to_schema(
     {
         let variants = env_data_desc_to_variants(&env_data_desc, ctx, ecu_db, request);
         if variants.is_empty() {
-            Ok(None)
+            None
         } else {
-            Ok(Some(
-                schemars::json_schema!({ "type": "array", "items": { "any-of": variants } }).into(),
-            ))
+            Some(schemars::json_schema!({ "anyOf": variants }).into())
         }
     } else {
-        Err(DiagServiceError::ParameterConversionError(format!(
+        return Err(DiagServiceError::ParameterConversionError(format!(
             "Mapping {ctx}: DynamicLengthField DopField value is neither BasicStruct nor \
              EnvDataDesc."
-        )))
-    }
+        )));
+    };
+
+    Ok(items_schema.map(|items| serde_json::json!({ "type": "array", "items": items })))
 }
 
 #[tracing::instrument(skip_all,
@@ -589,7 +615,7 @@ fn map_dop_field_to_schema(
         if variants.is_empty() {
             None
         } else {
-            Some(schemars::json_schema!({ "any-of": variants }))
+            Some(schemars::json_schema!({ "anyOf": variants }))
         }
     } else {
         tracing::trace!(
@@ -612,7 +638,7 @@ fn map_mux_to_schema(
 ) -> schemars::Schema {
     let mut schemas: Vec<serde_json::Value> = Vec::new();
     if let Some(cases) = mux.cases() {
-        // probably an any-of here instead of a list?
+        // probably an anyOf here instead of a list?
         for case in cases {
             let Some(case_struct) = case
                 .structure()
@@ -631,7 +657,7 @@ fn map_mux_to_schema(
         }
     }
     schemars::json_schema!({
-        "any-of": schemas
+        "anyOf": schemas
     })
 }
 
@@ -639,9 +665,56 @@ fn ecu_datatype_to_jsontype(type_: datatypes::DataType) -> String {
     match type_ {
         datatypes::DataType::Int32 | datatypes::DataType::UInt32 => "integer".to_owned(),
         datatypes::DataType::Float32 | datatypes::DataType::Float64 => "number".to_owned(),
+        // Byte fields are represented as base64 or hex coded string.
         datatypes::DataType::AsciiString
         | datatypes::DataType::Utf8String
-        | datatypes::DataType::Unicode2String => "string".to_owned(),
-        datatypes::DataType::ByteField => "array".to_owned(),
+        | datatypes::DataType::Unicode2String
+        | datatypes::DataType::ByteField => "string".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cda_interfaces::EcuSchemas;
+    use serde_json::json;
+
+    use crate::diag_kernel::test_utils::ecu_manager_builder::{
+        create_ecu_manager_with_dynamic_length_field_service, create_ecu_manager_with_env_data_desc,
+    };
+
+    async fn response_schema(
+        ecu_manager: &crate::EcuManager<cda_plugin_security::DefaultSecurityPluginData>,
+        service: &cda_interfaces::DiagComm,
+    ) -> serde_json::Value {
+        let schema = ecu_manager.schema_for_responses(service).await.unwrap();
+        serde_json::to_value(schema.into_schema().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_length_field_schema_is_an_array_of_items() {
+        let (ecu_manager, service, _) = create_ecu_manager_with_dynamic_length_field_service();
+        let schema = response_schema(&ecu_manager, &service).await;
+        let field = schema
+            .pointer("/properties/pos_response_param")
+            .unwrap_or_else(|| panic!("no field in {schema}"));
+        assert_eq!(field.get("type"), Some(&json!("array")), "{field}");
+        assert!(
+            field.pointer("/items/properties/item_param").is_some(),
+            "{field}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_env_data_desc_schema_uses_any_of() {
+        let (ecu_manager, service, _, _) = create_ecu_manager_with_env_data_desc();
+        let schema = response_schema(&ecu_manager, &service).await;
+        let env = schema
+            .pointer("/properties/env_snapshot")
+            .unwrap_or_else(|| panic!("no env data in {schema}"));
+        assert!(
+            env.get("anyOf").is_some_and(serde_json::Value::is_array),
+            "{env}"
+        );
+        assert!(env.get("any-of").is_none(), "{env}");
     }
 }

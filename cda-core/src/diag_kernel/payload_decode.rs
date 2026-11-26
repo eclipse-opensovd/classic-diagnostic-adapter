@@ -40,6 +40,10 @@ struct ParamContext<'a> {
     parameter: &'a datatypes::Parameter<'a>,
     base_offset: usize,
     outer_context: Option<&'a MappedDiagServiceResponsePayload>,
+    /// When `true`, a missing BYTE-POSITION means byte 0 relative to
+    /// `base_offset` instead of "follows the previous param". Used when a
+    /// request param is decoded from a response slice (MATCHING-REQUEST-PARAM).
+    relative_position: bool,
 }
 
 impl<'a> ParamContext<'a> {
@@ -48,6 +52,24 @@ impl<'a> ParamContext<'a> {
             parameter,
             base_offset,
             outer_context: None,
+            relative_position: false,
+        }
+    }
+
+    fn with_relative_position(self) -> Self {
+        Self {
+            relative_position: true,
+            ..self
+        }
+    }
+
+    /// Byte position to read from. Params without BYTE-POSITION start where
+    /// the previous param ended, unless `relative_position` is set.
+    fn read_byte_pos(self, uds_payload: &Payload) -> usize {
+        if self.parameter.has_byte_position() || self.relative_position {
+            self.abs_byte_pos()
+        } else {
+            uds_payload.last_read_byte_pos()
         }
     }
 
@@ -157,15 +179,7 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             }
 
             let raw_uds_payload = {
-                let base_offset = params
-                    .iter()
-                    .filter(|p| {
-                        p.semantic()
-                            .is_some_and(|s| s == self.database_naming_convention.semantics.data)
-                    })
-                    .map(datatypes::Parameter::byte_position)
-                    .min()
-                    .unwrap_or(0);
+                let base_offset = self.raw_payload_offset(&params);
                 uds_payload.data()?.get(base_offset as usize..).ok_or(
                     DiagServiceError::BadPayload("Payload offset out of bounds".to_owned()),
                 )?
@@ -181,9 +195,13 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
                 });
             }
             let mut mapping_errors = Vec::new();
-            let mut sorted_params = params;
-            sorted_params.sort_by(param_position_order);
-            for param in sorted_params {
+            // Params are decoded in database order. A param without
+            // BYTE-POSITION (ISO 22901-1 §7.4.8) starts where the preceding
+            // param ended. This covers both a leading param at byte 0 whose
+            // position was omitted and a param following a variable-length field.
+            // Positioned LENGTH-KEYs and TABLE-KEYs are decoded before the param
+            // referencing them.
+            for param in hoist_positioned_keys(&params) {
                 let semantic = param.semantic();
                 if semantic.is_some_and(|semantic| {
                     semantic != self.database_naming_convention.semantics.data
@@ -281,7 +299,7 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             .map(|params| params.iter().map(datatypes::Parameter).collect())
             .unwrap_or_default();
 
-        for param in params {
+        for param in hoist_positioned_keys(&params) {
             let short_name = param.short_name().ok_or_else(|| {
                 DiagServiceError::InvalidDatabase(
                     "Unable to find short name for request param".to_owned(),
@@ -357,7 +375,95 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
     }
 }
 
+/// Returns the params in database order, except that a positioned key param
+/// (LENGTH-KEY or TABLE-KEY) declared after the param referencing it is moved
+/// directly in front of that param. ISO 22901-1:2008 §7.3.5.4 (and checker
+/// rule 254) allows such a forward reference if the key is positioned; its
+/// value must be decoded before the referencing param. Unpositioned params
+/// keep their order, so "follows the preceding param" is unchanged for them.
+fn hoist_positioned_keys<'a>(params: &[datatypes::Parameter<'a>]) -> Vec<datatypes::Parameter<'a>> {
+    let mut hoisted = vec![false; params.len()];
+    let mut ordered = Vec::with_capacity(params.len());
+    for (index, param) in params.iter().enumerate() {
+        if hoisted.get(index).copied().unwrap_or(false) {
+            continue;
+        }
+        if let Some((key_type, key_name)) = referenced_key(param) {
+            let later_key = params
+                .iter()
+                .enumerate()
+                .skip(index.saturating_add(1))
+                .find(|(_, p)| {
+                    p.has_byte_position()
+                        && p.param_type().is_ok_and(|t| key_type.matches(&t))
+                        && p.short_name() == Some(key_name.as_str())
+                });
+            if let Some((key_index, key)) = later_key
+                && let Some(flag) = hoisted.get_mut(key_index)
+            {
+                *flag = true;
+                ordered.push(key.clone());
+            }
+        }
+        ordered.push(param.clone());
+    }
+    ordered
+}
+
+/// Param types that are referenced by another param of the same PDU.
+#[derive(Clone, Copy)]
+enum KeyType {
+    Length,
+    Table,
+}
+
+impl KeyType {
+    fn matches(self, param_type: &datatypes::ParamType) -> bool {
+        match self {
+            Self::Length => matches!(param_type, datatypes::ParamType::LengthKey),
+            Self::Table => matches!(param_type, datatypes::ParamType::TableKey),
+        }
+    }
+}
+
+/// Type and short name of the key param referenced by `param`: the
+/// LENGTH-KEY of a VALUE param with PARAM-LENGTH-INFO, or the TABLE-KEY of a
+/// TABLE-STRUCT param.
+fn referenced_key(param: &datatypes::Parameter<'_>) -> Option<(KeyType, String)> {
+    if let Some(table_struct) = param.specific_data_as_table_struct() {
+        let key = datatypes::Parameter(table_struct.table_key()?);
+        return Some((KeyType::Table, key.short_name()?.to_owned()));
+    }
+    let dop = param
+        .specific_data_as_value()?
+        .dop()?
+        .specific_data_as_normal_dop()
+        .map(datatypes::NormalDop)?;
+    dop.diag_coded_type()
+        .ok()?
+        .length_key_name()
+        .map(|name| (KeyType::Length, name.to_owned()))
+}
+
 impl<S: SecurityPlugin> EcuManager<S> {
+    /// Offset at which the raw payload of a positive response starts
+    /// ([`cda_interfaces::diagservices::DiagServiceResponse::get_raw`]): the lowest byte position of the
+    /// parameters with DATA semantic, i.e. the SID and sub-function are cut off.
+    pub(in crate::diag_kernel) fn raw_payload_offset(
+        &self,
+        params: &[datatypes::Parameter],
+    ) -> u32 {
+        params
+            .iter()
+            .filter(|p| {
+                p.semantic()
+                    .is_some_and(|s| s == self.database_naming_convention.semantics.data)
+            })
+            .map(datatypes::Parameter::byte_position)
+            .min()
+            .unwrap_or(0)
+    }
+
     #[tracing::instrument(skip_all,
         fields(
             dlt_context = dlt_ctx!("CORE"),
@@ -532,7 +638,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             param_name,
             uds_payload,
             data,
-            ParamContext::new(&matching_request_param, 0),
+            ParamContext::new(&matching_request_param, 0).with_relative_position(),
         )?;
 
         if pop {
@@ -651,7 +757,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     param_name.to_owned(),
                     operations::extract_diag_data_container(
                         param_ctx.parameter.short_name(),
-                        param_ctx.abs_byte_pos(),
+                        param_ctx.read_byte_pos(uds_payload),
                         param_ctx.parameter.bit_position() as usize,
                         uds_payload,
                         &diag_type,
@@ -700,8 +806,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     "TABLE-KEY param referenced by TABLE-STRUCT has no short_name".to_owned(),
                 ))?;
 
-        // Look up the TABLE-KEY's decoded value from data (it was already
-        // decoded since TABLE-KEY has a lower byte position)
+        // Look up the TABLE-KEY's decoded value from data. It was already
+        // decoded: it is declared before this param or, if declared after, it
+        // is positioned and hoisted by `hoist_positioned_keys`.
         let key_container = data.get(key_param_name).ok_or_else(|| {
             DiagServiceError::InvalidRequest(format!(
                 "TABLE-STRUCT references TABLE-KEY '{key_param_name}' but it was not decoded"
@@ -1051,11 +1158,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             return Ok(());
         }
 
-        let byte_pos = if param_ctx.parameter.has_byte_position() {
-            param_ctx.abs_byte_pos()
-        } else {
-            uds_payload.last_read_byte_pos()
-        };
+        let byte_pos = param_ctx.read_byte_pos(uds_payload);
         let uds_bytes = uds_payload.data()?;
         let (decoded_bytes, bit_len) =
             diag_coded_type.decode_with_runtime_byte_length(uds_bytes, byte_pos, byte_count)?;
@@ -1111,10 +1214,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         let num_items_diag_type: datatypes::DiagCodedType = num_items_dop.diag_coded_type()?;
 
+        // ISO 22901-1 7.3.5.4: without BYTE-POSITION the field starts at the byte edge
+        // following the previously extracted parameter. DETERMINE-NUMBER-OF-ITEMS and
+        // OFFSET are relative to this position (7.3.6.10.4).
         let param_abs_byte_pos = if param_ctx.parameter.has_byte_position() {
             param_ctx.abs_byte_pos()
         } else {
-            param_ctx.base_offset
+            uds_payload.last_read_byte_pos()
         };
         let (num_items_data, _count_field_bit_len) = num_items_diag_type.decode(
             uds_payload
@@ -1127,9 +1233,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
             determine_num_items.bit_position() as usize,
         )?;
 
+        // ISO 22901-1 7.3.6.10.4: the number of items is the *physical* value of the
+        // DETERMINE-NUMBER-OF-ITEMS DOP (of type A_UINT32), so its compu method applies.
+        let num_items_compu: Option<datatypes::CompuMethod> =
+            num_items_dop.compu_method().map(Into::into);
         let num_items_diag_val = operations::uds_data_to_serializable(
-            datatypes::DataType::UInt32, // Using hard coded UInt32 as per ISO 22901-1:2008
-            None,                        // Also according per spec, no compu method defined.
+            datatypes::DataType::UInt32,
+            num_items_compu.as_ref(),
             false,
             &num_items_data,
         )?;
@@ -1138,7 +1248,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
             DiagServiceError::InvalidDatabase("DynamicLengthField field is None".to_owned()),
         )?);
         let num_items: u32 = num_items_diag_val.try_into()?;
-        let num_items_byte_pos = determine_num_items.byte_position() as usize;
+        let num_items_byte_pos =
+            param_abs_byte_pos.saturating_add(determine_num_items.byte_position() as usize);
         uds_payload.set_last_read_byte_pos(num_items_byte_pos.saturating_add(num_items_data.len()));
 
         let mut repeated_data = Vec::new();
@@ -1769,9 +1880,10 @@ fn map_param_coded_const_from_uds(
             "Expected DiagCodedType in CodedConst specific data".to_owned(),
         ))?;
 
+    let byte_pos = param_ctx.read_byte_pos(uds_payload);
     let value = operations::extract_diag_data_container(
         param_ctx.parameter.short_name(),
-        param_ctx.abs_byte_pos(),
+        byte_pos,
         param_ctx.parameter.bit_position() as usize,
         uds_payload,
         &diag_type,
@@ -1803,16 +1915,22 @@ fn map_param_coded_const_from_uds(
         "CodedConst has no coded value".to_owned(),
     ))?;
     let const_json_value = str_to_json_value(const_value, diag_type.base_datatype())?;
-    let expected = operations::json_value_to_uds_data(&diag_type, None, None, &const_json_value)
-        .inspect_err(|e| {
-            tracing::error!(
-                error = ?e,
-                "Failed to convert CodedConst coded value to UDS data for parameter '{}'",
-                param_ctx.parameter.short_name().unwrap_or_default()
-            );
-        })?
-        .into_iter()
-        .collect::<Vec<_>>();
+    let expected = operations::json_value_to_uds_data(
+        &diag_type,
+        None,
+        None,
+        &const_json_value,
+        cda_interfaces::BinaryEncoding::Hex,
+    )
+    .inspect_err(|e| {
+        tracing::error!(
+            error = ?e,
+            "Failed to convert CodedConst coded value to UDS data for parameter '{}'",
+            param_ctx.parameter.short_name().unwrap_or_default()
+        );
+    })?
+    .into_iter()
+    .collect::<Vec<_>>();
     let expected = expected
         .get(expected.len().saturating_sub(value.data.len())..)
         .ok_or(DiagServiceError::BadPayload(
@@ -1825,6 +1943,9 @@ fn map_param_coded_const_from_uds(
             expected,
             value.data
         )));
+    }
+    if !param_ctx.relative_position {
+        uds_payload.set_last_read_byte_pos(byte_pos.saturating_add(value.data.len()));
     }
 
     data.insert(
@@ -1860,21 +1981,23 @@ fn map_dtc_dop_from_uds(
 
     let record = dtc_dop
         .dtcs()
-        .and_then(|dtcs| dtcs.iter().find(|dtc| dtc.trouble_code() == code))
-        .ok_or(DiagServiceError::BadPayload(format!(
-            "No DTC with code {code:X} found in DTC references",
-        )))?;
+        .and_then(|dtcs| dtcs.iter().find(|dtc| dtc.trouble_code() == code));
 
     data.insert(
         param_name.to_owned(),
         DiagDataTypeContainer::DtcStruct(DiagDataContainerDtc {
             code,
-            display_code: record.display_trouble_code().map(ToOwned::to_owned),
+            display_code: record
+                .and_then(|record| record.display_trouble_code())
+                .map(ToOwned::to_owned),
             fault_name: record
-                .text()
-                .and_then(|text| text.value().map(ToOwned::to_owned))
-                .unwrap_or_default(),
-            severity: record.level().unwrap_or_default(),
+                .and_then(|record| {
+                    record
+                        .text()
+                        .and_then(|text| text.value().map(ToOwned::to_owned))
+                })
+                .unwrap_or_else(|| "DTC description not available".to_owned()),
+            severity: record.and_then(|record| record.level()).unwrap_or_default(),
             bit_pos: param_ctx.parameter.bit_position(),
             bit_len: DTC_CODE_BIT_LEN,
             byte_pos: u32::try_from(param_ctx.abs_byte_pos()).map_err(|_| {
@@ -1917,22 +2040,6 @@ fn extract_struct_dop_from_field(
         .ok_or(DiagServiceError::InvalidDatabase(
             "Field none or does not contain a struct".to_owned(),
         ))
-}
-
-fn param_position_order(a: &datatypes::Parameter, b: &datatypes::Parameter) -> std::cmp::Ordering {
-    match (a.has_byte_position(), b.has_byte_position()) {
-        // Both have a position -> normal comparison
-        (true, true) => a
-            .byte_position()
-            .cmp(&b.byte_position())
-            .then(a.bit_position().cmp(&b.bit_position())),
-        // Only a has no position -> a goes after b
-        (false, true) => std::cmp::Ordering::Greater,
-        // Only b has no position -> b goes after a
-        (true, false) => std::cmp::Ordering::Less,
-        // Neither has a position -> preserve order
-        (false, false) => std::cmp::Ordering::Equal,
-    }
 }
 
 fn create_diag_service_response(
@@ -1984,13 +2091,16 @@ mod tests {
         EndOfPduStructureType, SID_PARM_NAME, create_ecu_manager_dlf_sibling_no_byte_pos,
         create_ecu_manager_env_data_no_wildcard, create_ecu_manager_with_dtc,
         create_ecu_manager_with_dynamic_length_field_service,
+        create_ecu_manager_with_dynamic_length_field_service_and_count_compu,
         create_ecu_manager_with_end_pdu_service, create_ecu_manager_with_env_data_desc,
         create_ecu_manager_with_env_data_desc_wildcard, create_ecu_manager_with_mux_service,
         create_ecu_manager_with_mux_service_and_default_case,
         create_ecu_manager_with_param_length_info_service,
+        create_ecu_manager_with_param_length_info_service_ordered,
         create_ecu_manager_with_phys_const_normal_dop_service,
         create_ecu_manager_with_phys_const_structure_dop_service,
         create_ecu_manager_with_static_field_service, create_ecu_manager_with_struct_service,
+        create_ecu_manager_with_table_struct_service,
     };
 
     fn create_payload(data: Vec<u8>) -> cda_interfaces::ServicePayload {
@@ -2013,7 +2123,13 @@ mod tests {
             .convert_from_uds(service, &create_payload(payload_data), true, None)
             .await
             .unwrap();
-        assert_eq!(response.serialize_to_json().unwrap().data, expected_json);
+        assert_eq!(
+            response
+                .serialize_to_json(cda_interfaces::BinaryEncoding::Hex)
+                .unwrap()
+                .data,
+            expected_json
+        );
     }
 
     async fn assert_uds_conversion_fails(
@@ -2213,13 +2329,16 @@ mod tests {
         data.push(0);
         data.push(42);
 
+        // The second structure has a leading length of zero and thus empty data,
+        // the trailing byte 42 cannot form another structure and is ignored.
         assert_uds_converts_to_json(
             &ecu_manager,
             &service,
             data,
             json!({
                 "end_pdu_param": [
-                    { "data": "0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA" }
+                    { "data": "0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA" },
+                    { "data": "" }
                 ],
                 "test_service_pos_sid": sid
             }),
@@ -2289,6 +2408,26 @@ mod tests {
                    { "item_param": 0x1122 },
                    { "item_param": 0x3344 },
                    { "item_param": 0x5566 },
+                ],
+                "test_service_pos_sid": sid
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_map_dynamic_length_field_from_uds_count_with_compu_method() {
+        // phys = 2 * internal: the coded count 1 means 2 items
+        let (ecu_manager, service, sid) =
+            create_ecu_manager_with_dynamic_length_field_service_and_count_compu(Some((0.0, 2.0)));
+        assert_uds_converts_to_json(
+            &ecu_manager,
+            &service,
+            vec![sid, 0x01, 0x11, 0x22, 0x33, 0x44],
+            json!({
+                "pos_response_param": [
+                   { "item_param": 0x1122 },
+                   { "item_param": 0x3344 },
                 ],
                 "test_service_pos_sid": sid
             }),
@@ -2472,6 +2611,63 @@ mod tests {
             json!({"pos_sid": u32::from(pos_sid), "len_key": 3, "var_data": "0xAA 0xBB 0xCC"}),
         )
         .await;
+    }
+
+    /// A positioned LENGTH-KEY declared after the field referencing it
+    /// (ISO 22901-1 §7.3.5.4) is decoded first.
+    #[tokio::test]
+    async fn test_length_key_declared_after_referencing_param() {
+        let sid = cda_interfaces::service_ids::WRITE_DATA_BY_IDENTIFIER;
+        let pos_sid = sid.saturating_add(cda_interfaces::UDS_ID_RESPONSE_BITMASK);
+        let (ecu_manager, dc, _sid) =
+            create_ecu_manager_with_param_length_info_service_ordered(false);
+
+        assert_uds_converts_to_json(
+            &ecu_manager,
+            &dc,
+            vec![pos_sid, 0x02, 0xAA, 0xBB],
+            json!({"pos_sid": u32::from(pos_sid), "len_key": 2, "var_data": "0xAA 0xBB"}),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_request_length_key_declared_after_referencing_param() {
+        let (ecu_manager, dc, sid) =
+            create_ecu_manager_with_param_length_info_service_ordered(false);
+        let response = ecu_manager
+            .convert_request_from_uds(&dc, &create_payload(vec![sid, 0x02, 0xAA, 0xBB]), true)
+            .await
+            .expect("request with forward-referenced length key must decode");
+        let mapped = response.mapped_data.expect("mapped data");
+        assert_eq!(
+            mapped.errors,
+            [] as [cda_interfaces::diagservices::FieldParseError; 0]
+        );
+        assert!(mapped.data.contains_key("var_data"));
+        assert!(mapped.data.contains_key("len_key"));
+    }
+
+    /// A positioned TABLE-KEY declared after the TABLE-STRUCT referencing it
+    /// (ISO 22901-1:2008 §7.3.5.4) is decoded first; declaration order does
+    /// not change the result.
+    #[tokio::test]
+    async fn test_table_key_declared_after_table_struct() {
+        for key_first in [true, false] {
+            let (ecu_manager, dc, sid) = create_ecu_manager_with_table_struct_service(key_first);
+            let pos_sid = sid.saturating_add(cda_interfaces::UDS_ID_RESPONSE_BITMASK);
+            assert_uds_converts_to_json(
+                &ecu_manager,
+                &dc,
+                vec![pos_sid, 0x2A, 0x05],
+                json!({
+                    "pos_sid": u32::from(pos_sid),
+                    "table_key": 5,
+                    "table_struct": {"row_a": {"val": 0x2A}},
+                }),
+            )
+            .await;
+        }
     }
 
     #[tokio::test]

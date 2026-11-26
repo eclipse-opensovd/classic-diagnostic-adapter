@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::util::{
     TestingError,
     http::{Response, response_to_t},
-    runtime::{find_available_tcp_port, host, wait_for_cda_online},
+    test_env::{bind_address, find_available_tcp_port, wait_for_cda_online},
 };
 
 const MAIN_HEALTH_COMPONENT_KEY: &str = "main";
@@ -127,7 +127,7 @@ async fn assert_demo_endpoint_get_post<GetFut>(
 #[tokio::test]
 async fn test_custom_demo_endpoint() {
     // Use loopback since we don't need actual ECU connections for this test
-    let host = host();
+    let host = bind_address();
     let test_port = find_available_tcp_port(&host).expect("Failed to find available port");
 
     let webserver_config = cda_sovd::WebServerConfig::Tcp {
@@ -137,10 +137,13 @@ async fn test_custom_demo_endpoint() {
 
     let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
-    let (dynamic_router, webserver_join_handle) =
-        cda_sovd::launch_webserver(webserver_config, shutdown_signal.clone())
-            .await
-            .expect("Failed to launch webserver");
+    let (dynamic_router, webserver_join_handle) = cda_sovd::launch_webserver(
+        webserver_config,
+        cda_interfaces::BinaryEncoding::Hex,
+        shutdown_signal.clone(),
+    )
+    .await
+    .expect("Failed to launch webserver");
 
     let health = cda_health::add_health_routes(&dynamic_router, cda_version().to_owned()).await;
     let main_health_provider = {
@@ -212,10 +215,13 @@ async fn test_custom_demo_endpoint_over_unix_socket() {
 
     let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
-    let (dynamic_router, webserver_join_handle) =
-        cda_sovd::launch_webserver(webserver_config, shutdown_signal.clone())
-            .await
-            .expect("Failed to launch webserver");
+    let (dynamic_router, webserver_join_handle) = cda_sovd::launch_webserver(
+        webserver_config,
+        cda_interfaces::BinaryEncoding::Hex,
+        shutdown_signal.clone(),
+    )
+    .await
+    .expect("Failed to launch webserver");
 
     // Add custom routes directly. No vehicle routes or health checks are
     // needed for this test since we talk to the raw socket directly instead

@@ -39,23 +39,26 @@ Rust Cargo workspace (see the `cda-rust-development` skill).
 | `comm-mbedtls/` | mbedtls FFI bindings (`mbedtls-sys`) and async wrapper (`mbedtls-rs`) |
 | `integration-tests/` | End-to-end tests against Docker containers |
 | `testcontainer/` | Docker compose env, Kotlin ECU simulator (`ecu-sim/`), ODX, test config |
-| `docs/` | Sphinx docs: requirements, architecture, ADRs (`docs/04_adr/`) |
+| `docs/` | Sphinx docs: requirements, architecture, ADRs (`docs/04_adr/`), test sets (`docs/05_verification/`); see the `cda-documentation` skill |
 
 ## Rust development
 
 For any Rust work (build, test, lint, format, coding rules, dependencies, pre-finish checklist)
-load the `cda-rust-development` skill and follow it.
+load the `cda-rust-development` skill before running any command and follow it.
+
+Build, check, test, lint and format only through the `Makefile` targets (`make check`,
+`make build`, `make test`, `make lint`, `make fmt`, ...; `make help` lists all). Never run bare
+`cargo build/check/test/clippy/fmt`: the `Makefile` pins the toolchains, the local default
+toolchain may be newer and report lints CI does not have.
 
 Config: `opensovd-cda.toml`, overridable with `CDA_`-prefixed env vars; file selectable via
-`--config-file`. All pre-commit hooks: `uv run --group tools prek run --all-files`.
+`--config-file`. All pre-commit hooks: `make precommit`.
 
 ## Rules
 
 - Every new file needs the SPDX/REUSE license header (see any existing file).
-- Commits use Conventional Commits with a crate scope, e.g. `fix(transport-router): ...`.
-- Commits must carry a DCO sign-off (`git commit -s`, adds `Signed-off-by: Name <email>`).
-  Do not add `Co-authored-by:` trailers (or any other AI attribution) to commit messages.
-- Do not commit, push or open PRs unless asked.
+- Do not commit, push or open PRs unless asked. For commits and pull requests load the
+  `cda-git-workflow` skill and follow it.
 
 ## Agents
 
@@ -85,9 +88,16 @@ available IDs), e.g.:
 
 - `.opencode/skills/cda-rust-development` - Rust coding rules, build/test/lint commands and
   pre-finish checklist.
+- `.opencode/skills/cda-documentation` - Sphinx/sphinx-needs docs, test sets in `docs/05_verification/`
+  and the downward traceability link direction (`req -> arch -> dsgn -> impl/dimpl`, `arch/dsgn -> testset -> test/itest`)
+  enforced by `docs/conf.py`.
+- `.opencode/skills/cda-git-workflow` - commit rules (Conventional Commits, DCO sign-off) and
+  pull requests (PR template, optional per-user PR description trailer from `.opencode/pr-trailer`).
 - `.opencode/skills/cda-diagnostic-protocol-spec` - UDS, DoIP and CAN/ISO-TP knowledge, doc sources
   and how to request specification text from the user.
 - `.opencode/skills/cda-issue-analysis` - structured analysis of bug reports and issues.
+- `.opencode/skills/cda-capture-analysis` - Wireshark capture analysis: UDS/DoIP/ISO-TP
+  timeline and timings, conformance checks and comparison with MDD com params.
 - `.opencode/skills/cda-mdd-mcp-setup` - install and register the mdd-mcp server (`mdd-mcp_*` tools).
 - `.opencode/skills/cda-pdf-reader-setup` - install and register the PDF MCP server (`pdf-reader_*` tools).
 - `.opencode/skills/cda-github-mcp-setup` - install and register the GitHub MCP server (`github_*` tools).

@@ -20,13 +20,13 @@ use cda_interfaces::{
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
         ComponentOperationsInfo, Ecu, FunctionalGroup, Gateway, NetworkStructure,
-        RoutineSubfunctions, SdBoolMappings, SdSdg, single_ecu,
+        RoutineSubfunctions, SdBoolMappings, SdSdg, check_sd_sdg_recursive, single_ecu,
     },
     diagservices::UdsPayloadData,
     dlt_ctx, service_ids,
 };
 
-use crate::{UdsManager, util::check_sd_sdg_recursive};
+use crate::UdsManager;
 
 /// Grouping key for the network structure.
 ///
@@ -105,6 +105,7 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
                 variant: ecu.ecu_status(),
                 logical_address: logical_address_string,
                 logical_link: format!("{}_on_{}", ecu_name, ecu.protocol()),
+                last_seen: ecu.runtime_state().last_seen(),
             }
         }
 
@@ -144,8 +145,14 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
                     ecus: Vec::new(),
                 });
 
-            if gateway_addr == ecu.logical_address() {
-                // this is the gateway itself
+            if gateway_addr == ecu.logical_address()
+                && !matches!(
+                    &network_ecu.variant.variant_state,
+                    cda_interfaces::VariantState::Duplicate
+                )
+            {
+                // Duplicate ODX descriptions share the same logical address.
+                // Only the selected ECU should define the gateway identity.
                 gateway.name.clone_from(&ecu_name);
                 gateway
                     .logical_address

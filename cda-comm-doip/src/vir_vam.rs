@@ -14,8 +14,8 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap,
-    HashMapExtensions, VariantDetectionRequest, VariantDetectionSender, dlt_ctx,
+    DiagServiceError, DoipComParams, EcuAddresses, HashMap, VariantDetectionRequest,
+    VariantDetectionSender, dlt_ctx, topology::logical_address_hex,
 };
 use doip_definitions::{
     header::PayloadType,
@@ -24,13 +24,13 @@ use doip_definitions::{
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    ConnectionTasks, DiscoveredGateway, DoipGatewaySetupError, DoipGatewayState,
-    DoipTransportConfig,
-    connections::{GatewayState, handle_gateway_connection},
+    DiscoveredGateway, DoipGatewaySetupError, DoipGatewayState, DoipTransportConfig,
+    gateway_session::{GatewaySession, ecu_names_by_gateway},
     socket::DoIPUdpSocket,
+    spawn_connection_task,
 };
 
-fn is_gateway(ecu: &impl EcuAddresses) -> bool {
+pub(crate) fn is_gateway(ecu: &impl EcuAddresses) -> bool {
     ecu.logical_gateway_address() == ecu.logical_address()
 }
 
@@ -41,7 +41,7 @@ fn add_discovered_gateway(gateways: &mut Vec<DiscoveredGateway>, gateway: Discov
     {
         tracing::debug!(
             ecu_name = %gateway.ecu_name,
-            logical_address = %format!("{:#06x}", gateway.logical_address),
+            logical_address = %logical_address_hex(gateway.logical_address),
             "Ignoring duplicate VAM"
         );
         return;
@@ -120,17 +120,198 @@ where
     Ok(gateways)
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "Contains nested private functions that should remain in scope"
+/// Selects the socket spontaneous VAMs are received on. VAMs are sent to the
+/// discovery port (ISO 13400-2 REQ 4.DoIP-009/010), so the VIR socket is only
+/// reused if it is bound to the unspecified address and the discovery port.
+/// Otherwise a shared socket on `0.0.0.0:<gateway_port>` is bound.
+///
+/// `vir_port` is `None` if no VIR socket is bound. Returns `None` if no socket
+/// is available to receive VAMs on; a failed bind never fails the caller.
+pub(crate) fn vam_listener_socket(
+    transport_config: &DoipTransportConfig,
+    vir_port: Option<u16>,
+    vir_socket: &Arc<Mutex<Option<DoIPUdpSocket>>>,
+) -> Option<Arc<Mutex<Option<DoIPUdpSocket>>>> {
+    let broadcast_ip = "0.0.0.0";
+    let vir_on_discovery_port = vir_port == Some(transport_config.port);
+    if vir_on_discovery_port && transport_config.tester_ip == broadcast_ip {
+        return Some(Arc::clone(vir_socket));
+    }
+    match crate::create_udp_vir_socket(broadcast_ip, transport_config.port) {
+        Ok(sock) => Some(Arc::new(Mutex::new(Some(sock)))),
+        Err(e) if vir_on_discovery_port => {
+            tracing::warn!(
+                broadcast_ip = %broadcast_ip,
+                tester_ip = %transport_config.tester_ip,
+                gateway_port = %transport_config.port,
+                error = ?e,
+                "Failed to bind broadcast socket, falling back to the VIR socket, \
+                 this can lead to missed VAMs"
+            );
+            Some(Arc::clone(vir_socket))
+        }
+        Err(e) => {
+            // The VIR socket (if any) is not bound to the discovery port and
+            // would never receive spontaneous VAMs.
+            tracing::error!(
+                broadcast_ip = %broadcast_ip,
+                gateway_port = %transport_config.port,
+                error = ?e,
+                "Failed to bind the VAM listener socket on the discovery port, spontaneous VAMs \
+                 are ignored"
+            );
+            None
+        }
+    }
+}
+
+/// Handles the announcement of a configured gateway: refreshes its variant
+/// detection if it is connected, and otherwise connects it, see
+/// [`connect_announced`].
+pub(crate) async fn handle_announcement<T: EcuAddresses + DoipComParams>(
+    state: &DoipGatewayState<T>,
+    session: &Arc<GatewaySession>,
+    doip_target: DiscoveredGateway,
+    gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
+    variant_detection: &VariantDetectionSender,
+) {
+    let logical_address = doip_target.logical_address;
+    if state.has_connection(logical_address).await {
+        warn_if_other_address(state, &doip_target).await;
+        // Repeated announcements and VIR responses received on both UDP
+        // sockets must not trigger variant detection again.
+        if !session.try_mark_variant_detection(logical_address) {
+            tracing::debug!(
+                ecu_name = %doip_target.ecu_name,
+                "Variant detection was triggered recently, ignoring repeated VAM"
+            );
+            return;
+        }
+        // sending variant detection, will update the ECU state
+        // (i.e. disconnected -> connected)
+        send_variant_detection(gateway_ecu_name_map, variant_detection, logical_address).await;
+    } else {
+        tracing::info!(ecu_name = %doip_target.ecu_name, "New Gateway ECU detected");
+        connect_announced(state, session, doip_target);
+    }
+}
+
+/// A VAM never replaces a connection, but the operator should know if it
+/// contradicts one, e.g. a direct connect to the wrong address.
+async fn warn_if_other_address<T: EcuAddresses + DoipComParams>(
+    state: &DoipGatewayState<T>,
+    doip_target: &DiscoveredGateway,
+) {
+    if let Some(connected_ip) = state.connection_ip(doip_target.logical_address).await
+        && connected_ip != doip_target.ip
+    {
+        tracing::warn!(
+            ecu_name = %doip_target.ecu_name,
+            %connected_ip,
+            vam_ip = %doip_target.ip,
+            "VAM received from a different address than the existing connection, \
+             the connection is kept"
+        );
+    }
+}
+
+/// Connects an announced gateway in a task, so the listener receives the next
+/// announcement meanwhile. The task waits for the gateway's connect lock and
+/// then connects the newest announced address, unless the gateway is connected
+/// by then. One task per gateway waits; later announcements only replace the
+/// address. Requests variant detection once connected. A failure is reported
+/// unreachable without a VIR search: the gateway has just announced itself,
+/// unless a persisted reconnect still covers the gateway; then the reconnect
+/// reports it.
+/// [[ dimpl~doip-vam-during-connect-connects-after-failure, An announcement during a connect in flight connects the gateway if that connect fails, dimpl ]]
+/// [[ dimpl~doip-failed-announcement-connect-reported, A failed announcement connect is reported unreachable without a VIR search unless a persisted reconnect still covers the gateway (then the reconnect reports it), dimpl ]]
+fn connect_announced<T: EcuAddresses + DoipComParams>(
+    state: &DoipGatewayState<T>,
+    session: &Arc<GatewaySession>,
+    doip_target: DiscoveredGateway,
+) {
+    let logical_address = doip_target.logical_address;
+    if session
+        .lock_pending_announcements()
+        .insert(logical_address, doip_target)
+        .is_some()
+    {
+        return;
+    }
+    let state = state.clone();
+    let task_session = Arc::clone(session);
+    spawn_connection_task(
+        &session.connection_tasks,
+        &format!(
+            "doip-announced-connect-{}",
+            logical_address_hex(logical_address)
+        ),
+        async move {
+            let connection_guard = task_session.acquire_connect_guard(logical_address).await;
+            let Some(announced) = task_session
+                .lock_pending_announcements()
+                .remove(&logical_address)
+            else {
+                return;
+            };
+            if state.has_connection(logical_address).await {
+                warn_if_other_address(&state, &announced).await;
+                return;
+            }
+            if state
+                .connect_locked(&connection_guard, announced)
+                .await
+                .is_err()
+            {
+                // If a persisted reconnect covers the gateway, it reports it together with
+                // its own failures.
+                if !task_session.defer_report(logical_address) {
+                    state
+                        .report_unreachable(&task_session, [logical_address])
+                        .await;
+                }
+            }
+        },
+    );
+}
+
+#[tracing::instrument(skip_all,
+    fields(dlt_context = dlt_ctx!("DOIP"))
 )]
+async fn send_variant_detection(
+    gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
+    variant_detection: &VariantDetectionSender,
+    logical_address: u16,
+) {
+    let Some(ecus) = gateway_ecu_name_map.get(&logical_address) else {
+        tracing::warn!(
+            logical_address = %logical_address_hex(logical_address),
+            "No ECU names found for announced gateway, variant detection not sent"
+        );
+        return;
+    };
+
+    if let Err(e) = variant_detection
+        .send(VariantDetectionRequest::new(ecus.clone()))
+        .await
+    {
+        tracing::warn!(
+            error = ?e,
+            "Failed to send variant detection request"
+        );
+    } else {
+        tracing::info!(
+            ecus = ?ecus,
+            "Variant detection request sent"
+        );
+    }
+}
+
 pub(crate) async fn listen_for_vams<T, F>(
-    transport_config: DoipTransportConfig,
-    netmask: u32,
     state: DoipGatewayState<T>,
-    connection_tasks: Arc<ConnectionTasks>,
+    vam_socket: Arc<Mutex<Option<DoIPUdpSocket>>>,
+    session: Arc<GatewaySession>,
     variant_detection: VariantDetectionSender,
-    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     mut shutdown_signal: futures::future::Shared<F>,
 ) -> tokio::task::JoinHandle<()>
 where
@@ -141,181 +322,70 @@ where
     struct DoipMessageContext {
         doip_msg: doip_definitions::message::DoipMessage,
         source_addr: std::net::SocketAddr,
-        netmask: u32,
-    }
-
-    #[derive(Clone)]
-    struct VamNotifications {
-        variant_detection: VariantDetectionSender,
-        connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     }
 
     #[tracing::instrument(
-        skip(
-            state,
-            connection_tasks,
-            gateway_ecu_map,
-            gateway_ecu_name_map,
-            vam_notifications,
-            transport_config
-        ),
+        skip(state, session, gateway_ecu_name_map, variant_detection),
         fields(
             dlt_context = dlt_ctx!("DOIP")
         )
     )]
     async fn handle_doip_response<T: EcuAddresses + DoipComParams>(
-        transport_config: &DoipTransportConfig,
         state: &DoipGatewayState<T>,
-        connection_tasks: &Arc<ConnectionTasks>,
+        session: &Arc<GatewaySession>,
         doip_msg_ctx: DoipMessageContext,
-        gateway_ecu_map: &HashMap<u16, Vec<u16>>,
         gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
-        vam_notifications: VamNotifications,
+        variant_detection: &VariantDetectionSender,
     ) {
         let DoipMessageContext {
             doip_msg,
             source_addr,
-            netmask,
         } = doip_msg_ctx;
-        match handle_vam::<T>(&state.ecus, doip_msg, source_addr, netmask).await {
+        // `PersistedOnly`: ignored until a topology has been persisted, then
+        // handled without a restart.
+        if !state.topology.accepts_vams() {
+            tracing::debug!(
+                source_ip = %source_addr.ip(),
+                "Ignoring spontaneous VAM, no persisted topology (vam_handling_mode)"
+            );
+            return;
+        }
+        match handle_vam::<T>(&state.ecus, doip_msg, source_addr, state.netmask).await {
             Ok(Some(doip_target)) => {
                 tracing::debug!(
                     ecu_name = %doip_target.ecu_name,
-                    logical_address = %format!("{:#06x}", doip_target.logical_address),
+                    logical_address = %logical_address_hex(doip_target.logical_address),
                     "VAM received"
                 );
-                if state
-                    .logical_address_to_connection
-                    .read()
-                    .await
-                    .get(&doip_target.logical_address)
-                    .is_some()
-                {
-                    // sending variant detection, will update the ECU state
-                    // (i.e. disconnected -> connected)
-                    send_variant_detection(
-                        gateway_ecu_name_map,
-                        &vam_notifications.variant_detection,
-                        doip_target.logical_address,
-                    )
-                    .await;
-                } else {
-                    tracing::info!(ecu_name = %doip_target.ecu_name, "New Gateway ECU detected");
-
-                    match handle_gateway_connection::<T>(
-                        doip_target,
-                        transport_config,
-                        &GatewayState {
-                            doip_connections: Arc::clone(&state.doip_connections),
-                            ecus: Arc::clone(&state.ecus),
-                            gateway_ecu_map: gateway_ecu_map.clone(),
-                            connection_tasks: Arc::clone(connection_tasks),
-                        },
-                        vam_notifications.connectivity_handler,
-                    )
-                    .await
-                    {
-                        Ok(logical_address) => {
-                            state.logical_address_to_connection.write().await.insert(
-                                logical_address,
-                                state.doip_connections.read().await.len().saturating_sub(1),
-                            );
-                            send_variant_detection(
-                                gateway_ecu_name_map,
-                                &vam_notifications.variant_detection,
-                                logical_address,
-                            )
-                            .await;
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                error = ?e,
-                                "Failed to handle new Gateway connection"
-                            );
-                        }
-                    }
-                }
+                handle_announcement(
+                    state,
+                    session,
+                    doip_target,
+                    gateway_ecu_name_map,
+                    variant_detection,
+                )
+                .await;
             }
             Ok(None) => { /* ignore non-matching VAMs */ }
             Err(e) => tracing::warn!(error = ?e, "Failed to handle VAM"),
         }
     }
 
-    #[tracing::instrument(skip_all,
-        fields(dlt_context = dlt_ctx!("DOIP"))
-    )]
-    async fn send_variant_detection(
-        gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
-        variant_detection: &VariantDetectionSender,
-        logical_address: u16,
-    ) {
-        if let Some(ecus) = gateway_ecu_name_map.get(&logical_address) {
-            if let Err(e) = variant_detection
-                .send(VariantDetectionRequest::new(ecus.clone()))
-                .await
-            {
-                tracing::warn!(
-                    error = ?e,
-                    "Failed to send variant detection request"
-                );
-            } else {
-                tracing::info!(
-                    ecus = ?ecus,
-                    "Variant detection request sent"
-                );
-            }
-        }
-    }
-
-    // create mapping gateway_logical_address -> Vec<ecu_logical_address>
-    let mut gateway_ecu_map: HashMap<u16, Vec<u16>> = HashMap::new();
-    let mut gateway_ecu_name_map: HashMap<u16, Vec<String>> = HashMap::new();
-    for ecu_lock in state.ecus.values() {
-        let ecu = ecu_lock.read().await;
-        let ecu_name = ecu.ecu_name();
-
-        let addr = ecu.logical_address();
-        let gateway_addr = ecu.logical_gateway_address();
-        gateway_ecu_map.entry(gateway_addr).or_default().push(addr);
-        gateway_ecu_name_map
-            .entry(gateway_addr)
-            .or_default()
-            .push(ecu_name.to_lowercase());
-    }
+    let gateway_ecu_name_map = ecu_names_by_gateway(&state.ecus).await;
 
     tracing::info!("Listening for spontaneous VAMs");
-    let notifications = VamNotifications {
-        variant_detection,
-        connectivity_handler,
-    };
 
     cda_interfaces::spawn_named!(
         "vam-listen",
         Box::pin(async move {
-            let broadcast_ip = "0.0.0.0";
-            let broadcast_socket = if transport_config.tester_ip == broadcast_ip {
-                Arc::clone(&state.socket)
-            } else {
-                match crate::create_udp_vir_socket(broadcast_ip, transport_config.port) {
-                    Ok(sock) => Arc::new(Mutex::new(Some(sock))),
-                    Err(e) => {
-                        tracing::warn!(
-                            broadcast_ip = %broadcast_ip,
-                            tester_ip = %transport_config.tester_ip,
-                            gateway_port = %transport_config.port,
-                            error = ?e,
-                            "Failed to bind broadcast socket, falling back to tester IP,\
-                             this can lead to missed VAMs"
-                        );
-                        Arc::clone(&state.socket)
-                    }
-                }
-            };
+            let broadcast_socket = vam_socket;
 
             loop {
                 let mut socket_guard = broadcast_socket.lock().await;
-                // `start()` binds `state.socket` before spawning this task, so
-                // this is unreachable. Log and stop rather than panic.
+                // `start()` only spawns this task with a bound VAM listener socket
+                // (its own or the VIR socket on the discovery port), and `stop()`
+                // ends this task before unbinding the VIR socket, so this is
+                // unreachable. Log and stop rather than panic.
                 let Some(socket) = socket_guard.as_mut() else {
                     tracing::error!("Broadcast socket unexpectedly unbound; stopping vam listener");
                     break;
@@ -332,17 +402,14 @@ where
                             Some(Ok((doip_msg, source_addr))) => {
                                 if let DoipPayload::VehicleAnnouncementMessage(_) = &doip_msg.payload {
                                     handle_doip_response(
-                                        &transport_config,
                                         &state,
-                                        &connection_tasks,
+                                        &session,
                                         DoipMessageContext {
                                             doip_msg,
                                             source_addr,
-                                            netmask,
                                         },
-                                        &gateway_ecu_map,
                                         &gateway_ecu_name_map,
-                                        notifications.clone(),
+                                        &variant_detection,
                                     ).await;
                                 }
                             }

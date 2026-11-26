@@ -265,7 +265,7 @@ mod tests {
         )
         .await;
 
-        assert!(items.is_empty());
+        assert_eq!(items, [] as [serde_json::Value; 0]);
     }
 
     /// Request URIs (including their query string) are lowercased by CDA's request
@@ -319,6 +319,7 @@ pub(crate) mod diag_service {
         openapi,
         sovd::{
             IntoSovd, WebserverEcuState,
+            binary_encoding::BinaryEncodingParam,
             components::ecu::{DiagServicePathParam, data_request},
             create_schema,
             error::{ApiError, ErrorWrapper},
@@ -399,6 +400,7 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::components::ComponentQuery>,
             ApiError,
         >,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverEcuState {
             ecu_name,
             uds,
@@ -431,6 +433,7 @@ pub(crate) mod diag_service {
                 None,
                 (security_plugin, &locks, false),
                 include_schema,
+                binary_encoding,
             )
             .await
         }
@@ -458,6 +461,7 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::components::ecu::data::service::put::Query>,
             ApiError,
         >,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverEcuState {
             ecu_name,
             uds,
@@ -487,6 +491,7 @@ pub(crate) mod diag_service {
             Some(body),
             (security_plugin, &locks, true),
             include_schema,
+            binary_encoding,
         )
         .await
     }

@@ -190,7 +190,10 @@ mod tests {
             .await
             .unwrap();
         let doc: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(doc.get("items").unwrap().as_array().unwrap().is_empty());
+        assert_eq!(
+            doc.get("items").unwrap().as_array().unwrap().as_slice(),
+            [] as [serde_json::Value; 0]
+        );
     }
 
     #[tokio::test]

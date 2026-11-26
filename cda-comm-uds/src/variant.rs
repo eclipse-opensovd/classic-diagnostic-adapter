@@ -22,11 +22,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState, HashMap,
-    HashMapExtensions, HashSet, HashSetExtensions, PayloadDecoder, UdsVariant, VariantState,
+    Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState,
+    HashMap, HashMapExtensions, HashSet, HashSetExtensions, PayloadDecoder, ServicePayload,
+    UdsVariant, VariantState,
     communication_control::{
         ActivationCause, CommunicationLifecycle, CommunicationState, CommunicationVariantDetection,
-        VariantDetectionMode, error::CommControlError,
+        DetectionPhase, VariantDetectionMode, error::CommControlError,
     },
     dlt_ctx,
 };
@@ -34,7 +35,7 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    ReceiverRetention, UdsManager,
+    ListenerState, ReceiverRetention, UdsManager,
     coordinator::EcuCoordinatorHandle,
     transport::{CommunicationReadiness, needs_variant_detection},
 };
@@ -50,29 +51,71 @@ enum DetectionPermit {
     Run(Option<tokio::sync::OwnedMutexGuard<()>>),
 }
 
+/// Acquires the detection lock and decides whether the detection still has
+/// to run.
+///
+/// `state_handles` are the members of the duplicate group the detection
+/// covers. An automatic (`IfNeeded`) trigger only runs if at least one member
+/// still needs detection. Checking just the lock holder (the group
+/// representative) is not enough: a reconnect resets each member separately,
+/// so a non-representative member can be left `NotTested` while the
+/// representative is already detected.
 async fn claim_detection(
     lock_handle: Option<&EcuCoordinatorHandle>,
-    state_handle: Option<&EcuCoordinatorHandle>,
+    state_handles: &[&EcuCoordinatorHandle],
     trigger: DetectionTrigger,
 ) -> DetectionPermit {
     let Some(lock_handle) = lock_handle else {
         return DetectionPermit::Run(None);
     };
-    let Some(guard) = lock_handle.begin_detection().await else {
-        return DetectionPermit::Skip;
+
+    let guard = if matches!(trigger, DetectionTrigger::Forced) {
+        lock_handle.begin_forced_detection().await
+    } else {
+        let Some(guard) = lock_handle.begin_detection().await else {
+            return DetectionPermit::Skip;
+        };
+        // A connect after the last detection started makes its verdict
+        // untrustworthy even when it settled the state: a detection that
+        // raced the reconnect can conclude "no variant" from the replaced
+        // connection, and nothing else would correct that.
+        if !state_handles.is_empty()
+            && !state_handles
+                .iter()
+                .any(|handle| needs_variant_detection(&handle.ecu_status()))
+            && !state_handles
+                .iter()
+                .any(|handle| handle.connected_since_detection())
+        {
+            return DetectionPermit::Skip;
+        }
+        guard
     };
-    if matches!(trigger, DetectionTrigger::IfNeeded)
-        && state_handle.is_some_and(|handle| !needs_variant_detection(&handle.ecu_status()))
-    {
-        return DetectionPermit::Skip;
+    for handle in state_handles {
+        handle.record_detection_started();
     }
     DetectionPermit::Run(Some(guard))
 }
 
-/// Result of evaluating every member of a duplicate group against one set of
-/// detection responses.
+/// Whether an automatic detection that just concluded should be retried.
+///
+/// Retrying only helps if some member is offline *and* would pass the
+/// [`claim_detection`] gate again. An offline `Duplicate` member does not
+/// need detection, so every retry would be skipped and only add delay.
+fn needs_offline_retry(state_handles: &[&EcuCoordinatorHandle]) -> bool {
+    state_handles.iter().any(|handle| {
+        let status = handle.ecu_status();
+        status.connectivity == Connectivity::Offline && needs_variant_detection(&status)
+    })
+}
+
+/// Outcome of detecting schema-bearing members of a duplicate group.
 #[derive(Debug)]
 enum GroupDetectionResult {
+    /// No member has variant detection services.
+    NoDetectionServices,
+    /// A failed detection request already marked the group unreachable.
+    MarkedUnreachable,
     /// Exactly this member matched a specific (non-fallback) variant.
     ExactMatch(String),
     /// Members are online, but none matched a specific variant.
@@ -81,6 +124,11 @@ enum GroupDetectionResult {
     NoOnlineEcu,
     /// Members are online, but detection failed for all of them.
     NoDetection,
+}
+
+struct DetectionResponses<R> {
+    responses: HashMap<String, R>,
+    skipped_error: Option<DiagServiceError>,
 }
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
@@ -99,9 +147,14 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     ) -> Result<(), DiagServiceError> {
         let ecu = self.uds_ecu_db(ecu_name)?;
         let group_representative = self.duplicate_group_representative(ecu_name).await;
+        let group_members = self.duplicate_group_members(ecu_name).await;
+        let state_handles: Vec<_> = group_members
+            .iter()
+            .filter_map(|name| self.state_coordinator.get_handle(name))
+            .collect();
         let DetectionPermit::Run(_detection_guard) = claim_detection(
             self.state_coordinator.get_handle(&group_representative),
-            self.state_coordinator.get_handle(ecu_name),
+            &state_handles,
             trigger,
         )
         .await
@@ -109,11 +162,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             tracing::debug!(ecu_name, "Variant detection trigger obsolete, skipping");
             return Ok(());
         };
-
-        let service_responses = self.gather_detection_responses(ecu_name, ecu).await?;
-        if service_responses.is_empty() {
-            return self.mark_group_unreachable(ecu).await;
-        }
+        // Counted only when a detection actually runs, so a skipped probe does not
+        // count as a detection run (and is not persisted as one).
+        let _guard = self.variant_detection.activity.begin();
 
         let Some(mut duplicated_ecus) = ecu
             .read()
@@ -122,27 +173,241 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             .cloned()
             .filter(|d| !d.is_empty())
         else {
-            return ecu
-                .write()
-                .await
-                .detect_variant(service_responses)
-                .await
-                .map_err(|e| {
-                    DiagServiceError::VariantDetectionError(format!(
-                        "Failed to detect variant: {e:?}"
-                    ))
-                });
+            if ecu.read().await.get_variant_detection_requests().is_empty() {
+                return self.detect_without_schema(ecu_name, ecu).await;
+            }
+            return self.detect_single_ecu(ecu_name, ecu).await;
+        };
+        duplicated_ecus.insert(ecu_name.to_owned());
+        self.detect_duplicate_group(duplicated_ecus).await
+    }
+
+    async fn detect_single_ecu(
+        &self,
+        ecu_name: &str,
+        ecu: &RwLock<T>,
+    ) -> Result<(), DiagServiceError> {
+        let Some(gathered) = self.gather_or_mark_unreachable(ecu_name, ecu).await? else {
+            return Ok(());
+        };
+        ecu.write()
+            .await
+            .detect_variant(gathered.responses)
+            .await
+            .map_err(|e| {
+                DiagServiceError::VariantDetectionError(format!("Failed to detect variant: {e:?}"))
+            })
+    }
+
+    /// Detection for an ECU without detection services and without
+    /// duplicates: it always runs the base variant, so only reachability
+    /// decides its state.
+    async fn detect_without_schema(
+        &self,
+        ecu_name: &str,
+        ecu: &RwLock<T>,
+    ) -> Result<(), DiagServiceError> {
+        if self
+            .probe_reachability_or_mark_unreachable(ecu_name, ecu)
+            .await?
+        {
+            ecu.write().await.set_base_variant_online().await
+        } else {
+            // No probe response; the helper already marked the ECU unreachable.
+            Ok(())
+        }
+    }
+
+    /// Detection for a duplicate group. Members with detection services are
+    /// evaluated against the responses to their requests. If none of them
+    /// matched a specific variant, the group is probed once for reachability.
+    /// If the ECU responds, a single member without detection services takes
+    /// the base variant. Several such members leave the group unresolved.
+    async fn detect_duplicate_group(
+        &self,
+        duplicated_ecus: HashSet<String>,
+    ) -> Result<(), DiagServiceError> {
+        let (with_schema, without_schema) =
+            self.partition_duplicate_members(&duplicated_ecus).await;
+        let detection_result = if with_schema.is_empty() {
+            GroupDetectionResult::NoDetectionServices
+        } else {
+            self.detect_schema_members(&with_schema).await?
         };
 
-        duplicated_ecus.insert(ecu_name.to_owned());
-        let detection_result = self
-            .evaluate_duplicate_group(&duplicated_ecus, &service_responses)
-            .await;
-        tracing::debug!(?detection_result, "ECU variant detection result");
-        self.apply_group_result(&detection_result, &duplicated_ecus)
-            .await;
+        if matches!(detection_result, GroupDetectionResult::MarkedUnreachable) {
+            // Gathering already marked the ECU and its duplicates unreachable.
+            return Ok(());
+        }
 
+        // check if we have exactly one match. if yes, apply the group result and return early
+        if matches!(detection_result, GroupDetectionResult::ExactMatch(_)) {
+            self.apply_group_result(&detection_result, &duplicated_ecus)
+                .await;
+            return Ok(());
+        }
+
+        // If no exact match was found, proceed with probing members without detection services.
+        // if there are no members without detection services, apply the group result and return early
+        let Some(probe_name) = without_schema.first() else {
+            self.apply_group_result(&detection_result, &duplicated_ecus)
+                .await;
+            return Ok(());
+        };
+
+        // All members share one logical address, so a single probe answers
+        // reachability for the whole group.
+        let probe_ecu = self.uds_ecu_db(probe_name)?;
+        if !self.probe_reachability(probe_name, probe_ecu).await? {
+            if matches!(detection_result, GroupDetectionResult::NoDetectionServices) {
+                self.mark_group_unreachable(probe_ecu).await?;
+            } else {
+                self.apply_group_result(&detection_result, &duplicated_ecus)
+                    .await;
+            }
+            return Ok(());
+        }
+
+        if without_schema.len() == 1 {
+            tracing::debug!(
+                ecu_name = %probe_name,
+                "No duplicate matched a specific variant, selecting base variant of the only \
+                 member without detection services"
+            );
+            probe_ecu.write().await.set_base_variant_online().await?;
+            for name in duplicated_ecus.iter().filter(|name| *name != probe_name) {
+                if let Some(member) = self.ecus.get(name) {
+                    member.write().await.mark_as_duplicate().await;
+                }
+            }
+        } else {
+            tracing::warn!(
+                candidates = ?without_schema,
+                "Multiple duplicates define no variant detection services, cannot select one"
+            );
+            for name in &duplicated_ecus {
+                if let Some(member) = self.ecus.get(name) {
+                    member.write().await.mark_as_no_variant_detected().await;
+                }
+            }
+        }
         Ok(())
+    }
+
+    async fn partition_duplicate_members(
+        &self,
+        duplicated_ecus: &HashSet<String>,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut names: Vec<_> = duplicated_ecus.iter().cloned().collect();
+        names.sort();
+        let mut with_schema = Vec::new();
+        let mut without_schema = Vec::new();
+        for name in names {
+            let Some(member) = self.ecus.get(&name) else {
+                continue;
+            };
+            if member
+                .read()
+                .await
+                .get_variant_detection_requests()
+                .is_empty()
+            {
+                without_schema.push(name);
+            } else {
+                with_schema.push(name);
+            }
+        }
+        (with_schema, without_schema)
+    }
+
+    async fn detect_schema_members(
+        &self,
+        with_schema: &[String],
+    ) -> Result<GroupDetectionResult, DiagServiceError> {
+        let mut responses_by_member = HashMap::new();
+        let mut connectivity_error = None;
+        for name in with_schema {
+            let ecu = self.uds_ecu_db(name)?;
+            // A member that cannot be reached (e.g. it has no route on the
+            // active transport) must not mark the whole group unreachable
+            // while another member of the same ECU answers.
+            let gathered = match self.gather_detection_responses(name, ecu).await {
+                Ok(gathered) => gathered,
+                Err(error) if is_connectivity_failure(&error) => {
+                    tracing::debug!(
+                        ecu_name = %name,
+                        error = %error,
+                        "Duplicate member unreachable during variant detection"
+                    );
+                    connectivity_error = Some(error);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            // A missing response may be the only evidence for a specific variant.
+            // Do not resolve duplicates from incomplete detection results.
+            if let Some(error) = gathered.skipped_error {
+                return Err(error);
+            }
+            if !gathered.responses.is_empty() {
+                responses_by_member.insert(name.clone(), gathered.responses);
+            }
+        }
+
+        if responses_by_member.is_empty() {
+            if let Some(first) = with_schema.first() {
+                let first_ecu = self.uds_ecu_db(first)?;
+                if let Err(mark_err) = self.mark_group_unreachable(first_ecu).await {
+                    tracing::warn!(
+                        ecu_name = %first,
+                        error = %mark_err,
+                        "Failed to mark ECU group unreachable after connectivity failure"
+                    );
+                }
+            }
+            return match connectivity_error {
+                Some(error) => Err(error),
+                None => Ok(GroupDetectionResult::MarkedUnreachable),
+            };
+        }
+
+        let result = self
+            .evaluate_duplicate_group(with_schema, &responses_by_member)
+            .await;
+        tracing::debug!(?result, "ECU variant detection result");
+        Ok(result)
+    }
+
+    /// Gathers detection responses. Connectivity failures and unanswered
+    /// requests mark the group unreachable; configuration errors are returned
+    /// instead. `Ok(None)` means the state was already settled.
+    async fn gather_or_mark_unreachable(
+        &self,
+        ecu_name: &str,
+        ecu: &RwLock<T>,
+    ) -> Result<Option<DetectionResponses<<T as PayloadDecoder>::Response>>, DiagServiceError> {
+        let gathered = match self.gather_detection_responses(ecu_name, ecu).await {
+            Ok(responses) => responses,
+            Err(error) if is_connectivity_failure(&error) => {
+                if let Err(mark_err) = self.mark_group_unreachable(ecu).await {
+                    tracing::warn!(
+                        ecu_name,
+                        error = %mark_err,
+                        "Failed to mark ECU group unreachable after connectivity failure"
+                    );
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        if gathered.responses.is_empty() {
+            if let Some(error) = gathered.skipped_error {
+                return Err(error);
+            }
+            self.mark_group_unreachable(ecu).await?;
+            return Ok(None);
+        }
+        Ok(Some(gathered))
     }
 
     /// Ensures variant detection has concluded for `ecu_name` before serving
@@ -215,6 +480,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 
         for ecu_name in representatives {
             let vd = self.clone();
+            let guard = self.variant_detection.activity.begin();
             cda_interfaces::spawn_named!(&format!("variant-detection-{ecu_name}"), async move {
                 // Retry budget for detections that conclude offline: such a
                 // verdict is usually transient here (the detection raced the
@@ -227,6 +493,8 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 // offline ECUs still settle at Offline after the retries.
                 const OFFLINE_VERDICT_RETRIES: u32 = 3;
                 const OFFLINE_VERDICT_RETRY_DELAY: Duration = Duration::from_secs(1);
+                // Keeps the detection registered across the retries below.
+                let _guard = guard;
 
                 for attempt in 0..=OFFLINE_VERDICT_RETRIES {
                     if attempt > 0 {
@@ -241,13 +509,17 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                             tracing::info!(error = %e, "Variant detection failed");
                         }
                     }
-                    let offline =
-                        vd.state_coordinator
-                            .get_handle(&ecu_name)
-                            .is_some_and(|handle| {
-                                handle.connectivity() == cda_interfaces::Connectivity::Offline
-                            });
-                    if !offline {
+                    // Any member counts: a member whose disconnect was not
+                    // suppressed can conclude offline while the
+                    // representative itself stays online. Members that no
+                    // longer need detection (e.g. Duplicate) are ignored,
+                    // the next attempt would skip them anyway.
+                    let group_members = vd.duplicate_group_members(&ecu_name).await;
+                    let state_handles: Vec<_> = group_members
+                        .iter()
+                        .filter_map(|name| vd.state_coordinator.get_handle(name))
+                        .collect();
+                    if !needs_offline_retry(&state_handles) {
                         break;
                     }
                     tracing::debug!(
@@ -266,13 +538,26 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     #[tracing::instrument(skip_all,
         fields(dlt_context = dlt_ctx!("UDS"))
     )]
-    async fn start_variant_detection(&self) {
+    async fn start_variant_detection(&self, after_activation: bool) {
         let mut ecus = Vec::new();
         for (ecu_name, db) in self.ecus.iter() {
             if !db.read().await.is_physical_ecu() {
                 tracing::debug!(
                     ecu_name = %ecu_name,
                     "Skip variant detection for functional description"
+                );
+                continue;
+            }
+            // Restored from a persisted topology: keeps its variant until contacted,
+            // and its gateway may not be connected yet, which must not mark it
+            // offline here. Only for the detection of an activation; an explicit
+            // re-detection reset these ECUs to NotTested before.
+            if after_activation
+                && db.read().await.ecu_status().connectivity == Connectivity::AssumedOnline
+            {
+                tracing::debug!(
+                    ecu_name = %ecu_name,
+                    "Skip variant detection for ECU restored as assumed online"
                 );
                 continue;
             }
@@ -328,16 +613,35 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             .to_owned()
     }
 
+    /// All members of the ECU's duplicate group (including the ECU itself)
+    /// that are present in the loaded ECU map, sorted by name.
+    async fn duplicate_group_members(&self, ecu_name: &str) -> Vec<String> {
+        let mut members = std::collections::BTreeSet::new();
+        members.insert(ecu_name.to_owned());
+        if let Some(db) = self.ecus.get(ecu_name) {
+            members.extend(
+                db.read()
+                    .await
+                    .duplicating_ecu_names()
+                    .into_iter()
+                    .flatten()
+                    .filter(|name| self.ecus.contains_key(*name))
+                    .cloned(),
+            );
+        }
+        members.into_iter().collect()
+    }
+
     /// Sends the ECU's variant-detection requests and returns the responses
     /// that arrived. Disconnect events are suppressed while the requests are
     /// in flight to prevent a timeout from re-triggering variant detection
-    /// in a loop; gathering stops at the first send failure (no need to
-    /// continue if one fails).
+    /// in a loop. Gathering stops at the first connectivity failure. Other
+    /// per-request failures are logged and retained while later requests run.
     async fn gather_detection_responses(
         &self,
         ecu_name: &str,
         ecu: &RwLock<T>,
-    ) -> Result<HashMap<String, <T as PayloadDecoder>::Response>, DiagServiceError> {
+    ) -> Result<DetectionResponses<<T as PayloadDecoder>::Response>, DiagServiceError> {
         let requests = ecu
             .read()
             .await
@@ -363,9 +667,17 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         }
 
         let mut service_responses = HashMap::new();
-        self.state_coordinator
-            .suppress_disconnect_handling(ecu_name)
-            .await;
+        // Suppress for every group member: the members share one transport,
+        // so a timeout would otherwise mark the non-representative members
+        // offline and no later reconnect event would bring them back.
+        let group_members = self.duplicate_group_members(ecu_name).await;
+        for member in &group_members {
+            self.state_coordinator
+                .suppress_disconnect_handling(member)
+                .await;
+        }
+        let mut last_error = None;
+        let mut connectivity_failed = false;
         for (name, service) in requests {
             match self
                 .send_without_variant_guard(
@@ -387,21 +699,138 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 Ok(response) => {
                     service_responses.insert(name, response);
                 }
-                Err(e) => {
-                    tracing::debug!(
+                Err(e) if is_connectivity_failure(&e) => {
+                    tracing::warn!(
+                        ecu_name,
                         request_name = %name,
                         error = %e,
-                        "Failed to send variant detection request"
+                        "Connectivity failure during variant detection, aborting"
                     );
+                    last_error = Some(e);
+                    connectivity_failed = true;
                     break;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        ecu_name,
+                        request_name = %name,
+                        error = %e,
+                        "Variant detection request failed, continuing with remaining requests"
+                    );
+                    last_error = Some(e);
                 }
             }
         }
-        self.state_coordinator
-            .restore_disconnect_handling(ecu_name)
-            .await;
+        for member in &group_members {
+            self.state_coordinator
+                .restore_disconnect_handling(member)
+                .await;
+        }
 
-        Ok(service_responses)
+        // A connectivity failure invalidates any partial responses: the
+        // caller marks the group unreachable and detection can be retried.
+        match last_error {
+            Some(error) if connectivity_failed => Err(error),
+            skipped_error => Ok(DetectionResponses {
+                responses: service_responses,
+                skipped_error,
+            }),
+        }
+    }
+
+    /// Checks whether an ECU without detection services is reachable by
+    /// reading the `UDSVersionDataIdentifier` (`22 FF 00`). Any response,
+    /// positive or negative, counts as reachable.
+    async fn send_reachability_probe(
+        &self,
+        ecu_name: &str,
+        ecu: &RwLock<T>,
+    ) -> Result<Option<ServicePayload>, DiagServiceError> {
+        const UDS_VERSION_PROBE: [u8; 3] = [0x22, 0xFF, 0x00];
+
+        let payload = {
+            let ecu = ecu.read().await;
+            ServicePayload {
+                data: UDS_VERSION_PROBE.to_vec(),
+                source_address: ecu.tester_address(),
+                target_address: ecu.logical_address(),
+                new_session: None,
+                new_security: None,
+            }
+        };
+
+        tracing::debug!(
+            ecu_name,
+            "No variant detection services configured, probing reachability"
+        );
+        // Suppress for every group member, as in `gather_detection_responses`:
+        // the members share one transport.
+        let group_members = self.duplicate_group_members(ecu_name).await;
+        for member in &group_members {
+            self.state_coordinator
+                .suppress_disconnect_handling(member)
+                .await;
+        }
+        let result = self
+            .send_with_raw_payload(
+                ecu_name,
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
+            .await;
+        for member in &group_members {
+            self.state_coordinator
+                .restore_disconnect_handling(member)
+                .await;
+        }
+
+        result
+    }
+
+    /// Probes reachability without changing any state. Connectivity failures
+    /// count as unreachable, so other detection results can still decide.
+    async fn probe_reachability(
+        &self,
+        ecu_name: &str,
+        ecu: &RwLock<T>,
+    ) -> Result<bool, DiagServiceError> {
+        match self.send_reachability_probe(ecu_name, ecu).await {
+            Ok(response) => Ok(response.is_some()),
+            Err(error) if is_connectivity_failure(&error) => {
+                tracing::debug!(ecu_name, error = %error, "Reachability probe failed");
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Probes reachability and marks the group unreachable when the ECU does
+    /// not answer. On connectivity failures the original error is returned.
+    async fn probe_reachability_or_mark_unreachable(
+        &self,
+        ecu_name: &str,
+        ecu: &RwLock<T>,
+    ) -> Result<bool, DiagServiceError> {
+        match self.send_reachability_probe(ecu_name, ecu).await {
+            Ok(Some(_)) => Ok(true),
+            Ok(None) => {
+                self.mark_group_unreachable(ecu).await?;
+                Ok(false)
+            }
+            Err(error) if is_connectivity_failure(&error) => {
+                if let Err(mark_err) = self.mark_group_unreachable(ecu).await {
+                    tracing::warn!(
+                        ecu_name,
+                        error = %mark_err,
+                        "Failed to mark ECU unreachable after failed reachability probe"
+                    );
+                }
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Marks the ECU and every member of its duplicate group as unreachable
@@ -452,8 +881,8 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     /// or entirely offline.
     async fn evaluate_duplicate_group(
         &self,
-        duplicated_ecus: &cda_interfaces::HashSet<String>,
-        service_responses: &HashMap<String, <T as PayloadDecoder>::Response>,
+        duplicated_ecus: &[String],
+        responses_by_member: &HashMap<String, HashMap<String, <T as PayloadDecoder>::Response>>,
     ) -> GroupDetectionResult {
         // First ECU that is online and fell back to base variant (no specific match).
         let mut first_fallback = None;
@@ -463,6 +892,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 
         for ecu_name in duplicated_ecus {
             let Some(ecu) = self.ecus.get(ecu_name) else {
+                continue;
+            };
+            let Some(service_responses) = responses_by_member.get(ecu_name) else {
                 continue;
             };
 
@@ -475,13 +907,12 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 tracing::warn!(
                     "Variant detection failed for ECU {ecu_name}: {e:?}, marking as undetected"
                 );
-                any_online |= ecu.read().await.ecu_status().connectivity
-                    == cda_interfaces::Connectivity::Online;
+                any_online |= ecu.read().await.ecu_status().connectivity == Connectivity::Online;
                 continue;
             }
 
             let status = ecu.read().await.ecu_status();
-            any_online |= status.connectivity == cda_interfaces::Connectivity::Online;
+            any_online |= status.connectivity == Connectivity::Online;
             if !status.is_online_and_detected() {
                 continue;
             }
@@ -527,9 +958,23 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                     }
                 }
             }
-            GroupDetectionResult::NoOnlineEcu | GroupDetectionResult::NoDetection => {}
+            GroupDetectionResult::NoOnlineEcu
+            | GroupDetectionResult::NoDetection
+            | GroupDetectionResult::NoDetectionServices
+            | GroupDetectionResult::MarkedUnreachable => {}
         }
     }
+}
+
+fn is_connectivity_failure(error: &DiagServiceError) -> bool {
+    matches!(
+        error,
+        DiagServiceError::ConnectionClosed(_)
+            | DiagServiceError::EcuOffline(_)
+            | DiagServiceError::NoResponse(_)
+            | DiagServiceError::SendFailed(_)
+            | DiagServiceError::Timeout
+    )
 }
 
 #[async_trait]
@@ -550,6 +995,49 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
         Ok(status)
     }
 
+    #[tracing::instrument(skip(self), err,
+        fields(
+            dlt_context = dlt_ctx!("UDS")
+        )
+    )]
+    async fn ensure_ecu_online(&self, ecu_name: &str) -> Result<EcuState, DiagServiceError> {
+        let ecu = self.uds_ecu_db(ecu_name)?;
+        let status = ecu.read().await.ecu_status();
+        // Duplicates need manual resolution, re-running detection is pointless.
+        // Under `Never`, settling a never-tested variant is left to explicit
+        // triggers, matching the pre-send guard; previously detected
+        // (disconnected) ECUs are still probed.
+        if status.connectivity.is_online()
+            || status.variant_state == VariantState::Duplicate
+            || (status.variant_state == VariantState::NotTested
+                && self.communication_access.variant_detection() == VariantDetectionMode::Never)
+        {
+            return Ok(status);
+        }
+
+        // Hold the guard so communication is not torn down mid-probe.
+        let _guard = self.require_communication_ready()?;
+        tracing::info!(
+            ecu_name,
+            variant_state = ?status.variant_state,
+            "ECU marked offline, probing reachability via variant detection"
+        );
+        // Let the transport re-discover the ECU first: CAN drops silent ECUs
+        // from its discovered set and refuses sends until they are probed
+        // again, so detection alone would never reach a returned ECU.
+        if let Err(e) = self.gateway.ecu_online(ecu_name, ecu).await {
+            tracing::warn!(ecu_name, error = %e, "Reachability probe failed");
+            return Ok(ecu.read().await.ecu_status());
+        }
+        if let Err(e) = self
+            .detect_variant_with_trigger(ecu_name, DetectionTrigger::IfNeeded)
+            .await
+        {
+            tracing::warn!(ecu_name, error = %e, "Reachability probe failed");
+        }
+        Ok(ecu.read().await.ecu_status())
+    }
+
     async fn get_logical_address(&self, ecu_name: &str) -> Result<u16, DiagServiceError> {
         let ecu = self.uds_ecu_db(ecu_name)?;
         let logical_address = ecu.read().await.logical_address();
@@ -563,6 +1051,14 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
         let ecu = self.ecus.get(ecu_name)?;
         Some(ecu.read().await.runtime_state().variant_state_rx())
     }
+
+    async fn get_last_seen(
+        &self,
+        ecu_name: &str,
+    ) -> Result<Option<std::time::SystemTime>, DiagServiceError> {
+        let ecu = self.uds_ecu_db(ecu_name)?;
+        Ok(ecu.read().await.runtime_state().last_seen())
+    }
 }
 
 #[async_trait::async_trait]
@@ -573,55 +1069,68 @@ impl<S: EcuGateway, T: EcuManager> CommunicationLifecycle for UdsManager<S, T> {
 
     async fn initialize(&self) -> Result<(), CommControlError> {
         // Start the variant-detection listener if it is not already running.
-        if let Some(mut receiver) = self.variant_detection_receiver.lock().await.take() {
-            let uds_manager = self.clone();
-            let cancel = CancellationToken::new();
-            let task_cancel = cancel.clone();
-            let listener = cda_interfaces::spawn_named!("variant-detection-receiver", async move {
-                loop {
-                    let ecus = tokio::select! {
-                        biased; // prefer cancellation over variant detection
-                        () = task_cancel.cancelled() => break,
-                        ecus = receiver.recv() => {
-                            let Some(ecus) = ecus else { break };
-                            ecus.into_ecus()
-                        }
-                    };
-                    let mut processed_duplicates = HashSet::new();
-                    let mut deduplicated_ecus = Vec::new();
+        let mut state = self.variant_detection.listener.lock().await;
+        *state = match std::mem::replace(&mut *state, ListenerState::Closed) {
+            ListenerState::Stopped(mut receiver) => {
+                let uds_manager = self.clone();
+                let cancel = CancellationToken::new();
+                let task_cancel = cancel.clone();
+                let listener = cda_interfaces::spawn_named!(
+                    "variant-detection-receiver",
+                    async move {
+                        loop {
+                            // Registered before the detections below are spawned, so the
+                            // activity never looks idle in between.
+                            let (ecus, _listener) = tokio::select! {
+                                biased; // prefer cancellation over variant detection
+                                () = task_cancel.cancelled() => break,
+                                received = receiver.recv() => {
+                                    let Some(request) = received else { break };
+                                    (request.into_ecus(), uds_manager.variant_detection.activity.begin())
+                                }
+                            };
+                            let mut processed_duplicates = HashSet::new();
+                            let mut deduplicated_ecus = Vec::new();
 
-                    for ecu_name in ecus {
-                        if processed_duplicates.contains(&ecu_name) {
-                            continue;
-                        }
+                            for ecu_name in ecus {
+                                if processed_duplicates.contains(&ecu_name) {
+                                    continue;
+                                }
 
-                        if let Some(ecu) = uds_manager.ecus.get(&ecu_name) {
-                            let ecu_read = ecu.read().await;
-                            if let Some(duplicates) = ecu_read.duplicating_ecu_names() {
-                                processed_duplicates.extend(duplicates.iter().cloned());
+                                if let Some(ecu) = uds_manager.ecus.get(&ecu_name) {
+                                    let ecu_read = ecu.read().await;
+                                    if let Some(duplicates) = ecu_read.duplicating_ecu_names() {
+                                        processed_duplicates.extend(duplicates.iter().cloned());
+                                    }
+                                    deduplicated_ecus.push(ecu_name);
+                                } else {
+                                    tracing::warn!(
+                                        ecu_name,
+                                        "Variant detection trigger for unknown ECU dropped"
+                                    );
+                                }
                             }
-                            deduplicated_ecus.push(ecu_name);
-                        } else {
-                            tracing::warn!(
-                                ecu_name,
-                                "Variant detection trigger for unknown ECU dropped"
-                            );
-                        }
-                    }
 
-                    tokio::select! {
-                        () = task_cancel.cancelled() => break,
-                        () = uds_manager.start_variant_detection_for_ecus(deduplicated_ecus) => {}
+                            tokio::select! {
+                                () = task_cancel.cancelled() => break,
+                                () = uds_manager.start_variant_detection_for_ecus(deduplicated_ecus) => {}
+                            }
+                        }
+                        receiver
                     }
+                );
+                ListenerState::Running {
+                    cancel,
+                    task: listener,
                 }
-                receiver
-            });
-            *self.variant_detection_listener.lock().await = Some((cancel, listener));
-        }
+            }
+            other => other,
+        };
         Ok(())
     }
 
     async fn on_enabled(&self) {
+        // The activation is complete, with or without detection (`Never` mode).
         self.resume_tester_present().await;
         self.resume_deferred_resets().await;
     }
@@ -639,18 +1148,46 @@ impl<S: EcuGateway, T: EcuManager> CommunicationVariantDetection for UdsManager<
         "variant-detection"
     }
 
-    async fn detect(&self) -> Result<(), CommControlError> {
-        self.start_variant_detection().await;
+    async fn detect(&self, phase: DetectionPhase) -> Result<(), CommControlError> {
+        let after_activation = match phase {
+            DetectionPhase::Activation => true,
+            DetectionPhase::Redetection => {
+                // Explicit re-detection: AssumedOnline -> NotTested.
+                self.reset_ecu_states().await;
+                false
+            }
+        };
+        self.start_variant_detection(after_activation).await;
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::{Connectivity, VariantState};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
-    use super::{DetectionPermit, DetectionTrigger, claim_detection};
-    use crate::coordinator::EcuCoordinatorHandle;
+    use cda_interfaces::{
+        Connectivity, DiagServiceError, EcuState, HashMap, ServicePayload, TransportResponse,
+        UdsVariant, VariantDetection, VariantState,
+        communication_control::{
+            ActivationCause, CommunicationAccess, CommunicationError, CommunicationGuard,
+            CommunicationState, VariantDetectionMode,
+        },
+        datatypes::FaultConfig,
+        service_ids,
+    };
+    use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
+    use tokio::sync::RwLock;
+
+    use super::{DetectionPermit, DetectionTrigger, claim_detection, needs_offline_retry};
+    use crate::{
+        UdsManager,
+        coordinator::EcuCoordinatorHandle,
+        test_helpers::{TestEcuDb, TestGateway},
+    };
 
     #[tokio::test]
     async fn queued_automatic_detection_is_skipped_after_success() {
@@ -661,7 +1198,7 @@ mod tests {
         let queued = tokio::spawn(async move {
             claim_detection(
                 Some(&queued_handle),
-                Some(&queued_handle),
+                &[&queued_handle],
                 DetectionTrigger::IfNeeded,
             )
             .await
@@ -685,6 +1222,77 @@ mod tests {
         );
     }
 
+    fn mark_online_not_detected(handle: &EcuCoordinatorHandle) {
+        let mut state = handle.state.ecu_state.write().unwrap();
+        state.connectivity = Connectivity::Online;
+        state.variant_state = VariantState::NotDetected;
+    }
+
+    /// A detection that raced a reconnect can settle the state from the replaced
+    /// connection; the trigger of the reconnect queued behind it must still run.
+    #[tokio::test]
+    async fn queued_automatic_detection_runs_after_reconnect_during_detection() {
+        let handle = EcuCoordinatorHandle::spawn("TestECU".to_owned());
+        let DetectionPermit::Run(Some(in_flight)) =
+            claim_detection(Some(&handle), &[&handle], DetectionTrigger::IfNeeded).await
+        else {
+            panic!("the first detection must run");
+        };
+
+        handle.record_connected();
+        let queued_handle = handle.clone();
+        let queued = tokio::spawn(async move {
+            claim_detection(
+                Some(&queued_handle),
+                &[&queued_handle],
+                DetectionTrigger::IfNeeded,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+
+        mark_online_not_detected(&handle);
+        drop(in_flight);
+
+        assert!(
+            matches!(
+                queued.await.expect("queued trigger"),
+                DetectionPermit::Run(Some(_))
+            ),
+            "a reconnect during the detection must permit the queued trigger"
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_automatic_detection_is_skipped_without_reconnect_during_detection() {
+        let handle = EcuCoordinatorHandle::spawn("TestECU".to_owned());
+        handle.record_connected();
+        let DetectionPermit::Run(Some(in_flight)) =
+            claim_detection(Some(&handle), &[&handle], DetectionTrigger::IfNeeded).await
+        else {
+            panic!("the first detection must run");
+        };
+
+        let queued_handle = handle.clone();
+        let queued = tokio::spawn(async move {
+            claim_detection(
+                Some(&queued_handle),
+                &[&queued_handle],
+                DetectionTrigger::IfNeeded,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+
+        mark_online_not_detected(&handle);
+        drop(in_flight);
+
+        assert!(matches!(
+            queued.await.expect("queued trigger"),
+            DetectionPermit::Skip
+        ));
+    }
+
     #[tokio::test]
     async fn queued_automatic_detection_runs_when_still_needed() {
         let handle = EcuCoordinatorHandle::spawn("TestECU".to_owned());
@@ -694,7 +1302,7 @@ mod tests {
         let queued = tokio::spawn(async move {
             claim_detection(
                 Some(&queued_handle),
-                Some(&queued_handle),
+                &[&queued_handle],
                 DetectionTrigger::IfNeeded,
             )
             .await
@@ -726,10 +1334,681 @@ mod tests {
 
         assert!(
             matches!(
-                claim_detection(Some(&handle), Some(&handle), DetectionTrigger::Forced).await,
+                claim_detection(Some(&handle), &[&handle], DetectionTrigger::Forced).await,
                 DetectionPermit::Run(Some(_))
             ),
             "explicit detection must not be suppressed by healthy state"
+        );
+    }
+
+    #[tokio::test]
+    async fn forced_detection_is_not_superseded_by_automatic_trigger() {
+        let handle = EcuCoordinatorHandle::spawn("TestECU".to_owned());
+        let in_flight = handle.begin_detection().await.expect("first entrant");
+
+        let forced_handle = handle.clone();
+        let forced = tokio::spawn(async move {
+            claim_detection(
+                Some(&forced_handle),
+                &[&forced_handle],
+                DetectionTrigger::Forced,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+
+        let automatic_handle = handle.clone();
+        let automatic = tokio::spawn(async move {
+            claim_detection(
+                Some(&automatic_handle),
+                &[&automatic_handle],
+                DetectionTrigger::IfNeeded,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        drop(in_flight);
+
+        let forced_permit = forced.await.expect("forced trigger");
+        assert!(
+            matches!(forced_permit, DetectionPermit::Run(Some(_))),
+            "explicit detection must not be coalesced"
+        );
+        drop(forced_permit);
+
+        assert!(
+            matches!(
+                automatic.await.expect("automatic trigger"),
+                DetectionPermit::Run(Some(_))
+            ),
+            "latest unresolved automatic trigger must still run"
+        );
+    }
+
+    #[test]
+    fn only_transport_failures_are_connectivity_failures() {
+        assert!(super::is_connectivity_failure(&DiagServiceError::Timeout));
+        assert!(super::is_connectivity_failure(
+            &DiagServiceError::NoResponse("TestECU".to_owned())
+        ));
+        assert!(!super::is_connectivity_failure(
+            &DiagServiceError::VariantDetectionError("No services".to_owned())
+        ));
+        assert!(!super::is_connectivity_failure(
+            &DiagServiceError::BadPayload("Invalid request".to_owned())
+        ));
+    }
+
+    /// Enabled communication reporting the given effective detection mode.
+    struct ModeAccess {
+        inner: Arc<dyn CommunicationAccess>,
+        mode: VariantDetectionMode,
+    }
+
+    impl CommunicationAccess for ModeAccess {
+        fn state(&self) -> CommunicationState {
+            self.inner.state()
+        }
+
+        fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+            self.inner.acquire()
+        }
+
+        fn request_activate(&self, cause: ActivationCause) -> CommunicationState {
+            self.inner.request_activate(cause)
+        }
+
+        fn variant_detection(&self) -> VariantDetectionMode {
+            self.mode
+        }
+    }
+
+    async fn ensure_online(status: EcuState, mode: VariantDetectionMode) -> (EcuState, usize) {
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let gateway = probe_reply_gateway(vec![0x62, 0xFF, 0x00, 0x01], Arc::clone(&send_count));
+        let ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_owned(),
+            RwLock::new(TestEcuDb::new().with_status(status)),
+        )]));
+        let manager = UdsManager::new_for_raw_payload_tests(
+            gateway,
+            ecus,
+            FaultConfig::default(),
+            Arc::new(ModeAccess {
+                inner: enabled_communication_access_for_test(),
+                mode,
+            }),
+        );
+        let state = manager
+            .ensure_ecu_online("TestECU")
+            .await
+            .expect("ensure_ecu_online");
+        (state, send_count.load(Ordering::SeqCst))
+    }
+
+    fn offline(variant_state: VariantState) -> EcuState {
+        EcuState {
+            connectivity: Connectivity::Offline,
+            variant_state,
+            variant_index: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_online_probes_untested_ecu_under_always() {
+        let (state, sends) = ensure_online(
+            offline(VariantState::NotTested),
+            VariantDetectionMode::Always,
+        )
+        .await;
+
+        assert_eq!(sends, 1);
+        assert_eq!(state.connectivity, Connectivity::Online);
+    }
+
+    #[tokio::test]
+    async fn ensure_online_leaves_untested_ecu_alone_under_never() {
+        let (state, sends) = ensure_online(
+            offline(VariantState::NotTested),
+            VariantDetectionMode::Never,
+        )
+        .await;
+
+        assert_eq!(sends, 0, "Never must not settle a variant automatically");
+        assert_eq!(state.connectivity, Connectivity::Offline);
+        assert_eq!(state.variant_state, VariantState::NotTested);
+    }
+
+    #[tokio::test]
+    async fn ensure_online_probes_disconnected_ecu_under_never() {
+        let (state, sends) = ensure_online(
+            offline(VariantState::NotDetected),
+            VariantDetectionMode::Never,
+        )
+        .await;
+
+        assert_eq!(sends, 1);
+        assert_eq!(state.connectivity, Connectivity::Online);
+    }
+
+    #[tokio::test]
+    async fn ensure_online_skips_online_and_duplicate_ecus() {
+        let (_, sends) = ensure_online(
+            EcuState {
+                connectivity: Connectivity::Online,
+                variant_state: VariantState::Detected {
+                    name: "MyVariant".to_owned(),
+                    is_base_variant: false,
+                    is_fallback: false,
+                },
+                variant_index: None,
+            },
+            VariantDetectionMode::Always,
+        )
+        .await;
+        assert_eq!(sends, 0);
+
+        let (_, sends) = ensure_online(
+            offline(VariantState::Duplicate),
+            VariantDetectionMode::Always,
+        )
+        .await;
+        assert_eq!(sends, 0);
+    }
+
+    fn probe_reply_gateway(reply: Vec<u8>, send_count: Arc<AtomicUsize>) -> TestGateway {
+        TestGateway {
+            send_fn: Arc::new(move |response_tx, _| {
+                send_count.fetch_add(1, Ordering::SeqCst);
+                let msg = TransportResponse::UdsResponse(ServicePayload {
+                    data: reply.clone(),
+                    source_address: 0x0001,
+                    target_address: 0x0E00,
+                    new_session: None,
+                    new_security: None,
+                });
+                response_tx.try_send(Ok(Some(msg))).ok();
+                Ok(())
+            }),
+        }
+    }
+
+    async fn detect_schema_less_ecu(
+        gateway: TestGateway,
+        ecu_db: TestEcuDb,
+    ) -> (Result<(), DiagServiceError>, bool) {
+        let ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_owned(),
+            RwLock::new(ecu_db),
+        )]));
+        let manager = UdsManager::new_for_raw_payload_tests(
+            gateway,
+            Arc::clone(&ecus),
+            FaultConfig::default(),
+            enabled_communication_access_for_test(),
+        );
+        let result = manager.detect_variant("TestECU").await;
+        let selected = ecus
+            .get("TestECU")
+            .expect("test ECU")
+            .read()
+            .await
+            .base_variant_selected
+            .load(Ordering::SeqCst);
+        (result, selected)
+    }
+
+    #[tokio::test]
+    async fn detection_without_requests_selects_base_variant_on_probe_response() {
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let gateway = probe_reply_gateway(vec![0x62, 0xFF, 0x00, 0x01], Arc::clone(&send_count));
+
+        let (result, selected) = detect_schema_less_ecu(gateway, TestEcuDb::new()).await;
+
+        assert_eq!(result, Ok(()));
+        assert!(selected, "a reachable ECU must run its base variant");
+        assert_eq!(send_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn detection_without_requests_selects_base_variant_on_negative_probe_response() {
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let gateway = probe_reply_gateway(
+            vec![service_ids::NEGATIVE_RESPONSE, 0x22, 0x31],
+            Arc::clone(&send_count),
+        );
+
+        let (result, selected) = detect_schema_less_ecu(gateway, TestEcuDb::new()).await;
+
+        assert_eq!(result, Ok(()));
+        assert!(
+            selected,
+            "a negative response still proves the ECU is reachable"
+        );
+    }
+
+    #[tokio::test]
+    async fn detection_without_requests_returns_timeout_when_probe_unanswered() {
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let gateway_send_count = Arc::clone(&send_count);
+        let gateway = TestGateway {
+            send_fn: Arc::new(move |_, _| {
+                gateway_send_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+        };
+
+        let (result, selected) = detect_schema_less_ecu(
+            gateway,
+            TestEcuDb::with_timeout_default_and_repeat_req_count_app(
+                std::time::Duration::from_millis(1),
+                0,
+            ),
+        )
+        .await;
+
+        assert_eq!(result, Err(DiagServiceError::Timeout));
+        assert!(!selected, "an unreachable ECU must not select a variant");
+        assert_eq!(send_count.load(Ordering::SeqCst), 1);
+    }
+
+    /// Replies to consecutive sends with the given payloads in order. Sends
+    /// beyond the list stay unanswered.
+    fn scripted_gateway(replies: Vec<Vec<u8>>, send_count: Arc<AtomicUsize>) -> TestGateway {
+        let replies = std::sync::Mutex::new(std::collections::VecDeque::from(replies));
+        TestGateway {
+            send_fn: Arc::new(move |response_tx, _| {
+                send_count.fetch_add(1, Ordering::SeqCst);
+                if let Some(reply) = replies.lock().expect("replies lock").pop_front() {
+                    let msg = TransportResponse::UdsResponse(ServicePayload {
+                        data: reply,
+                        source_address: 0x0001,
+                        target_address: 0x0E00,
+                        new_session: None,
+                        new_security: None,
+                    });
+                    response_tx.try_send(Ok(Some(msg))).ok();
+                }
+                Ok(())
+            }),
+        }
+    }
+
+    const SESSION_REPLY: [u8; 2] = [0x50, 0x02];
+    const PROBE_REPLY: [u8; 4] = [0x62, 0xFF, 0x00, 0x01];
+
+    fn fallback_outcome() -> EcuState {
+        EcuState {
+            connectivity: Connectivity::Online,
+            variant_state: VariantState::Detected {
+                name: "BaseVariant".to_owned(),
+                is_base_variant: true,
+                is_fallback: true,
+            },
+            variant_index: Some(0),
+        }
+    }
+
+    fn short_timeout() -> std::time::Duration {
+        std::time::Duration::from_millis(1)
+    }
+
+    fn schema_less_member(group: &[&str]) -> TestEcuDb {
+        TestEcuDb::with_timeout_default_and_repeat_req_count_app(short_timeout(), 0)
+            .with_duplicates(group)
+    }
+
+    async fn detect_group(
+        gateway: TestGateway,
+        members: Vec<(&str, TestEcuDb)>,
+        trigger: &str,
+    ) -> (
+        Result<(), DiagServiceError>,
+        Arc<HashMap<String, RwLock<TestEcuDb>>>,
+    ) {
+        let ecus: Arc<HashMap<String, RwLock<TestEcuDb>>> = Arc::new(
+            members
+                .into_iter()
+                .map(|(name, db)| (name.to_owned(), RwLock::new(db)))
+                .collect(),
+        );
+        let manager = UdsManager::new_for_raw_payload_tests(
+            gateway,
+            Arc::clone(&ecus),
+            FaultConfig::default(),
+            enabled_communication_access_for_test(),
+        );
+        let result = manager.detect_variant(trigger).await;
+        (result, ecus)
+    }
+
+    async fn state_of(ecus: &HashMap<String, RwLock<TestEcuDb>>, name: &str) -> EcuState {
+        ecus.get(name).expect("member").read().await.ecu_status()
+    }
+
+    #[tokio::test]
+    async fn group_exact_match_skips_probe_and_marks_schema_less_member_duplicate() {
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let gateway = scripted_gateway(
+            vec![SESSION_REPLY.to_vec(), PROBE_REPLY.to_vec()],
+            Arc::clone(&send_count),
+        );
+        let members = vec![
+            (
+                "A",
+                TestEcuDb::with_variant_detection_request(short_timeout()).with_duplicates(&["B"]),
+            ),
+            ("B", schema_less_member(&["A"])),
+        ];
+
+        let (result, ecus) = detect_group(gateway, members, "B").await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            send_count.load(Ordering::SeqCst),
+            1,
+            "no probe after exact match"
+        );
+        assert!(state_of(&ecus, "A").await.is_online_and_detected());
+        assert_eq!(
+            state_of(&ecus, "B").await.variant_state,
+            VariantState::Duplicate
+        );
+    }
+
+    #[tokio::test]
+    async fn group_unreachable_member_does_not_mark_responding_member_unreachable() {
+        let send_count = Arc::new(AtomicUsize::new(0));
+        // A answers, B's request stays unanswered (e.g. no route on this transport).
+        let gateway = scripted_gateway(vec![SESSION_REPLY.to_vec()], Arc::clone(&send_count));
+        let members = vec![
+            (
+                "A",
+                TestEcuDb::with_variant_detection_request(short_timeout()).with_duplicates(&["B"]),
+            ),
+            (
+                "B",
+                TestEcuDb::with_variant_detection_request(short_timeout()).with_duplicates(&["A"]),
+            ),
+        ];
+
+        let (result, ecus) = detect_group(gateway, members, "A").await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(send_count.load(Ordering::SeqCst), 2);
+        assert!(state_of(&ecus, "A").await.is_online_and_detected());
+        assert_eq!(
+            state_of(&ecus, "B").await.variant_state,
+            VariantState::Duplicate
+        );
+    }
+
+    #[tokio::test]
+    async fn group_is_unreachable_when_no_member_responds() {
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let gateway = scripted_gateway(Vec::new(), Arc::clone(&send_count));
+        let members = vec![
+            (
+                "A",
+                TestEcuDb::with_variant_detection_request(short_timeout()).with_duplicates(&["B"]),
+            ),
+            (
+                "B",
+                TestEcuDb::with_variant_detection_request(short_timeout()).with_duplicates(&["A"]),
+            ),
+        ];
+
+        let (result, ecus) = detect_group(gateway, members, "A").await;
+
+        assert_eq!(result, Err(DiagServiceError::Timeout));
+        for name in ["A", "B"] {
+            assert_eq!(
+                state_of(&ecus, name).await.connectivity,
+                Connectivity::Offline,
+                "{name} must be marked unreachable"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn group_evaluates_each_schema_against_its_own_requests() {
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let gateway = scripted_gateway(
+            vec![SESSION_REPLY.to_vec(), vec![0x50, 0x03]],
+            Arc::clone(&send_count),
+        );
+        let members = vec![
+            (
+                "A",
+                TestEcuDb::with_variant_detection_request(short_timeout())
+                    .with_duplicates(&["B"])
+                    .with_detection_outcome(fallback_outcome()),
+            ),
+            (
+                "B",
+                TestEcuDb::with_variant_detection_session(short_timeout(), 0x03)
+                    .with_duplicates(&["A"])
+                    .with_detection_outcome(TestEcuDb::new().ecu_status()),
+            ),
+        ];
+
+        let (result, ecus) = detect_group(gateway, members, "A").await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(send_count.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            state_of(&ecus, "A").await.variant_state,
+            VariantState::Duplicate
+        );
+        assert!(state_of(&ecus, "B").await.is_online_and_detected());
+    }
+
+    #[tokio::test]
+    async fn incomplete_schema_cannot_select_schema_less_duplicate() {
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let gateway_send_count = Arc::clone(&send_count);
+        let gateway = TestGateway {
+            send_fn: Arc::new(move |response_tx, _| {
+                if gateway_send_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    response_tx
+                        .try_send(Ok(Some(TransportResponse::UdsResponse(ServicePayload {
+                            data: SESSION_REPLY.to_vec(),
+                            source_address: 0x0001,
+                            target_address: 0x0E00,
+                            new_session: None,
+                            new_security: None,
+                        }))))
+                        .ok();
+                    Ok(())
+                } else {
+                    Err(DiagServiceError::BadPayload(
+                        "Invalid detection request".to_owned(),
+                    ))
+                }
+            }),
+        };
+        let members = vec![
+            (
+                "A",
+                TestEcuDb::with_variant_detection_request(short_timeout())
+                    .with_additional_detection_session(0x03)
+                    .with_duplicates(&["B"])
+                    .with_detection_outcome(fallback_outcome()),
+            ),
+            ("B", schema_less_member(&["A"])),
+        ];
+
+        let (result, ecus) = detect_group(gateway, members, "A").await;
+
+        assert_eq!(
+            result,
+            Err(DiagServiceError::BadPayload(
+                "Invalid detection request".to_owned()
+            ))
+        );
+        assert_eq!(send_count.load(Ordering::SeqCst), 2);
+        assert!(
+            !ecus
+                .get("B")
+                .expect("member")
+                .read()
+                .await
+                .base_variant_selected
+                .load(Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_less_group_propagates_non_connectivity_probe_error() {
+        let gateway = TestGateway {
+            send_fn: Arc::new(|_, _| Err(DiagServiceError::BadPayload("Invalid probe".to_owned()))),
+        };
+        let members = vec![
+            ("B", schema_less_member(&["C"])),
+            ("C", schema_less_member(&["B"])),
+        ];
+
+        let (result, ecus) = detect_group(gateway, members, "B").await;
+
+        assert_eq!(
+            result,
+            Err(DiagServiceError::BadPayload("Invalid probe".to_owned()))
+        );
+        for name in ["B", "C"] {
+            assert!(state_of(&ecus, name).await.is_online_and_detected());
+        }
+    }
+
+    #[tokio::test]
+    async fn group_without_match_selects_single_schema_less_member_on_probe_response() {
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let gateway = scripted_gateway(
+            vec![SESSION_REPLY.to_vec(), PROBE_REPLY.to_vec()],
+            Arc::clone(&send_count),
+        );
+        let members = vec![
+            (
+                "A",
+                TestEcuDb::with_variant_detection_request(short_timeout())
+                    .with_duplicates(&["B"])
+                    .with_detection_outcome(fallback_outcome()),
+            ),
+            ("B", schema_less_member(&["A"])),
+        ];
+
+        let (result, ecus) = detect_group(gateway, members, "A").await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(send_count.load(Ordering::SeqCst), 2);
+        let b = ecus.get("B").expect("member").read().await;
+        assert!(b.base_variant_selected.load(Ordering::SeqCst));
+        assert_eq!(b.ecu_status().connectivity, Connectivity::Online);
+        drop(b);
+        assert_eq!(
+            state_of(&ecus, "A").await.variant_state,
+            VariantState::Duplicate
+        );
+    }
+
+    #[tokio::test]
+    async fn group_without_match_applies_group_result_when_probe_unanswered() {
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let gateway = scripted_gateway(vec![SESSION_REPLY.to_vec()], Arc::clone(&send_count));
+        let members = vec![
+            (
+                "A",
+                TestEcuDb::with_variant_detection_request(short_timeout())
+                    .with_duplicates(&["B"])
+                    .with_detection_outcome(fallback_outcome()),
+            ),
+            ("B", schema_less_member(&["A"])),
+        ];
+
+        let (result, ecus) = detect_group(gateway, members, "A").await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(send_count.load(Ordering::SeqCst), 2);
+        for name in ["A", "B"] {
+            assert_eq!(
+                state_of(&ecus, name).await.variant_state,
+                VariantState::NotDetected,
+                "all-fallback group result must apply to {name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn group_with_several_schema_less_members_is_unresolved_on_single_probe_response() {
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let gateway = scripted_gateway(vec![PROBE_REPLY.to_vec()], Arc::clone(&send_count));
+        let members = vec![
+            ("B", schema_less_member(&["C"])),
+            ("C", schema_less_member(&["B"])),
+        ];
+
+        let (result, ecus) = detect_group(gateway, members, "B").await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(send_count.load(Ordering::SeqCst), 1, "group is probed once");
+        for name in ["B", "C"] {
+            let member = ecus.get(name).expect("member").read().await;
+            assert!(!member.base_variant_selected.load(Ordering::SeqCst));
+            assert_eq!(member.ecu_status().variant_state, VariantState::NotDetected);
+        }
+    }
+
+    #[tokio::test]
+    async fn group_with_only_schema_less_members_is_unreachable_without_probe_response() {
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let gateway = scripted_gateway(Vec::new(), Arc::clone(&send_count));
+        let members = vec![
+            ("B", schema_less_member(&["C"])),
+            ("C", schema_less_member(&["B"])),
+        ];
+
+        let (result, ecus) = detect_group(gateway, members, "C").await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(send_count.load(Ordering::SeqCst), 1);
+        for name in ["B", "C"] {
+            assert_eq!(
+                state_of(&ecus, name).await.connectivity,
+                Connectivity::Offline,
+                "{name} must be marked unreachable"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn forced_detection_timeout_is_returned_after_sending() {
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let gateway_send_count = Arc::clone(&send_count);
+        let gateway = TestGateway {
+            send_fn: Arc::new(move |_, _| {
+                gateway_send_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+        };
+        let ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_owned(),
+            RwLock::new(TestEcuDb::with_variant_detection_request(
+                std::time::Duration::from_millis(1),
+            )),
+        )]));
+        let manager = UdsManager::new_for_raw_payload_tests(
+            gateway,
+            ecus,
+            FaultConfig::default(),
+            enabled_communication_access_for_test(),
+        );
+
+        let result = manager.detect_variant("TestECU").await;
+
+        assert_eq!(result, Err(DiagServiceError::Timeout));
+        assert_eq!(
+            send_count.load(Ordering::SeqCst),
+            1,
+            "forced detection must make one gateway send before reporting the timeout"
         );
     }
 
@@ -751,13 +2030,143 @@ mod tests {
             matches!(
                 claim_detection(
                     Some(&representative),
-                    Some(&duplicate),
+                    &[&representative, &duplicate],
                     DetectionTrigger::IfNeeded
                 )
                 .await,
                 DetectionPermit::Run(Some(_))
             ),
             "triggering duplicate still needs detection"
+        );
+    }
+
+    fn set_detected(handle: &EcuCoordinatorHandle) {
+        let mut state = handle.state.ecu_state.write().unwrap();
+        state.connectivity = Connectivity::Online;
+        state.variant_state = VariantState::Detected {
+            name: "MyVariant".to_owned(),
+            is_base_variant: false,
+            is_fallback: false,
+        };
+    }
+
+    // Regression: after a reconnect reset a non-representative member to
+    // NotTested, an automatic trigger is mapped to the (detected)
+    // representative. It must still run, otherwise the member stays stuck.
+    #[tokio::test]
+    async fn automatic_detection_runs_when_non_representative_member_reset() {
+        let representative = EcuCoordinatorHandle::spawn("Representative".to_owned());
+        let member = EcuCoordinatorHandle::spawn("Member".to_owned());
+        set_detected(&representative);
+        {
+            let mut state = member.state.ecu_state.write().unwrap();
+            state.connectivity = Connectivity::Online;
+            state.variant_state = VariantState::NotTested;
+        }
+
+        assert!(
+            matches!(
+                claim_detection(
+                    Some(&representative),
+                    &[&representative, &member],
+                    DetectionTrigger::IfNeeded
+                )
+                .await,
+                DetectionPermit::Run(Some(_))
+            ),
+            "reset group member must permit automatic detection"
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_detection_skipped_when_whole_group_resolved() {
+        let representative = EcuCoordinatorHandle::spawn("Representative".to_owned());
+        let member = EcuCoordinatorHandle::spawn("Member".to_owned());
+        set_detected(&representative);
+        {
+            let mut state = member.state.ecu_state.write().unwrap();
+            state.connectivity = Connectivity::Online;
+            state.variant_state = VariantState::Duplicate;
+        }
+
+        assert!(
+            matches!(
+                claim_detection(
+                    Some(&representative),
+                    &[&representative, &member],
+                    DetectionTrigger::IfNeeded
+                )
+                .await,
+                DetectionPermit::Skip
+            ),
+            "resolved group must skip automatic detection"
+        );
+    }
+
+    fn set_state(handle: &EcuCoordinatorHandle, connectivity: Connectivity, variant: VariantState) {
+        let mut state = handle.state.ecu_state.write().unwrap();
+        state.connectivity = connectivity;
+        state.variant_state = variant;
+    }
+
+    // An offline Duplicate member is skipped by the detection gate, so
+    // retrying would only burn the retry delays without any effect.
+    #[tokio::test]
+    async fn offline_duplicate_member_does_not_trigger_retry() {
+        let representative = EcuCoordinatorHandle::spawn("Representative".to_owned());
+        let member = EcuCoordinatorHandle::spawn("Member".to_owned());
+        set_detected(&representative);
+        set_state(&member, Connectivity::Offline, VariantState::Duplicate);
+
+        assert!(
+            !needs_offline_retry(&[&representative, &member]),
+            "offline duplicate must not trigger a retry"
+        );
+        assert!(
+            matches!(
+                claim_detection(
+                    Some(&representative),
+                    &[&representative, &member],
+                    DetectionTrigger::IfNeeded
+                )
+                .await,
+                DetectionPermit::Skip
+            ),
+            "retry decision must agree with the detection gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn offline_member_needing_detection_triggers_retry() {
+        let representative = EcuCoordinatorHandle::spawn("Representative".to_owned());
+        let member = EcuCoordinatorHandle::spawn("Member".to_owned());
+        set_detected(&representative);
+        set_state(
+            &member,
+            Connectivity::Offline,
+            VariantState::Detected {
+                name: "MyVariant".to_owned(),
+                is_base_variant: false,
+                is_fallback: false,
+            },
+        );
+
+        assert!(
+            needs_offline_retry(&[&representative, &member]),
+            "offline member with known variant must trigger a retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn online_group_does_not_trigger_retry() {
+        let representative = EcuCoordinatorHandle::spawn("Representative".to_owned());
+        let member = EcuCoordinatorHandle::spawn("Member".to_owned());
+        set_detected(&representative);
+        set_state(&member, Connectivity::Online, VariantState::NotTested);
+
+        assert!(
+            !needs_offline_retry(&[&representative, &member]),
+            "online members must not trigger an offline retry"
         );
     }
 }

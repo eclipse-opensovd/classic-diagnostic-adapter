@@ -23,11 +23,15 @@ use std::{
 };
 
 use backon::Retryable;
-use cda_interfaces::{config::ConfigSanity, dlt_ctx, storage_api::StorageError};
+use cda_interfaces::{
+    config::ConfigSanity, dlt_ctx, http_protection::registry::HttpProtectionRegistry,
+    storage_api::StorageError,
+};
 use cda_plugin_communication_management::plugin::CommunicationPluginBuilder;
 use cda_plugin_security::{
     DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
 };
+use cda_plugin_topology::TopologyPluginBuilder;
 use cda_storage::LocalStorage;
 use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
 use clap::{Parser, Subcommand};
@@ -44,21 +48,22 @@ pub mod config;
 pub mod error;
 pub mod mdd;
 pub mod setup;
+pub mod topology;
 pub mod update;
 pub mod vehicle;
 
 pub use error::AppError;
 pub use setup::Setup;
 
-// Valgrind and other profing tools intercept the system allocator, whereas mimalloc
+// Valgrind and other profiling tools intercept the system allocator, whereas mimalloc
 // manages allocations internally. Keep mimalloc in normal builds but omit it
 // from profiling builds so allocation call stacks remain visible.
-#[cfg(not(feature = "heap-profiling"))]
+#[cfg(not(heap_profiling))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// Environment variable to override the purge delay of mimalloc in milliseconds.
-#[cfg(not(feature = "heap-profiling"))]
+#[cfg(not(heap_profiling))]
 const MIMALLOC_PURGE_DELAY_ENV: &str = "MIMALLOC_PURGE_DELAY";
 
 /// Configures mimalloc to return unused memory to the OS immediately.
@@ -69,7 +74,7 @@ const MIMALLOC_PURGE_DELAY_ENV: &str = "MIMALLOC_PURGE_DELAY";
 /// cuts the resident memory after startup roughly in half.
 /// Can be overridden with the `MIMALLOC_PURGE_DELAY` environment variable.
 fn configure_allocator() {
-    #[cfg(not(feature = "heap-profiling"))]
+    #[cfg(not(heap_profiling))]
     if std::env::var_os(MIMALLOC_PURGE_DELAY_ENV).is_none() {
         mimalloc::options::option_set(mimalloc::options::MiOption::PurgeDelay, 0);
     }
@@ -88,6 +93,30 @@ pub enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+}
+
+/// Command line representation of [`cda_comm_doip::config::DiscoveryMode`].
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DoipDiscoveryArg {
+    /// No VIR, no VAMs and no reconnect of persisted gateways, ECUs are
+    /// connected directly.
+    Disabled,
+    /// No VIR, VAMs as `vam_handling_mode` allows, persisted gateways are
+    /// reconnected by unicast without a VIR fallback.
+    VamOnly,
+    /// Broadcast a VIR, VAMs as `vam_handling_mode` allows, VIR fallback
+    /// for persisted gateways.
+    Full,
+}
+
+impl From<DoipDiscoveryArg> for cda_comm_doip::config::DiscoveryMode {
+    fn from(value: DoipDiscoveryArg) -> Self {
+        match value {
+            DoipDiscoveryArg::Disabled => Self::Disabled,
+            DoipDiscoveryArg::VamOnly => Self::VamOnly,
+            DoipDiscoveryArg::Full => Self::Full,
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -112,6 +141,13 @@ pub struct AppArgs {
 
     #[arg(long)]
     pub gateway_port: Option<u16>,
+
+    /// How `DoIP` gateways are discovered: `disabled` (no VIR, no VAMs, no
+    /// reconnect of persisted gateways; connect ECUs directly), `vam-only` (no
+    /// VIR; VAMs as `vam_handling_mode` allows; persisted gateways reconnected by
+    /// unicast without a VIR fallback) or `full`.
+    #[arg(long, value_enum)]
+    pub doip_discovery: Option<DoipDiscoveryArg>,
 
     /// Protocol name used for com-param lookups
     /// in the diagnostic database (matched case-insensitively).
@@ -184,6 +220,9 @@ impl AppArgs {
         if let Some(gateway_port) = self.gateway_port {
             config.doip.gateway_port = gateway_port;
         }
+        if let Some(doip_discovery) = self.doip_discovery {
+            config.doip.discovery = doip_discovery.into();
+        }
         if let Some(protocol_name) = self.protocol_name {
             config.doip.protocol_name = protocol_name;
         }
@@ -191,7 +230,7 @@ impl AppArgs {
         {
             use crate::config::configfile::ServerTransport;
 
-            config.server = if let Some(unix_socket) = self.unix_socket {
+            config.server.transport = if let Some(unix_socket) = self.unix_socket {
                 // `--unix-socket` takes priority over `--listen-address`/`--listen-port`,
                 // matching the config file's documented priority.
                 ServerTransport::UnixSocket {
@@ -200,8 +239,8 @@ impl AppArgs {
                     port: crate::config::configfile::default_server_port(),
                 }
             } else {
-                let mut address = config.server.address().to_owned();
-                let mut port = config.server.port();
+                let mut address = config.server.transport.address().to_owned();
+                let mut port = config.server.transport.port();
                 if let Some(listen_address) = self.listen_address {
                     address = listen_address;
                 }
@@ -254,15 +293,16 @@ pub async fn run_from_cli() -> Result<(), AppError> {
 ///
 /// # Errors
 /// Returns [`AppError`] if configuration loading, validation, or startup fails.
-pub async fn run_with_ext<SP, SL, UPB, CPB>(
+pub async fn run_with_ext<SP, SL, UPB, CPB, TPB>(
     args: AppArgs,
-    setup: Setup<SP, SL, UPB, CPB>,
+    setup: Setup<SP, SL, UPB, CPB, TPB>,
 ) -> Result<(), AppError>
 where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
     UPB: UpdatePluginBuilder<SP>,
     CPB: CommunicationPluginBuilder,
+    TPB: TopologyPluginBuilder,
 {
     if let Some(Command::GenerateConfig { output }) = args.command.as_ref() {
         // Exiting after generating config is on purpose.
@@ -326,7 +366,7 @@ async fn await_startup_stage<T>(
 /// let config: Configuration = // ... load or construct ...
 /// # todo!();
 ///
-/// run_with_ext_from_config::<MySecurityPlugin, MySecurityLoader, _, _>(
+/// run_with_ext_from_config::<MySecurityPlugin, MySecurityLoader, _, _, _>(
 ///     config,
 ///     Setup::new().with_update_plugin(update_plugin_fn(|infra| async move {
 ///         Ok(MyPlugin::new(infra))
@@ -336,15 +376,16 @@ async fn await_startup_stage<T>(
 ///
 /// # Errors
 /// Returns [`AppError`] if tracing setup, webserver startup, data loading, or route setup fails.
-pub async fn run_with_ext_from_config<SP, SL, UPB, CPB>(
+pub async fn run_with_ext_from_config<SP, SL, UPB, CPB, TPB>(
     config: Configuration,
-    setup: Setup<SP, SL, UPB, CPB>,
+    setup: Setup<SP, SL, UPB, CPB, TPB>,
 ) -> Result<(), AppError>
 where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
     UPB: UpdatePluginBuilder<SP>,
     CPB: CommunicationPluginBuilder,
+    TPB: TopologyPluginBuilder,
 {
     let tracing_guards = if setup.initialize_tracing {
         setup_tracing(&config)?
@@ -360,6 +401,10 @@ where
         .database
         .naming_convention
         .warn_on_non_standard_categories();
+
+    // Validated before anything starts, so invalid routes do not fail after the database load.
+    let http_protections =
+        HttpProtectionRegistry::with_always_accessible_routes(setup.always_accessible_routes)?;
 
     let webserver_state = init_webserver(
         &config,
@@ -383,12 +428,17 @@ where
         return Ok(());
     };
 
+    let topology =
+        topology::build_topology_plugin(setup.build_topology_plugin, &config, Arc::clone(&storage))
+            .await?;
+
     let Some(vehicle_data) = await_startup_stage(
         vehicle::load_vehicle_data::<SP>(
             &config,
             webserver_state.health_state.as_ref(),
             &storage,
             setup.lock_priority_policy,
+            topology.as_ref(),
         ),
         webserver_state.shutdown_signal.clone(),
     )
@@ -414,6 +464,8 @@ where
             setup.build_update_plugin,
             setup.build_communication_plugin,
             storage,
+            http_protections,
+            Arc::clone(&topology),
         ),
         webserver_state.shutdown_signal.clone(),
     )
@@ -436,6 +488,8 @@ where
     // Wait for shutdown signal
     webserver_state.shutdown_signal.clone().await;
     tracing::info!("Shutting down...");
+    // Before communication shuts down, which cancels pending topology writes.
+    cda_interfaces::Shutdown::shutdown(topology.as_ref()).await;
     cda_interfaces::Shutdown::shutdown(&*communication_runtime.plugin).await;
     webserver_state.join().await
 }
@@ -451,6 +505,7 @@ pub async fn run(args: AppArgs) -> Result<(), AppError> {
     Box::pin(run_with_ext::<
         DefaultSecurityPluginData,
         DefaultSecurityPlugin,
+        _,
         _,
         _,
     >(
@@ -474,6 +529,7 @@ pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
     Box::pin(run_with_ext_from_config::<
         DefaultSecurityPluginData,
         DefaultSecurityPlugin,
+        _,
         _,
         _,
     >(
@@ -508,7 +564,7 @@ async fn init_webserver(
         )));
     }
 
-    let webserver_config = match config.server.clone() {
+    let webserver_config = match config.server.transport.clone() {
         crate::config::configfile::ServerTransport::Tcp { address, port, .. } => {
             cda_sovd::WebServerConfig::Tcp {
                 host: address,
@@ -523,9 +579,12 @@ async fn init_webserver(
     let clonable_shutdown_signal = shutdown_signal
         .unwrap_or_else(|| cda_interfaces::shutdown_signal(crate::shutdown_signal()));
 
-    let (dynamic_router, webserver_task) =
-        cda_sovd::launch_webserver(webserver_config.clone(), clonable_shutdown_signal.clone())
-            .await?;
+    let (dynamic_router, webserver_task) = cda_sovd::launch_webserver(
+        webserver_config.clone(),
+        config.server.binary_encoding,
+        clonable_shutdown_signal.clone(),
+    )
+    .await?;
 
     let mut webserver_state = ApplicationState {
         _tracing_guards: tracing_guards,
@@ -586,30 +645,18 @@ async fn init_webserver(
 
 async fn register_version_endpoints(dynamic_router: &cda_sovd::dynamic_router::DynamicRouter) {
     // [[ dimpl~sovd-api-version-endpoint, Register Version Endpoint ]]
-    let serde_json::Value::Object(version_info) = serde_json::json!({
-        "id": "version",
-        "data": {
-            "name": "Eclipse OpenSOVD Classic Diagnostic Adapter",
-            "api": {
-                "version": "1.1"
-            },
-            "implementation": {
-                "version": cda_version(),
-                "commit": env!("GIT_COMMIT_HASH").to_owned(),
-                "build_date": env!("BUILD_DATE").to_owned(),
-            }
-        }
-    }) else {
-        tracing::error!("Failed to build version information");
-        return;
-    };
-    cda_sovd::add_static_data_endpoint(
-        dynamic_router,
-        version_info.clone(),
-        "/vehicle/v15/apps/sovd2uds/data/version",
-    )
-    .await;
-    cda_sovd::add_static_data_endpoint(dynamic_router, version_info, "/vehicle/v15/data/version")
+    let versions = cda_sovd::VersionRegistrar::new(
+        "Eclipse OpenSOVD Classic Diagnostic Adapter",
+        cda_version(),
+        env!("GIT_COMMIT_HASH"),
+        env!("BUILD_DATE"),
+    );
+    versions.register_version_info(dynamic_router).await;
+    versions
+        .register_data(dynamic_router, "/vehicle/v15/apps/sovd2uds/data/version")
+        .await;
+    versions
+        .register_data(dynamic_router, "/vehicle/v15/data/version")
         .await;
 }
 
@@ -684,7 +731,7 @@ pub struct TracingGuards {
 pub fn setup_tracing(config: &Configuration) -> Result<TracingGuards, TracingSetupError> {
     let tracing = cda_tracing::new();
     let mut layers = vec![];
-    layers.push(cda_tracing::new_term_subscriber(&config.logging));
+    layers.push(cda_tracing::new_term_subscriber(&config.logging)?);
     #[cfg(feature = "tokio-tracing")]
     layers.push(cda_tracing::new_tokio_tracing(
         &config.logging.tokio_tracing,
@@ -781,13 +828,41 @@ mod cli_args_tests {
     use super::*;
 
     #[test]
+    fn doip_discovery_flag_updates_config() {
+        use cda_comm_doip::config::DiscoveryMode;
+
+        for (arg, expected) in [
+            ("disabled", DiscoveryMode::Disabled),
+            ("vam-only", DiscoveryMode::VamOnly),
+            ("full", DiscoveryMode::Full),
+        ] {
+            let args = AppArgs::parse_from(["cda", "--doip-discovery", arg]);
+            let mut config = crate::config::configfile::Configuration::default();
+            args.update_config(&mut config);
+            assert_eq!(config.doip.discovery, expected);
+        }
+    }
+
+    #[test]
+    fn without_doip_discovery_flag_config_is_untouched() {
+        let args = AppArgs::parse_from(["cda"]);
+        let mut config = crate::config::configfile::Configuration::default();
+        config.doip.discovery = cda_comm_doip::config::DiscoveryMode::VamOnly;
+        args.update_config(&mut config);
+        assert_eq!(
+            config.doip.discovery,
+            cda_comm_doip::config::DiscoveryMode::VamOnly
+        );
+    }
+
+    #[test]
     fn unix_socket_flag_updates_server_config() {
         let args = AppArgs::parse_from(["cda", "--unix-socket", "/run/cda.sock"]);
         let mut config = crate::config::configfile::Configuration::default();
         args.update_config(&mut config);
 
         assert!(matches!(
-            config.server,
+            config.server.transport,
             crate::config::configfile::ServerTransport::UnixSocket { ref unix_socket, .. }
                 if unix_socket == "/run/cda.sock"
         ));
@@ -800,7 +875,7 @@ mod cli_args_tests {
         args.update_config(&mut config);
 
         assert!(matches!(
-            config.server,
+            config.server.transport,
             crate::config::configfile::ServerTransport::Tcp {
                 unix_socket: None,
                 ..
@@ -880,7 +955,7 @@ mod webserver_lifecycle_tests {
         let database_dir = tempfile::tempdir().expect("Create empty database directory");
         let storage_dir = tempfile::tempdir().expect("Create empty storage directory");
         let mut config = Configuration::default();
-        config.server = crate::config::configfile::ServerTransport::Tcp {
+        config.server.transport = crate::config::configfile::ServerTransport::Tcp {
             address: "0.0.0.0".to_owned(),
             port: available_port(),
             unix_socket: None,

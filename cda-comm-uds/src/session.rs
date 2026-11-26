@@ -15,8 +15,8 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, ResetOutcome, UdsSecurity,
-    UdsSession,
+    DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, ResetOutcome,
+    UdsAuthentication, UdsSecurity, UdsSession,
     diagservices::{DiagServiceResponse, DiagServiceResponseType},
     dlt_ctx,
     util::tokio_ext,
@@ -45,6 +45,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         match reset_type {
             ResetType::Session => &self.session_reset_tasks,
             ResetType::SecurityAccess => &self.security_reset_tasks,
+            ResetType::Authentication => &self.authentication_reset_tasks,
         }
     }
 
@@ -65,8 +66,6 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 
             uds.reset_tasks(reset_type).write().await.remove(&ecu_name);
 
-            // Use empty security plugin for reset
-            let security_plugin: DynamicPlugin = Box::new(());
             tracing::info!(
                 ecu_name = %ecu_name,
                 access_type = %reset_type,
@@ -74,11 +73,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             );
 
             let result = match reset_type {
-                ResetType::Session => uds.reset_ecu_session(&ecu_name, &security_plugin).await,
-                ResetType::SecurityAccess => {
-                    uds.reset_ecu_security_access(&ecu_name, &security_plugin)
-                        .await
-                }
+                ResetType::Session => uds.reset_ecu_session(&ecu_name).await,
+                ResetType::SecurityAccess => uds.reset_ecu_security_access(&ecu_name).await,
+                ResetType::Authentication => uds.reset_ecu_authentication(&ecu_name).await,
             };
 
             if let Err(e) = result {
@@ -141,7 +138,11 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     /// round-trips, so each reset runs in its own task. A reset whose task
     /// finds communication disabled again is deferred again.
     pub(crate) async fn resume_deferred_resets(&self) {
-        for reset_type in [ResetType::Session, ResetType::SecurityAccess] {
+        for reset_type in [
+            ResetType::Session,
+            ResetType::SecurityAccess,
+            ResetType::Authentication,
+        ] {
             let mut tasks = self.reset_tasks(reset_type).write().await;
             let deferred: Vec<EcuIdentifier> = tasks
                 .iter()
@@ -189,11 +190,7 @@ impl<S: EcuGateway, T: EcuManager> UdsSession for UdsManager<S, T> {
         }
     }
 
-    async fn reset_ecu_session(
-        &self,
-        ecu_name: &str,
-        security_plugin: &DynamicPlugin,
-    ) -> Result<ResetOutcome, DiagServiceError> {
+    async fn reset_ecu_session(&self, ecu_name: &str) -> Result<ResetOutcome, DiagServiceError> {
         // Cancel any existing session reset task to prevent double resetting
         self.cancel_reset(ecu_name, ResetType::Session).await;
 
@@ -213,8 +210,11 @@ impl<S: EcuGateway, T: EcuManager> UdsSession for UdsManager<S, T> {
             return Ok(ResetOutcome::Deferred);
         };
 
+        // A reset is housekeeping and must never be blocked by service validation or the
+        // pre-send authorization. Otherwise an ECU could be left in a non-default session.
+        let void_plugin: DynamicPlugin = Box::new(());
         let response = self
-            .set_ecu_session(ecu_name, &default_session, security_plugin, None)
+            .set_ecu_session(ecu_name, &default_session, &void_plugin, None)
             .await?;
 
         match response.response_type() {

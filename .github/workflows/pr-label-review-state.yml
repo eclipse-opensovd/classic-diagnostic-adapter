@@ -31,7 +31,7 @@ jobs:
     name: "Update review state labels"
     steps:
       - name: Update review state labels
-        uses: actions/github-script@v7
+        uses: actions/github-script@v7.1.0
         with:
           script: |
             const prNumber = context.payload.pull_request?.number

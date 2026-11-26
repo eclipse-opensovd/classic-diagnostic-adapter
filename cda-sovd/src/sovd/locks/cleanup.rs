@@ -14,7 +14,7 @@
 use std::{pin::Pin, sync::Arc, time::SystemTime};
 
 use cda_interfaces::{
-    DynamicPlugin, HashMap, ResetOutcome, UdsEcu,
+    HashMap, ResetOutcome, UdsEcu,
     lock_priority_api::{LockId, LockLifecycleEvent},
 };
 use futures::FutureExt;
@@ -198,13 +198,32 @@ pub(super) fn take_cleanups(
         .collect()
 }
 
+pub(super) async fn release_ecu<T: UdsEcu>(uds: &T, ecu_name: &str, owner: &str, context: &str) {
+    // Abort first, so no TransferData block of the released owner reaches the ECU
+    // after its session and security access were reset.
+    uds.ecu_flash_transfer_abort(ecu_name, owner).await;
+    reset_ecu_session_and_security(uds, ecu_name, context).await;
+}
+
 pub(super) async fn reset_ecu_session_and_security<T: UdsEcu>(
     uds: &T,
     ecu_name: &str,
     context: &str,
-    security_plugin: &DynamicPlugin,
 ) {
-    match uds.reset_ecu_session(ecu_name, security_plugin).await {
+    // Deauthenticate first, so a following client does not inherit the
+    // authenticated state. A failure must not prevent the remaining cleanup.
+    match uds.reset_ecu_authentication(ecu_name).await {
+        Ok(ResetOutcome::Completed) => {
+            tracing::debug!("ECU authentication reset for ECU {ecu_name} during {context}");
+        }
+        Ok(ResetOutcome::Deferred) => tracing::info!(
+            "ECU authentication reset for ECU {ecu_name} during {context} deferred until \
+             communication is enabled"
+        ),
+        Err(e) => tracing::warn!("Failed to deauthenticate ECU {ecu_name} during {context}: {e}"),
+    }
+
+    match uds.reset_ecu_session(ecu_name).await {
         Ok(ResetOutcome::Completed) => {
             tracing::info!("ECU session reset for ECU {ecu_name} during {context}");
         }
@@ -217,10 +236,7 @@ pub(super) async fn reset_ecu_session_and_security<T: UdsEcu>(
         }
     }
 
-    match uds
-        .reset_ecu_security_access(ecu_name, security_plugin)
-        .await
-    {
+    match uds.reset_ecu_security_access(ecu_name).await {
         Ok(ResetOutcome::Completed) => {
             tracing::info!("ECU security access reset for ECU {ecu_name} during {context}");
         }

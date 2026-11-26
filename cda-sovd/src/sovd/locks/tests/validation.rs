@@ -245,6 +245,70 @@ async fn elapsed_locks_do_not_authorize_or_block_communication() {
     );
 }
 
+#[cfg(feature = "doip-direct-connect")]
+#[tokio::test]
+async fn vehicle_write_requires_the_callers_vehicle_lock() {
+    let caller = TestClaims {
+        subject: "caller".to_owned(),
+        attributes: serde_json::Map::new(),
+    };
+    let status =
+        |result: Result<(), ErrorWrapper>| result.err().map(|error| error.into_response().status());
+
+    let locks = Locks::new();
+    assert_eq!(
+        status(validate_vehicle_write(&caller, &locks, false).await),
+        Some(StatusCode::CONFLICT),
+        "no vehicle lock"
+    );
+
+    let locks = Locks::new();
+    locks
+        .test_insert_active(test_lock("ecu-lock").owner("caller").build())
+        .await;
+    assert_eq!(
+        status(validate_vehicle_write(&caller, &locks, false).await),
+        Some(StatusCode::CONFLICT),
+        "an ECU lock is not a vehicle lock"
+    );
+
+    let locks = Locks::new();
+    locks
+        .test_insert_active(test_lock("vehicle-lock").owner("caller").vehicle().build())
+        .await;
+    assert_eq!(
+        status(validate_vehicle_write(&caller, &locks, false).await),
+        None,
+        "own vehicle lock"
+    );
+
+    let locks = Locks::new();
+    locks
+        .test_insert_active(test_lock("vehicle-lock").owner("other").vehicle().build())
+        .await;
+    assert_eq!(
+        status(validate_vehicle_write(&caller, &locks, false).await),
+        Some(StatusCode::LOCKED),
+        "foreign vehicle lock"
+    );
+
+    let locks = Locks::new();
+    locks
+        .test_insert_active(
+            test_lock("vehicle-lock")
+                .owner("caller")
+                .vehicle()
+                .expires_at(SystemTime::now() - Duration::from_secs(1))
+                .build(),
+        )
+        .await;
+    assert_eq!(
+        status(validate_vehicle_write(&caller, &locks, false).await),
+        Some(StatusCode::CONFLICT),
+        "elapsed vehicle lock"
+    );
+}
+
 #[tokio::test]
 async fn ecu_access_includes_functional_group_coverage() {
     let locks = Locks::new();
@@ -377,4 +441,45 @@ async fn defunct_lock_rejects_reads_with_conflict_for_nonexclusive_replacement()
         error.error_code,
         sovd_interfaces::error::ErrorCode::LockBroken
     );
+}
+
+/// [[ test~sovd-api-lock-acquisition-policy-validation, Acquisition policy requires an active vehicle lock of any owner, test ]]
+#[tokio::test]
+async fn acquisition_policy_controls_child_locks_without_vehicle_lock() {
+    let requester = TestClaims {
+        subject: "requester".to_owned(),
+        attributes: serde_json::Map::new(),
+    };
+
+    let unrestricted = Locks::new();
+    assert!(
+        validate_vehicle_owner(&unrestricted, &requester)
+            .await
+            .is_ok()
+    );
+
+    let required = Locks::new_with_config(cda_interfaces::lock_config::LockConfig {
+        lock_acquisition_policy:
+            cda_interfaces::lock_config::LockAcquisitionPolicy::VehicleLockRequired,
+        ..cda_interfaces::lock_config::LockConfig::default()
+    });
+    assert!(matches!(
+        validate_vehicle_owner(&required, &requester).await,
+        Err(ApiError::Conflict(_))
+    ));
+
+    // Any client's vehicle lock satisfies the precondition; a foreign one still blocks
+    // through vehicle-lock blocking.
+    required
+        .test_insert_active(test_lock("vehicle").owner("requester").vehicle().build())
+        .await;
+    assert!(validate_vehicle_owner(&required, &requester).await.is_ok());
+    let other = TestClaims {
+        subject: "other".to_owned(),
+        attributes: serde_json::Map::new(),
+    };
+    assert!(matches!(
+        validate_vehicle_owner(&required, &other).await,
+        Err(ApiError::Conflict(_))
+    ));
 }

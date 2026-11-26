@@ -23,7 +23,7 @@ pub use cda_comm_can::config::{CanAddressingMode, CanConfig, CanEcuMapping, Tran
 pub use cda_comm_doip::config::DoipConfig;
 pub use cda_database::DatabaseConfig;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap,
+    BinaryEncoding, FunctionalDescriptionConfig, HashMap,
     config::{ConfigSanity, ConfigSanityError},
     datatypes::{
         ComParams, ComponentsConfig, FaultConfig, FlatbBufConfig, SdBoolMappings,
@@ -34,7 +34,7 @@ use cda_interfaces::{
 pub use cda_interfaces::{
     TransportType,
     communication_control::{
-        CommunicationInitMode, CommunicationSettings, PostUpdateCommunicationMode,
+        CommunicationInitMode, CommunicationSettings, PostUpdateCommunicationMode, VamHandlingMode,
     },
 };
 pub use cda_plugin_runtime_update::config::RuntimeUpdateConfig;
@@ -74,8 +74,8 @@ impl StrictConfig {
 /// Top-level application configuration.
 #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct Configuration {
-    /// SOVD HTTP server bind settings.
-    pub server: ServerTransport,
+    /// SOVD HTTP server settings.
+    pub server: ServerConfig,
     /// `DoIP` (Diagnostics over IP) transport layer settings.
     pub doip: DoipConfig,
     /// Optional CAN bus transport configuration.
@@ -88,6 +88,9 @@ pub struct Configuration {
     pub logging: cda_tracing::LoggingConfig,
     /// Path to the directory containing flash files.
     pub flash_files_path: String,
+    /// Default functional class used to resolve the flash services (0x34, 0x36, 0x37)
+    /// when the client does not provide `flashClass`. Compared case-insensitively.
+    pub flash_functional_class_default: String,
     /// Default communication parameters for UDS and `DoIP` protocols.
     pub com_params: ComParams,
     /// `FlatBuffers` verification settings for MDD database parsing.
@@ -129,6 +132,31 @@ pub struct EcuConfig {
     /// the MDD for this ECU.  Replaces the global `doip.protocol_name`.
     #[serde(default)]
     pub protocol: Option<String>,
+}
+
+/// SOVD HTTP server configuration.
+///
+/// The transport (TCP or Unix domain socket) is flattened into the `[server]`
+/// table, settings independent of the transport live next to it.
+///
+/// [[ dimpl~sovd-api-binary-encoding-config, Configured default binary encoding ]]
+#[derive(Deserialize, Serialize, Clone, Debug, Default, schemars::JsonSchema)]
+pub struct ServerConfig {
+    /// Bind settings, see [`ServerTransport`].
+    #[serde(flatten)]
+    pub transport: ServerTransport,
+    /// Encoding of binary data (e.g. `ByteField` parameters) in SOVD JSON
+    /// requests and responses: `"base64"` (SOVD standard) or `"hex"`
+    /// (`"0x01 0xAB"`). Clients can override it per request with the
+    /// `x-sovd2uds-binary-encoding` query parameter.
+    #[serde(default)]
+    pub binary_encoding: BinaryEncoding,
+}
+
+impl ConfigSanity for ServerConfig {
+    fn validate_sanity(&self) -> Result<(), ConfigSanityError> {
+        self.transport.validate_sanity()
+    }
 }
 
 /// SOVD HTTP server bind configuration.
@@ -216,6 +244,7 @@ impl ConfigSanity for ServerTransport {
                 address,
                 port,
                 unix_socket,
+                ..
             } => {
                 validate_address_port(address, *port)?;
                 if unix_socket.is_some() {
@@ -231,6 +260,7 @@ impl ConfigSanity for ServerTransport {
                 unix_socket,
                 address,
                 port,
+                ..
             } => {
                 if unix_socket.trim().is_empty() {
                     return Err(ConfigSanityError::InvalidValue {
@@ -279,7 +309,8 @@ impl Default for Configuration {
         Configuration {
             database: DatabaseConfig::default(),
             flash_files_path: ".".to_owned(),
-            server: ServerTransport::default(),
+            flash_functional_class_default: "flash_download_upload".to_owned(),
+            server: ServerConfig::default(),
             #[cfg(feature = "health")]
             health: cda_health::config::HealthConfig::default(),
             doip: DoipConfig {
@@ -425,6 +456,44 @@ impl Configuration {
         }
         Ok(())
     }
+
+    /// An empty default functional class would make every flash request without
+    /// `flashClass` fail at runtime with a misleading "not found" error.
+    fn validate_flash_functional_class_default(&self) -> Result<(), ConfigSanityError> {
+        if self.flash_functional_class_default.trim().is_empty() {
+            return Err(ConfigSanityError::InvalidValue {
+                field: "flash_functional_class_default".to_owned(),
+                reason: "must not be empty".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Logs topology settings that are valid but have no effect in
+    /// combination with the rest of the configuration. Never fails.
+    fn validate_topology(&self) {
+        let topology = &self.communication.topology;
+        let requested = topology.ecu_list_persistence.enabled;
+        let effective = requested && self.doip.enabled;
+        if requested && !self.doip.enabled {
+            tracing::warn!(
+                "communication.ecu_list_persistence.enabled has no effect while doip.enabled is \
+                 false; the persisted topology covers DoIP gateways only"
+            );
+        }
+        if self.communication.init_mode == CommunicationInitMode::WhenNotPersisted && !effective {
+            tracing::warn!(
+                "communication.init_mode = \"WhenNotPersisted\" behaves like \"Always\" while \
+                 communication.ecu_list_persistence is effectively disabled"
+            );
+        }
+        if topology.vam_handling_mode == VamHandlingMode::PersistedOnly && !effective {
+            tracing::warn!(
+                "communication.vam_handling_mode = \"PersistedOnly\" behaves like \"Never\" while \
+                 communication.ecu_list_persistence is effectively disabled"
+            );
+        }
+    }
 }
 
 impl ConfigSanity for Configuration {
@@ -436,6 +505,8 @@ impl ConfigSanity for Configuration {
         self.validate_can_mappings()?;
         self.validate_transport_overrides()?;
         self.locks.validate_sanity()?;
+        self.validate_flash_functional_class_default()?;
+        self.validate_topology();
         // Add more checks for Configuration fields here if needed
         Ok(())
     }
@@ -453,10 +524,31 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn empty_flash_functional_class_default_is_rejected() {
+        assert!(
+            Configuration::default()
+                .validate_flash_functional_class_default()
+                .is_ok()
+        );
+        for value in ["", "   "] {
+            let config = Configuration {
+                flash_functional_class_default: value.to_owned(),
+                ..Configuration::default()
+            };
+            assert!(matches!(
+                config.validate_flash_functional_class_default(),
+                Err(ConfigSanityError::InvalidValue { field, .. })
+                    if field == "flash_functional_class_default"
+            ));
+        }
+    }
+
     #[tokio::test]
     async fn load_config_toml() -> Result<(), Box<dyn std::error::Error>> {
         let config_str = r#"
 flash_files_path = "/app/flash"
+flash_functional_class_default = "flash_bootloader"
 
 [database]
 path = "/app/database"
@@ -498,6 +590,11 @@ priority_lifecycle_queue_capacity = 32
             .merge(Toml::string(config_str));
         let config: Configuration = figment.extract()?;
         config.validate_sanity().map_err(|err| err.to_string())?;
+        assert_eq!(config.flash_functional_class_default, "flash_bootloader");
+        assert_eq!(
+            Configuration::default().flash_functional_class_default,
+            "flash_download_upload"
+        );
         assert_eq!(
             config
                 .com_params
@@ -578,11 +675,41 @@ port = 12345
             .merge(Toml::string(config_str));
         let config: Configuration = figment.extract()?;
         assert!(matches!(
-            config.server,
+            config.server.transport,
             ServerTransport::Tcp { ref address, port, unix_socket: None }
                 if address == "127.0.0.1" && port == 12345
         ));
         config.server.validate_sanity()?;
+        Ok(())
+    }
+
+    /// `server.binary_encoding` selects the binary data encoding.
+    /// [[ test~sovd-api-binary-encoding-config, Binary encoding is configurable for both transports, test ]]
+    #[tokio::test]
+    async fn load_config_toml_server_binary_encoding() -> Result<(), Box<dyn std::error::Error>> {
+        let config_str = r#"
+[server]
+binary_encoding = "hex"
+"#;
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract()?;
+        assert_eq!(config.server.binary_encoding, BinaryEncoding::Hex);
+
+        let config_str = r#"
+[server]
+transport = "unix_socket"
+unix_socket = "/run/cda.sock"
+binary_encoding = "hex"
+"#;
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract()?;
+        assert_eq!(config.server.binary_encoding, BinaryEncoding::Hex);
+        assert_eq!(
+            Configuration::default().server.binary_encoding,
+            BinaryEncoding::Base64
+        );
         Ok(())
     }
 
@@ -599,7 +726,7 @@ unix_socket = "/run/cda.sock"
             .merge(Toml::string(config_str));
         let config: Configuration = figment.extract()?;
         assert!(matches!(
-            config.server,
+            config.server.transport,
             ServerTransport::UnixSocket { ref unix_socket, .. } if unix_socket == "/run/cda.sock"
         ));
         config.server.validate_sanity()?;
@@ -1020,6 +1147,10 @@ parameter_validation = true
         assert_eq!(
             defaults.communication.post_update_mode,
             PostUpdateCommunicationMode::Enabled
+        );
+        assert!(
+            !defaults.communication.topology.ecu_list_persistence.enabled,
+            "ECU list persistence must be disabled by default"
         );
 
         for init_mode in ["OnDemand", "Disabled"] {

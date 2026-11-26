@@ -48,6 +48,16 @@ pub enum DetectionCause {
     // exists.
 }
 
+/// The stage of communication control that runs a variant detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectionPhase {
+    /// The detection stage of an activation, run after every lifecycle hook
+    /// has initialized.
+    Activation,
+    /// A detection requested while communication is already enabled.
+    Redetection,
+}
+
 /// A lifecycle operation controlled by the communication framework.
 ///
 /// An activation prepares every registered lifecycle reconfiguration

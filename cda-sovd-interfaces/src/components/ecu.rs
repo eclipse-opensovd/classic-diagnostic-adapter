@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Items;
 
+pub mod genericservice;
 pub mod modes;
 pub mod operations;
 
@@ -42,6 +43,11 @@ pub struct Ecu {
     pub id: String,
     pub name: String,
     pub variant: Variant,
+    /// Time of the last reply of the ECU (RFC 3339, UTC), from the
+    /// current or a previous session. Absent if the ECU was never contacted.
+    // [[ dimpl~sovd-ecu-last-seen, A component reports the last contact of its ECU, dimpl ]]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_seen: Option<String>,
     pub locks: String,
     pub operations: String,
     pub data: String,
@@ -50,7 +56,14 @@ pub struct Ecu {
     pub sdgs: Option<Vec<SdSdg>>,
     #[serde(rename = "x-single-ecu-jobs")]
     pub single_ecu_jobs: String,
+    #[serde(rename = "bulk-data")]
+    pub bulk_data: String,
+    #[serde(rename = "x-sovd2uds-bulk-data")]
+    pub x_sovd2uds_bulk_data: String,
+    #[serde(rename = "x-sovd2uds-download")]
+    pub x_sovd2uds_download: String,
     pub faults: String,
+    pub genericservice: String,
     pub modes: String,
     #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -279,19 +292,115 @@ pub mod x {
             }
         }
         pub mod download {
+            use serde::{Deserialize, Deserializer};
+            use serde_json::{Map, Value};
+
+            /// Reads a JSON object and converts all its top-level keys to lowercase.
+            /// Keys that only differ in case are rejected as duplicates.
+            pub(crate) fn lowercase_keys<'de, D>(deserializer: D) -> Result<Value, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let fields = Map::<String, Value>::deserialize(deserializer)?;
+                let mut normalized = Map::with_capacity(fields.len());
+                for (key, value) in fields {
+                    let lowercase = key.to_ascii_lowercase();
+                    if normalized.contains_key(&lowercase) {
+                        return Err(serde::de::Error::custom(format!(
+                            "Duplicate field `{key}` (fields are matched case-insensitively)"
+                        )));
+                    }
+                    normalized.insert(lowercase, value);
+                }
+                Ok(Value::Object(normalized))
+            }
+
+            /// Implements `Deserialize` for a request type whose top-level field names are
+            /// matched case-insensitively.
+            ///
+            /// The type must derive `Deserialize` with `#[serde(remote = "Self")]` and use
+            /// lowercase serde field names. The generated impl lowercases the keys of the
+            /// input object and then runs the derived deserializer on it.
+            ///
+            /// Because serde only sees lowercase keys, the public (documented) field names
+            /// are set separately via `#[schemars(rename = "...")]` in camelCase. Both differ
+            /// only in casing, so any casing of the documented name is accepted.
+            macro_rules! case_insensitive_deserialize {
+                ($ty:ty) => {
+                    impl<'de> serde::Deserialize<'de> for $ty {
+                        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                        where
+                            D: serde::Deserializer<'de>,
+                        {
+                            let value =
+                                $crate::components::ecu::x::sovd2uds::download::lowercase_keys(
+                                    deserializer,
+                                )?;
+                            // Track the path so errors name the offending field.
+                            let mut track = serde_path_to_error::Track::new();
+                            <$ty>::deserialize(serde_path_to_error::Deserializer::new(
+                                value, &mut track,
+                            ))
+                            .map_err(|e| {
+                                let path = track.path().to_string();
+                                if path == "." {
+                                    serde::de::Error::custom(e)
+                                } else {
+                                    serde::de::Error::custom(format!("Invalid field `{path}`: {e}"))
+                                }
+                            })
+                        }
+                    }
+                };
+            }
+
+            pub mod transfer_exit {
+                pub mod put {
+                    use serde::Deserialize;
+
+                    /// Optional request body of the `RequestTransferExit` service. Field names
+                    /// are matched case-insensitively.
+                    #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+                    #[serde(remote = "Self")]
+                    #[schemars(rename = "TransferExitRequest")]
+                    pub struct Request {
+                        /// Functional class used to resolve the `RequestTransferExit` service.
+                        /// Falls back to the configured default when absent.
+                        #[serde(rename = "flashclass")]
+                        #[schemars(rename = "flashClass")]
+                        pub flash_class: Option<String>,
+                    }
+
+                    case_insensitive_deserialize!(Request);
+                }
+            }
+
             pub mod flash_transfer {
                 pub mod post {
                     use serde::{Deserialize, Serialize};
+
+                    /// Request body of the flash transfer. Field names are matched
+                    /// case-insensitively.
                     #[derive(Debug, Deserialize, schemars::JsonSchema)]
+                    #[serde(remote = "Self")]
                     #[schemars(rename = "FlashTransferRequest")]
                     pub struct Request {
                         #[serde(rename = "blocksequencecounter")]
+                        #[schemars(rename = "blockSequenceCounter")]
                         pub block_sequence_counter: u8,
+                        #[schemars(rename = "blockSize")]
                         pub blocksize: usize,
                         pub offset: u64,
                         pub length: u64,
                         pub id: String,
+                        /// Functional class used to resolve the `TransferData` service.
+                        /// Falls back to the configured default when absent.
+                        #[serde(rename = "flashclass")]
+                        #[schemars(rename = "flashClass")]
+                        pub flash_class: Option<String>,
                     }
+
+                    case_insensitive_deserialize!(Request);
 
                     #[derive(Debug, Serialize, schemars::JsonSchema)]
                     #[schemars(rename = "FlashTransferResponse")]
@@ -305,11 +414,11 @@ pub mod x {
                 pub mod get {
                     use serde::Serialize;
 
-                    use crate::Items;
+                    use crate::{Items, error::ApiErrorResponse};
 
                     #[derive(Serialize, Clone, schemars::JsonSchema)]
                     #[serde(rename_all = "camelCase")]
-                    pub struct DataTransferMetaData {
+                    pub struct DataTransferMetaData<T> {
                         pub acknowledged_bytes: u64,
                         pub blocksize: usize,
                         pub next_block_sequence_counter: u8,
@@ -317,15 +426,20 @@ pub mod x {
                         pub file_id: String,
                         pub status: DataTransferStatus,
                         #[serde(skip_serializing_if = "Option::is_none")]
-                        pub error: Option<Vec<DataTransferError>>,
+                        pub error: Option<Vec<DataTransferError<T>>>,
                         #[schemars(skip)]
                         #[serde(skip_serializing_if = "Option::is_none")]
                         pub schema: Option<schemars::Schema>,
                     }
 
+                    /// Reason why a transfer was aborted, a SOVD `GenericError`.
                     #[derive(Serialize, Clone, schemars::JsonSchema)]
-                    pub struct DataTransferError {
+                    pub struct DataTransferError<T> {
+                        /// Same as `message`. Kept for clients reading the error text of
+                        /// earlier versions.
                         pub text: String,
+                        #[serde(flatten)]
+                        pub error: ApiErrorResponse<T>,
                     }
 
                     #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -343,11 +457,11 @@ pub mod x {
                         Queued,
                     }
 
-                    pub type Response = Items<DataTransferMetaData>;
+                    pub type Response<T> = Items<DataTransferMetaData<T>>;
 
                     pub mod id {
                         use super::DataTransferMetaData;
-                        pub type Response = DataTransferMetaData;
+                        pub type Response<T> = DataTransferMetaData<T>;
                     }
                 }
             }
@@ -359,12 +473,23 @@ pub mod x {
 
                     use crate::error::DataError;
 
+                    /// Request body of the `RequestDownload` service. Top-level field names are
+                    /// matched case-insensitively, the parameter names are passed on unchanged.
                     #[derive(Deserialize, schemars::JsonSchema)]
+                    #[serde(remote = "Self")]
                     #[schemars(rename = "RequestDownloadRequest")]
                     pub struct Request {
                         #[serde(rename = "requestdownload")]
+                        #[schemars(rename = "requestDownload")]
                         pub parameters: HashMap<String, serde_json::Value>,
+                        /// Functional class used to resolve the `RequestDownload` service.
+                        /// Falls back to the configured default when absent.
+                        #[serde(rename = "flashclass")]
+                        #[schemars(rename = "flashClass")]
+                        pub flash_class: Option<String>,
                     }
+
+                    case_insensitive_deserialize!(Request);
                     #[derive(Serialize, schemars::JsonSchema)]
                     #[schemars(rename = "RequestDownloadResponse")]
                     pub struct Response<T> {
@@ -523,11 +648,12 @@ pub mod faults {
         /// Query parameters for filtering DTC by the given fields.
         #[serde(rename_all = "camelCase")]
         pub struct FaultQuery {
-            /// Filters the elements based on a status, if the value ia a full match.
-            /// To allow multiple values the parameter is repeated. (0..*), they are 'OR' combined.
-            /// Currently supported  (case-insensitive) keys are:
+            /// Filters the elements based on their status. Each key selects a status bit,
+            /// all selected bits are 'OR' combined into the UDS status mask, so a fault is
+            /// returned if any of the selected bits is set.
+            /// Currently supported (case-insensitive) keys are:
             /// * confirmedDtc
-            /// * mask
+            /// * mask (raw status mask as hex, e.g. `29` or `0x29`)
             /// * pendingDtc
             /// * testFailed
             /// * testFailedSinceLastClear
@@ -536,8 +662,9 @@ pub mod faults {
             /// * testNotCompletedThisOperationCycle
             /// * warningIndicatorRequested
             ///
-            /// Additional keys are not read from the database at this time.
-            /// The value can be allowed values for these keys are 0|1 or true|false.
+            /// Other keys are ignored. For the bit keys the allowed values are 0|1 or
+            /// true|false. If no bit is selected, all faults are returned.
+            /// A mask of 0 is treated like no filter.
             ///
             /// Example:
             ///
@@ -607,35 +734,39 @@ pub mod faults {
             }
 
             #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-            pub struct ExtendedSnapshots<T> {
+            pub struct ExtendedSnapshots {
                 #[serde(skip_serializing_if = "Option::is_none")]
                 pub data: Option<HashMap<String, Snapshot>>,
-                #[serde(skip_serializing_if = "Option::is_none")]
-                pub errors: Option<Vec<DataError<T>>>,
             }
 
             #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-            pub struct ExtendedDataRecords<T> {
+            pub struct ExtendedDataRecords {
                 #[serde(skip_serializing_if = "Option::is_none")]
                 pub data: Option<HashMap<String, serde_json::Value>>,
-                #[serde(skip_serializing_if = "Option::is_none")]
-                pub errors: Option<Vec<DataError<T>>>,
             }
 
             #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-            pub struct EnvironmentData<T> {
+            pub struct EnvironmentData {
                 #[serde(skip_serializing_if = "Option::is_none")]
-                pub extended_data_records: Option<ExtendedDataRecords<T>>,
+                pub extended_data_records: Option<ExtendedDataRecords>,
 
                 #[serde(skip_serializing_if = "Option::is_none")]
-                pub snapshots: Option<ExtendedSnapshots<T>>,
+                pub snapshots: Option<ExtendedSnapshots>,
             }
 
+            /// Spec Table 65: errors of the whole response are reported in the
+            /// top-level `errors` list, each pointing at the failing element via a
+            /// JSON pointer (Table 17).
             #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
             pub struct ExtendedFault<T> {
                 pub item: Fault,
                 #[serde(skip_serializing_if = "Option::is_none")]
-                pub environment_data: Option<EnvironmentData<T>>,
+                pub environment_data: Option<EnvironmentData>,
+                #[serde(
+                    default = "Vec::<DataError<T>>::new",
+                    skip_serializing_if = "Vec::is_empty"
+                )]
+                pub errors: Vec<DataError<T>>,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 pub schema: Option<schemars::Schema>,
             }
@@ -661,5 +792,119 @@ mod tests {
         assert!(query_with_schema.include_extended_data);
         assert!(!query_with_schema.include_snapshot_data);
         assert!(query_with_schema.include_schema);
+    }
+
+    #[test]
+    fn test_deserialize_fault_status_query() {
+        for query_str in [
+            "status[confirmedDtc]=true&status[MASK]=0x29",
+            "status%5BconfirmedDtc%5D=true&status%5BMASK%5D=0x29",
+        ] {
+            let query: super::faults::get::FaultQuery = serde_qs::Config::new()
+                .use_form_encoding(true)
+                .deserialize_str(query_str)
+                .expect("Query should deserialize");
+            let status = query.status.expect("Status should be present");
+            assert_eq!(
+                status.get("confirmedDtc"),
+                Some(&serde_json::json!("true")),
+                "query {query_str}"
+            );
+            assert_eq!(
+                status.get("MASK"),
+                Some(&serde_json::json!("0x29")),
+                "query {query_str}"
+            );
+        }
+    }
+
+    mod flash_requests {
+        use crate::components::ecu::x::sovd2uds::download::{
+            flash_transfer, request_download, transfer_exit,
+        };
+
+        #[test]
+        fn flash_transfer_fields_are_case_insensitive() {
+            let request: flash_transfer::post::Request = serde_json::from_str(
+                r#"{"BlockSequenceCounter":1,"BLOCKSIZE":128,"Offset":0,"length":256,
+                    "ID":"file","FLASHCLASS":"flash_download_upload_bootloader"}"#,
+            )
+            .expect("Request should deserialize");
+            assert_eq!(request.block_sequence_counter, 1);
+            assert_eq!(request.blocksize, 128);
+            assert_eq!(request.length, 256);
+            assert_eq!(request.id, "file");
+            assert_eq!(
+                request.flash_class.as_deref(),
+                Some("flash_download_upload_bootloader")
+            );
+        }
+
+        #[test]
+        fn flash_transfer_without_flash_class() {
+            let request: flash_transfer::post::Request = serde_json::from_str(
+                r#"{"blocksequencecounter":1,"blocksize":128,"offset":0,"length":256,"id":"f"}"#,
+            )
+            .expect("Request should deserialize");
+            assert!(request.flash_class.is_none());
+        }
+
+        #[test]
+        fn flash_transfer_missing_field_is_rejected() {
+            let result: Result<flash_transfer::post::Request, _> =
+                serde_json::from_str(r#"{"blocksize":128,"offset":0,"length":256,"id":"f"}"#);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn duplicate_fields_differing_in_case_are_rejected() {
+            let result: Result<transfer_exit::put::Request, _> =
+                serde_json::from_str(r#"{"flashClass":"a","FlashClass":"b"}"#);
+            let error = result.expect_err("Duplicate fields should be rejected");
+            assert!(
+                error.to_string().contains("case-insensitively"),
+                "unexpected error: {error}"
+            );
+        }
+
+        #[test]
+        fn invalid_field_type_error_names_the_field() {
+            let result: Result<flash_transfer::post::Request, _> = serde_json::from_str(
+                r#"{"blocksequencecounter":1,"BlockSize":"x","offset":0,"length":256,"id":"f"}"#,
+            );
+            let error = result.expect_err("Invalid field type should be rejected");
+            assert!(
+                error.to_string().contains("Invalid field `blocksize`"),
+                "unexpected error: {error}"
+            );
+        }
+
+        #[test]
+        fn missing_field_error_is_not_prefixed() {
+            let result: Result<flash_transfer::post::Request, _> =
+                serde_json::from_str(r#"{"blocksize":128,"offset":0,"length":256,"id":"f"}"#);
+            let error = result.expect_err("Missing field should be rejected");
+            let message = error.to_string();
+            assert!(
+                message.contains("missing field") && !message.contains("Invalid field"),
+                "unexpected error: {message}"
+            );
+        }
+
+        #[test]
+        fn request_download_keeps_parameter_names() {
+            let request: request_download::put::Request =
+                serde_json::from_str(r#"{"RequestDownload":{"MemoryAddress":1},"flashclass":"X"}"#)
+                    .expect("Request should deserialize");
+            assert!(request.parameters.contains_key("MemoryAddress"));
+            assert_eq!(request.flash_class.as_deref(), Some("X"));
+        }
+
+        #[test]
+        fn transfer_exit_accepts_empty_object() {
+            let request: transfer_exit::put::Request =
+                serde_json::from_str("{}").expect("Request should deserialize");
+            assert!(request.flash_class.is_none());
+        }
     }
 }

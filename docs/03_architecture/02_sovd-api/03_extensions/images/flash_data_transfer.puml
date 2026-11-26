@@ -22,7 +22,7 @@ participant ECU
 
 == 1. Request Download (SID 34) ==
 
-Client -> HTTP : PUT /components/{ecu}/x-sovd2uds-download/requestdownload\n{ parameters }
+Client -> HTTP : PUT /components/{ecu}/x-sovd2uds-download/requestdownload\n{ "requestdownload": { <param>: <value>, ... },\n  "flashClass": "<functional class>" (optional) }
 activate HTTP
 
 HTTP -> SEC : authenticate & authorize
@@ -33,7 +33,7 @@ deactivate SEC
 HTTP -> HANDLER : route to flash handler
 activate HANDLER
 
-HANDLER -> DIAG : request download
+HANDLER -> DIAG : lookup service\n(functional class = flashClass or configured default, SID 34)
 activate DIAG
 DIAG -> COMM : send UDS request
 activate COMM
@@ -48,12 +48,12 @@ deactivate DIAG
 
 HANDLER -> HTTP : JSON body
 deactivate HANDLER
-HTTP -> Client : HTTP 200 OK\n{ response data }
+HTTP -> Client : HTTP 200 OK\n{ "requestdownload": { ... } }
 deactivate HTTP
 
 == 2. Transfer Data (SID 36) ==
 
-Client -> HTTP : POST /components/{ecu}/x-sovd2uds-download/flashtransfer\n{ "id": "<file-id>", "offset": ..., "length": ..., ... }
+Client -> HTTP : POST /components/{ecu}/x-sovd2uds-download/flashtransfer\n{ "id": "<file-id>", "offset": ..., "length": ...,\n  "blocksize": ..., "blocksequencecounter": ...,\n  "flashClass": "<functional class>" (optional) }
 activate HTTP
 
 HTTP -> SEC : authenticate & authorize
@@ -64,9 +64,18 @@ deactivate SEC
 HTTP -> HANDLER : route to flash handler
 activate HANDLER
 
-HANDLER -> HANDLER : read file data from\nconfigured flash folder
+HANDLER -> DIAG : lookup service\n(functional class = flashClass or configured default, SID 36)
+activate DIAG
+DIAG -> HANDLER : service found
+deactivate DIAG
 
-loop for each block-sized chunk
+HANDLER -> HANDLER : start background transfer\nfrom configured flash folder
+HANDLER -> HTTP : JSON body (transfer id)
+deactivate HANDLER
+HTTP -> Client : HTTP 200 OK\n{ "id": "<transfer-id>" }
+deactivate HTTP
+
+loop for each block-sized chunk (background)
     HANDLER -> DIAG : transfer data block
     activate DIAG
     DIAG -> COMM : send UDS request
@@ -81,14 +90,12 @@ loop for each block-sized chunk
     deactivate DIAG
 end
 
-HANDLER -> HTTP : JSON body (transfer id)
-deactivate HANDLER
-HTTP -> Client : HTTP 202 Accepted\n{ "id": "<transfer-id>" }
-deactivate HTTP
+Client -> HTTP : GET /components/{ecu}/x-sovd2uds-download/flashtransfer/{id}
+HTTP -> Client : HTTP 200 OK\n{ "id", "fileId", "status", "acknowledgedBytes", ... }
 
 == 3. Transfer Exit (SID 37) ==
 
-Client -> HTTP : PUT /components/{ecu}/x-sovd2uds-download/transferexit
+Client -> HTTP : PUT /components/{ecu}/x-sovd2uds-download/transferexit\n{ "flashClass": "<functional class>" } (optional body)
 activate HTTP
 
 HTTP -> SEC : authenticate & authorize
@@ -99,7 +106,7 @@ deactivate SEC
 HTTP -> HANDLER : route to flash handler
 activate HANDLER
 
-HANDLER -> DIAG : request transfer exit
+HANDLER -> DIAG : lookup service\n(functional class = flashClass or configured default, SID 37)
 activate DIAG
 DIAG -> COMM : send UDS request
 activate COMM
@@ -112,9 +119,20 @@ deactivate COMM
 DIAG -> HANDLER : transfer exit confirmed
 deactivate DIAG
 
-HANDLER -> HTTP : JSON body
+HANDLER -> HTTP : no content
 deactivate HANDLER
-HTTP -> Client : HTTP 200 OK
+HTTP -> Client : HTTP 204 No Content
+deactivate HTTP
+
+== 4. Remove finished transfer ==
+
+Client -> HTTP : DELETE /components/{ecu}/x-sovd2uds-download/flashtransfer/{id}
+activate HTTP
+HTTP -> HANDLER : remove finished / aborted transfer
+activate HANDLER
+HANDLER -> HTTP : removed
+deactivate HANDLER
+HTTP -> Client : HTTP 204 No Content
 deactivate HTTP
 
 @enduml

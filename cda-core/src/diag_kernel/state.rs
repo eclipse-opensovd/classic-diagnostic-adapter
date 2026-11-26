@@ -21,7 +21,10 @@
 )]
 
 use cda_database::datatypes;
-use cda_interfaces::{DiagServiceError, EcuStateManager, dlt_ctx, service_ids, util::std_ext};
+use cda_interfaces::{
+    DiagServiceError, EcuStateManager, authentication::AuthenticationState, dlt_ctx, service_ids,
+    util::std_ext,
+};
 use cda_plugin_security::SecurityPlugin;
 
 use super::ecumanager::EcuManager;
@@ -103,6 +106,15 @@ impl<S: SecurityPlugin> EcuStateManager for EcuManager<S> {
             .entry(service_ids::COMMUNICATION_CONTROL)
             .or_insert_with(|| "enablerxandenabletx".to_owned());
         Ok(())
+    }
+
+    fn authentication_state(&self) -> AuthenticationState {
+        std_ext::lock_read(&self.runtime_state.authentication).clone()
+    }
+
+    fn set_authentication_state(&self, state: AuthenticationState) {
+        tracing::debug!(?state, "Setting authentication state");
+        *std_ext::lock_write(&self.runtime_state.authentication) = state;
     }
 }
 

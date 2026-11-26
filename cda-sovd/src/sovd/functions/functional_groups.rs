@@ -260,8 +260,9 @@ async fn functions_description(
         Json(sovd_interfaces::ResourceResponse {
             items: vec![sovd_interfaces::Resource {
                 href: "http://localhost:20002/vehicle/v15/functions/functionalgroups".to_owned(),
-                id: None,
+                id: "functionalgroups".to_owned(),
                 name: "functionalgroups".to_owned(),
+                translation_id: None,
             }],
             schema,
         }),
@@ -290,8 +291,9 @@ fn functional_groups_description(include_schema: bool, functional_groups: Vec<St
                     href: format!(
                         "http://localhost:20002/vehicle/v15/functions/functionalgroups/{group}"
                     ),
-                    id: Some(group.to_lowercase()),
+                    id: group.to_lowercase(),
                     name: group,
+                    translation_id: None,
                 })
                 .collect::<Vec<_>>(),
             schema,
@@ -307,8 +309,9 @@ fn docs_functionalgroups(op: TransformOperation) -> TransformOperation {
                 items: vec![sovd_interfaces::Resource {
                     href: "http://localhost:20002/vehicle/v15/functions/functionalgroups/group_a"
                         .into(),
-                    id: Some("group_a".into()),
+                    id: "group_a".into(),
                     name: "Group_A".into(),
+                    translation_id: None,
                 }],
                 schema: None,
             })
@@ -383,12 +386,13 @@ fn handle_ecu_response<R: DiagServiceResponse>(
     errors: &mut Vec<sovd_interfaces::error::DataError<VendorErrorCode>>,
     ecu_name: String,
     result: Result<R, cda_interfaces::DiagServiceError>,
+    binary_encoding: cda_interfaces::BinaryEncoding,
 ) {
     match result {
         Ok(response) => {
             if response.response_type() == DiagServiceResponseType::Positive {
                 // Extract data from the response into JSON format
-                match response.into_json() {
+                match response.into_json(binary_encoding) {
                     Ok(json_response) => {
                         let parse_error_ref = format!("{data_tag}/{ecu_name}");
                         if let serde_json::Value::Object(data_map) = json_response.data {
@@ -498,9 +502,19 @@ pub(crate) mod tests {
     ) -> WebserverFgState<MockUdsEcu> {
         uds.expect_ecus_for_functional_group()
             .returning(|_, _| vec!["test-ecu".to_owned()]);
+        create_test_fg_state_with_locks(uds, functional_group_name, Arc::new(Locks::new()))
+    }
+
+    /// Creates a functional-group state with the given locks and without adding any
+    /// mock expectations.
+    pub fn create_test_fg_state_with_locks(
+        uds: MockUdsEcu,
+        functional_group_name: String,
+        locks: Arc<Locks>,
+    ) -> WebserverFgState<MockUdsEcu> {
         WebserverFgState {
             uds,
-            locks: Arc::new(Locks::new()),
+            locks,
             functional_group_name,
             fg_executions: Arc::new(std::sync::RwLock::new(HashMap::default())),
             communication_access: enabled_communication_access_for_test(),

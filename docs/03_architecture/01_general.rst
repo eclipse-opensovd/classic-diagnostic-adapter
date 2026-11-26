@@ -18,7 +18,7 @@ Storage Access
 .. arch:: Storage Access API
     :id: arch~system-storage-access-abstraction
     :status: draft
-    :links: dimpl~storage-local-filesystem-implementation, dimpl~storage-atomic-commit, dimpl~storage-crash-recovery, dimpl~storage-wal-journaling, test~storage-atomicity-recovery-discards-recording-phase-crash, test~storage-atomicity-recovery-restores-overwritten-file, test~storage-atomicity-recovery-removes-new-file, test~storage-atomicity-recovery-removes-new-collection, test~storage-atomicity-recovery-cleans-orphaned-backups, test~storage-atomicity-recovery-discards-corrupt-wal, test~storage-atomicity-recovery-removes-orphaned-collection-dir, test~storage-wal-checksum-round-trip, test~storage-wal-truncation-detection
+    :links: dimpl~storage-local-filesystem-implementation, dimpl~storage-atomic-commit, dimpl~storage-commit-cancel-safe, dimpl~storage-crash-recovery, dimpl~storage-wal-journaling, testset~storage-commit-cancel-safe, testset~storage-crash-recovery, testset~storage-wal-journaling
 
     The Storage Access API provides an abstraction layer for storage access, allowing the CDA to interact with different types of storage systems (e.g., local file system, databases) without being tightly coupled to a specific implementation.
 
@@ -176,7 +176,7 @@ Systemd Watchdog Integration
 
 .. arch:: Systemd Watchdog Integration
     :id: arch~system-sd-notify-watchdog-integration
-    :links: dimpl~system-sd-notify-watchdog-integration; test~system-sd-notify-watchdog-integration
+    :links: dimpl~system-sd-notify-watchdog-integration, testset~system-sd-notify-watchdog
     :status: draft
 
     The systemd watchdog integration is implemented as an optional background task that bridges the CDA health system

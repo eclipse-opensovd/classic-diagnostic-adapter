@@ -217,6 +217,9 @@ Request-Response Flow
        * - ``0x35``
          - 1
          - RequestUpload (SID only)
+       * - ``0x36``
+         - 2
+         - TransferData (SID + blockSequenceCounter, echoed in the positive response)
        * - ``0x37``
          - 1
          - RequestTransferExit (SID only)

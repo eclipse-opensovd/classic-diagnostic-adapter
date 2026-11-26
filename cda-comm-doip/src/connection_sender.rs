@@ -295,6 +295,7 @@ mod tests {
                 transport: DoipTransportConfig {
                     tester_ip: "127.0.0.1".to_owned(),
                     port: 13400,
+                    vir_source_port: crate::config::VirSourcePort::default(),
                     tls_port: 0,
                     send_diagnostic_message_ack: false,
                     send_timeout: Duration::from_secs(5),
@@ -448,12 +449,6 @@ mod tests {
         let mut harness = GatewaySenderTestHarness::new(Duration::ZERO);
 
         // Advance a very long time - alive check should never fire.
-        #[allow(
-            unknown_lints,
-            clippy::duration_suboptimal_units,
-            reason = "Literal duration value chosen for test clarity; suboptimal units lint not \
-                      available in all toolchain versions"
-        )]
         tokio::time::advance(Duration::from_secs(4200)).await;
         tokio::task::yield_now().await;
 

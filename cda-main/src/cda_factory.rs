@@ -20,15 +20,17 @@ use cda_interfaces::{
     HashMap,
     communication_control::CommunicationAccess,
     health::HealthProvider,
+    request_authorization::RequestLockProvider,
     runtime_update_api::{ReloadError, VehicleComponentFactory, VehicleComponents},
 };
 use cda_plugin_security::SecurityPlugin;
+use cda_plugin_topology::TopologyPlugin;
 use cda_transport_router::DiagnosticTransportRouter;
 
 use crate::{config::configfile::Configuration, vehicle::UdsManagerType};
 
 /// Concrete [`VehicleComponentFactory`] that delegates to
-/// [`crate::vehicle::create_vehicle_components`].
+/// [`crate::vehicle::reload_vehicle_components`].
 ///
 /// Used by [`cda_plugin_runtime_update::default_runtime_reloader_plugin::DefaultRuntimeReloaderPlugin`]
 /// and called every time the diagnostic databases are reloaded.
@@ -37,7 +39,9 @@ where
     SP: SecurityPlugin,
 {
     health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
+    request_lock_provider: Arc<dyn RequestLockProvider>,
     communication_access: Arc<dyn CommunicationAccess>,
+    topology: Arc<dyn TopologyPlugin>,
     _phantom: std::marker::PhantomData<SP>,
 }
 
@@ -48,11 +52,15 @@ where
     #[must_use]
     pub fn new(
         health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
+        request_lock_provider: Arc<dyn RequestLockProvider>,
         communication_access: Arc<dyn CommunicationAccess>,
+        topology: Arc<dyn TopologyPlugin>,
     ) -> Self {
         Self {
             health_providers,
+            request_lock_provider,
             communication_access,
+            topology,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -82,11 +90,13 @@ where
         >,
         ReloadError,
     > {
-        let crate_components = crate::vehicle::create_vehicle_components::<SP>(
+        let crate_components = crate::vehicle::reload_vehicle_components::<SP>(
             config,
             mdd_paths,
             self.health_providers.as_ref(),
+            Arc::clone(&self.request_lock_provider),
             Arc::clone(&self.communication_access),
+            self.topology.as_ref(),
         )
         .await
         .map_err(|e| {

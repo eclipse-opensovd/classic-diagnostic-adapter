@@ -18,8 +18,7 @@ use cda_database::datatypes::{
     PhysicalType,
 };
 use cda_interfaces::{
-    DiagServiceError,
-    util::{decode_hex, tracing::print_hex, try_strip_hex_prefix},
+    BinaryEncoding, DiagServiceError, decode_hex_with_optional_prefix, util::tracing::print_hex,
 };
 
 use crate::diag_kernel::{
@@ -311,12 +310,21 @@ fn decode_numeric_val_from_str(
             let lowercase = value.to_lowercase();
             if lowercase.starts_with("0x") {
                 let decoded = decode_hex_with_optional_prefix(value)?;
-                let decoded = if decoded.len() < size_of::<u32>() {
-                    pad_msb_to_len(&decoded, size_of::<u32>())
-                } else {
-                    decoded
-                };
-                let u32_val = u32::from_be_bytes(decoded.try_into().expect("padded to u32 length"));
+                // Leading zero bytes do not change the value, strip them before
+                // checking that the value fits into an u32.
+                let significant = decoded
+                    .iter()
+                    .position(|&b| b != 0)
+                    .and_then(|start| decoded.get(start..))
+                    .unwrap_or_default();
+                let bytes: [u8; size_of::<u32>()] = pad_msb_to_len(significant, size_of::<u32>())
+                    .try_into()
+                    .map_err(|_| {
+                        DiagServiceError::ParameterConversionError(format!(
+                            "Input value {value} is too large for UInt32"
+                        ))
+                    })?;
+                let u32_val = u32::from_be_bytes(bytes);
                 validate_bit_len_unsigned(u32_val, diag_type.bit_len().unwrap_or(32))?;
                 Ok(u32_val.to_be_bytes().to_vec())
             } else if lowercase.starts_with("0o") {
@@ -639,7 +647,7 @@ fn compu_convert_text_table(
     }
 
     let Some(value) = value.as_str().map(|s| s.replace('"', "")) else {
-        return Err(DiagServiceError::UdsLookupError(
+        return Err(DiagServiceError::BadPayload(
             "Failed to convert value to string".to_owned(),
         ));
     };
@@ -681,7 +689,7 @@ fn compu_convert_text_table(
             _ => unreachable!(),
         };
     }
-    Err(DiagServiceError::UdsLookupError(
+    Err(DiagServiceError::BadPayload(
         "Failed to find matching TextTable value".to_owned(),
     ))
 }
@@ -697,11 +705,21 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
 ) -> Result<DiagDataTypeContainer, DiagServiceError> {
     let uds_payload = payload.data()?;
 
-    // Only a MinMaxLength parameter with a minimum length of zero may contain no data.
+    // Empty data is only valid for
+    // - a MinMaxLength parameter with a minimum length of zero (optional, may be absent), or
+    // - a LeadingLength parameter whose encoded length is zero.
+    // A missing leading length field itself is rejected by `decode`, and MinMaxLength has
+    // no length field, so `is_optional` never needs to skip leading length bytes.
     let is_optional = matches!(
         diag_type.type_(),
         DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType { min_length: 0, .. })
     );
+    // The leading length field is not part of the decoded data, but must be
+    // skipped as well. A leading length of zero is valid and yields no data.
+    let leading_length_bytes = match diag_type.type_() {
+        DiagCodedTypeVariant::LeadingLengthInfo(bits) => Some(bits.div_ceil(8) as usize),
+        _ => None,
+    };
 
     // An optional parameter whose start is at or beyond the payload is absent.
     let (data, bit_len) = if is_optional && param_byte_pos >= uds_payload.len() {
@@ -710,7 +728,7 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
         diag_type.decode(uds_payload, param_byte_pos, param_bit_pos)?
     };
 
-    if data.is_empty() && !is_optional {
+    if data.is_empty() && !is_optional && leading_length_bytes.is_none() {
         tracing::debug!(
             "Not enough data for parameter {:?} in extract_diag_data_container, expected at least \
              1 byte, payload length {}",
@@ -724,7 +742,11 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
     }
 
     let data_type = diag_type.base_datatype();
-    payload.set_last_read_byte_pos(param_byte_pos.saturating_add(data.len()));
+    payload.set_last_read_byte_pos(
+        param_byte_pos
+            .saturating_add(leading_length_bytes.unwrap_or(0))
+            .saturating_add(data.len()),
+    );
 
     Ok(DiagDataTypeContainer::RawContainer(
         DiagDataTypeContainerRaw {
@@ -742,6 +764,7 @@ pub(in crate::diag_kernel) fn json_value_to_uds_data(
     compu_method: Option<datatypes::CompuMethod>,
     phys_type: Option<PhysicalType>,
     json_value: &serde_json::Value,
+    binary_encoding: BinaryEncoding,
 ) -> Result<Vec<u8>, DiagServiceError> {
     'compu: {
         if let Some(compu_method) = compu_method {
@@ -764,7 +787,7 @@ pub(in crate::diag_kernel) fn json_value_to_uds_data(
         DataType::Int32 | DataType::UInt32 | DataType::Float32 | DataType::Float64 => {
             numeric_json_value_to_byte_vector(json_value, diag_type, phys_type)
         }
-        DataType::ByteField => decode_hex_with_optional_prefix(json_value.as_str().ok_or(
+        DataType::ByteField => binary_encoding.decode(json_value.as_str().ok_or(
             DiagServiceError::ParameterConversionError("Invalid value for ByteField".to_owned()),
         )?),
         DataType::AsciiString | DataType::Unicode2String | DataType::Utf8String => json_value
@@ -774,21 +797,6 @@ pub(in crate::diag_kernel) fn json_value_to_uds_data(
             ))
             .map(|s| s.as_bytes().to_vec()),
     }
-}
-
-fn decode_hex_with_optional_prefix(value: &str) -> Result<Vec<u8>, DiagServiceError> {
-    value
-        .split([' ', ','])
-        .filter(|v: &&str| !v.is_empty())
-        .map(|value| {
-            if let Some(stripped) = try_strip_hex_prefix(value) {
-                decode_hex(stripped)
-            } else {
-                decode_hex(value)
-            }
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map(|vecs| vecs.into_iter().flatten().collect())
 }
 
 fn decode_u32_octal_with_optional_prefix(value: &str) -> Result<Vec<u8>, DiagServiceError> {
@@ -898,7 +906,11 @@ fn process_physical_type_value(
                 let val = i32::from_be_bytes(
                     pad_msb_to_len(&data, size_of::<i32>())
                         .try_into()
-                        .expect("input bytes padded to i32 size"),
+                        .map_err(|_| {
+                            DiagServiceError::ParameterConversionError(format!(
+                                "Input value {value} is too large for i32"
+                            ))
+                        })?,
                 );
                 to_numeric_base_type(val, base_type)
             }
@@ -906,7 +918,11 @@ fn process_physical_type_value(
                 let val = u32::from_be_bytes(
                     pad_msb_to_len(&data, size_of::<u32>())
                         .try_into()
-                        .expect("input bytes padded to u32 size"),
+                        .map_err(|_| {
+                            DiagServiceError::ParameterConversionError(format!(
+                                "Input value {value} is too large for u32"
+                            ))
+                        })?,
                 );
                 to_numeric_base_type(val, base_type)
             }
@@ -914,7 +930,11 @@ fn process_physical_type_value(
                 let val = f32::from_be_bytes(
                     pad_msb_to_len(&data, size_of::<f32>())
                         .try_into()
-                        .expect("input bytes padded to f32 size"),
+                        .map_err(|_| {
+                            DiagServiceError::ParameterConversionError(format!(
+                                "Input value {value} is too large for f32"
+                            ))
+                        })?,
                 );
                 to_numeric_base_type(val, base_type)
             }
@@ -922,7 +942,11 @@ fn process_physical_type_value(
                 let val = f64::from_be_bytes(
                     pad_msb_to_len(&data, size_of::<f64>())
                         .try_into()
-                        .expect("input bytes padded to f64 size"),
+                        .map_err(|_| {
+                            DiagServiceError::ParameterConversionError(format!(
+                                "Input value {value} is too large for f64"
+                            ))
+                        })?,
                 );
                 to_numeric_base_type(val, base_type)
             }
@@ -1106,6 +1130,7 @@ mod tests {
         CompuScale, CompuValues, DataType, DiagCodedType, DiagCodedTypeVariant, IntervalType,
         Limit, MinMaxLengthType, PhysicalType, Radix, StandardLengthType, Termination,
     };
+    use cda_interfaces::BinaryEncoding;
 
     /// Helper function to create a `DiagCodedType` as `StandardLength` Type for testing
     fn create_diag_coded_type_stl(
@@ -1156,7 +1181,8 @@ mod tests {
     fn test_hex_values() {
         let json_value = serde_json::json!("0x11223344");
         let diag_type = create_diag_coded_type_stl(DataType::ByteField, None);
-        let result = super::json_value_to_uds_data(&diag_type, None, None, &json_value);
+        let result =
+            super::json_value_to_uds_data(&diag_type, None, None, &json_value, BinaryEncoding::Hex);
         assert_eq!(result, Ok(vec![0x11, 0x22, 0x33, 0x44]));
     }
 
@@ -1165,8 +1191,26 @@ mod tests {
         let json_value = serde_json::json!(i64::MAX);
         let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
         let uint32_type = create_diag_coded_type_stl(DataType::UInt32, None);
-        assert!(super::json_value_to_uds_data(&int32_type, None, None, &json_value).is_err());
-        assert!(super::json_value_to_uds_data(&uint32_type, None, None, &json_value).is_err());
+        assert!(
+            super::json_value_to_uds_data(
+                &int32_type,
+                None,
+                None,
+                &json_value,
+                BinaryEncoding::Hex
+            )
+            .is_err()
+        );
+        assert!(
+            super::json_value_to_uds_data(
+                &uint32_type,
+                None,
+                None,
+                &json_value,
+                BinaryEncoding::Hex
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1182,7 +1226,13 @@ mod tests {
         };
 
         assert_eq!(
-            super::json_value_to_uds_data(&bytefield_type, None, None, &json_value),
+            super::json_value_to_uds_data(
+                &bytefield_type,
+                None,
+                None,
+                &json_value,
+                BinaryEncoding::Hex
+            ),
             Ok(vec![0x1, 0x2])
         );
         assert_eq!(
@@ -1190,7 +1240,8 @@ mod tests {
                 &uint32_type,
                 None,
                 Some(uint32_physical_type),
-                &json_value
+                &json_value,
+                BinaryEncoding::Hex,
             ),
             Ok(vec![0, 0, 1, 2])
         );
@@ -1211,7 +1262,13 @@ mod tests {
 
         let expected = Ok(vec![0x00, 0x01, 0x80, 0x00]);
         assert_eq!(
-            super::json_value_to_uds_data(&bytefield_type, None, None, &json_value),
+            super::json_value_to_uds_data(
+                &bytefield_type,
+                None,
+                None,
+                &json_value,
+                BinaryEncoding::Hex
+            ),
             expected
         );
         // only u32 is supported in hex notation according to ISO 22901-1
@@ -1220,18 +1277,29 @@ mod tests {
                 &uint32_type,
                 None,
                 Some(uint32_hex_physical_type),
-                &json_value
+                &json_value,
+                BinaryEncoding::Hex,
             ),
             expected
         );
-        assert!(super::json_value_to_uds_data(&int32_type, None, None, &json_value).is_err());
+        assert!(
+            super::json_value_to_uds_data(
+                &int32_type,
+                None,
+                None,
+                &json_value,
+                BinaryEncoding::Hex
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn test_mixed_values() {
         let json_value = serde_json::json!("ff 0a 12 deadbeef ca7");
         let diag_type = create_diag_coded_type_stl(DataType::ByteField, None);
-        let result = super::json_value_to_uds_data(&diag_type, None, None, &json_value);
+        let result =
+            super::json_value_to_uds_data(&diag_type, None, None, &json_value, BinaryEncoding::Hex);
         assert_eq!(
             result,
             Ok(vec![255, 10, 18, 0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0x07])
@@ -1242,7 +1310,8 @@ mod tests {
     fn test_hex_long() {
         let json_value = serde_json::json!("c0ffeca7");
         let diag_type = create_diag_coded_type_stl(DataType::ByteField, None);
-        let result = super::json_value_to_uds_data(&diag_type, None, None, &json_value);
+        let result =
+            super::json_value_to_uds_data(&diag_type, None, None, &json_value, BinaryEncoding::Hex);
         assert_eq!(result, Ok(vec![0xC0, 0xFF, 0xEC, 0xA7]));
     }
 
@@ -1250,7 +1319,8 @@ mod tests {
     fn test_invalid_hex_value() {
         let json_value = serde_json::json!("0xZZ");
         let diag_type = create_diag_coded_type_stl(DataType::ByteField, None);
-        let result = super::json_value_to_uds_data(&diag_type, None, None, &json_value);
+        let result =
+            super::json_value_to_uds_data(&diag_type, None, None, &json_value, BinaryEncoding::Hex);
         assert!(result.is_err());
     }
 
@@ -1258,7 +1328,8 @@ mod tests {
     fn test_long_byte_value() {
         let json_value = serde_json::json!("0100");
         let diag_type = create_diag_coded_type_stl(DataType::ByteField, Some(9));
-        let result = super::json_value_to_uds_data(&diag_type, None, None, &json_value);
+        let result =
+            super::json_value_to_uds_data(&diag_type, None, None, &json_value, BinaryEncoding::Hex);
         assert_eq!(result, Ok(vec![0x01, 0x00]));
     }
 
@@ -1278,11 +1349,23 @@ mod tests {
 
         let int_result = Ok(vec![0x00, 0x00, 0x00, 0x0A]);
         assert_eq!(
-            super::json_value_to_uds_data(&int32_type, None, Some(f32_physical_type), &json_value),
+            super::json_value_to_uds_data(
+                &int32_type,
+                None,
+                Some(f32_physical_type),
+                &json_value,
+                BinaryEncoding::Hex
+            ),
             int_result
         );
         assert_eq!(
-            super::json_value_to_uds_data(&uint32_type, None, Some(f32_physical_type), &json_value),
+            super::json_value_to_uds_data(
+                &uint32_type,
+                None,
+                Some(f32_physical_type),
+                &json_value,
+                BinaryEncoding::Hex
+            ),
             int_result
         );
 
@@ -1291,7 +1374,8 @@ mod tests {
                 &float32_type,
                 None,
                 Some(f32_physical_type),
-                &json_value
+                &json_value,
+                BinaryEncoding::Hex,
             ),
             Ok(vec![65, 38, 184, 82])
         );
@@ -1300,7 +1384,8 @@ mod tests {
                 &float64_type,
                 None,
                 Some(f32_physical_type),
-                &json_value
+                &json_value,
+                BinaryEncoding::Hex,
             ),
             Ok(f64::from(10.42f32).to_be_bytes().to_vec())
         );
@@ -1316,16 +1401,55 @@ mod tests {
         let float32_type = create_diag_coded_type_stl(DataType::Float32, None);
         let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
 
-        assert!(super::json_value_to_uds_data(&int32_type, None, None, &json_value).is_err());
-        assert!(super::json_value_to_uds_data(&uint32_type, None, None, &json_value).is_err());
-        assert!(super::json_value_to_uds_data(&bytefield_type, None, None, &json_value).is_err());
+        assert!(
+            super::json_value_to_uds_data(
+                &int32_type,
+                None,
+                None,
+                &json_value,
+                BinaryEncoding::Hex
+            )
+            .is_err()
+        );
+        assert!(
+            super::json_value_to_uds_data(
+                &uint32_type,
+                None,
+                None,
+                &json_value,
+                BinaryEncoding::Hex
+            )
+            .is_err()
+        );
+        assert!(
+            super::json_value_to_uds_data(
+                &bytefield_type,
+                None,
+                None,
+                &json_value,
+                BinaryEncoding::Hex
+            )
+            .is_err()
+        );
 
         assert_eq!(
-            super::json_value_to_uds_data(&float32_type, None, None, &json_value),
+            super::json_value_to_uds_data(
+                &float32_type,
+                None,
+                None,
+                &json_value,
+                BinaryEncoding::Hex
+            ),
             Ok(vec![65, 38, 184, 82])
         );
         assert_eq!(
-            super::json_value_to_uds_data(&float64_type, None, None, &json_value),
+            super::json_value_to_uds_data(
+                &float64_type,
+                None,
+                None,
+                &json_value,
+                BinaryEncoding::Hex
+            ),
             Ok(vec![64, 36, 215, 10, 61, 112, 163, 215])
         );
     }
@@ -1547,6 +1671,10 @@ mod tests {
             &value,
         );
         assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            cda_interfaces::DiagServiceError::BadPayload(_)
+        ));
     }
 
     #[test]
@@ -1638,6 +1766,24 @@ mod tests {
         let value = "101010";
         let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
         assert_eq!(result, 101_010u32.to_be_bytes().to_vec());
+
+        // over-length hex value must be rejected, not panic
+        let value = "0x0102030405";
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type);
+        assert!(matches!(
+            result,
+            Err(super::DiagServiceError::ParameterConversionError(_))
+        ));
+
+        // leading zero bytes do not count towards the length
+        let value = "0x00000000FFFFFFFF";
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
+        assert_eq!(result, u32::MAX.to_be_bytes().to_vec());
+
+        // all-zero over-length value
+        let value = "0x0000000000";
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
+        assert_eq!(result, 0u32.to_be_bytes().to_vec());
     }
 
     #[test]
@@ -2295,6 +2441,82 @@ mod tests {
         );
     }
 
+    // A parameter without byte position following a leading length parameter
+    // must start after the length field and the data of its predecessor.
+    #[test]
+    fn test_leading_length_advances_past_length_field() {
+        let dct = DiagCodedType::new(
+            DataType::ByteField,
+            DiagCodedTypeVariant::LeadingLengthInfo(16),
+            true,
+        )
+        .unwrap();
+        // first: length 2 + [0xaa, 0xbb], second: length 0, third: length 1 + [0xcc]
+        let data = [0x00, 0x02, 0xAA, 0xBB, 0x00, 0x00, 0x00, 0x01, 0xCC];
+        let mut payload = Payload::new(&data);
+
+        let mut decoded = Vec::new();
+        let mut byte_pos = 0;
+        for _ in 0..3 {
+            let res = extract_diag_data_container(
+                Some("test_param"),
+                byte_pos,
+                0,
+                &mut payload,
+                &dct,
+                None,
+                None,
+            )
+            .unwrap();
+            let crate::DiagDataTypeContainer::RawContainer(raw) = res else {
+                panic!("Expected raw container");
+            };
+            decoded.push(raw.data);
+            byte_pos = payload.last_read_byte_pos();
+        }
+        assert_eq!(decoded, vec![vec![0xAA, 0xBB], vec![], vec![0xCC]]);
+        assert_eq!(byte_pos, data.len());
+    }
+
+    // A leading length of zero is valid and yields no data, but the length
+    // field itself is mandatory: a payload ending before it is an error.
+    #[test]
+    fn test_leading_length_missing_length_field_is_error() {
+        let dct = DiagCodedType::new(
+            DataType::ByteField,
+            DiagCodedTypeVariant::LeadingLengthInfo(16),
+            true,
+        )
+        .unwrap();
+        for data in [&[0x69u8, 0x07][..], &[0x69, 0x07, 0x00][..]] {
+            let mut payload = Payload::new(data);
+            let res = extract_diag_data_container(
+                Some("test_param"),
+                2,
+                0,
+                &mut payload,
+                &dct,
+                None,
+                None,
+            );
+            assert!(
+                matches!(res, Err(cda_interfaces::DiagServiceError::BadPayload(_))),
+                "Expected a missing leading length field to be rejected, got {res:?}"
+            );
+        }
+
+        let data = [0x69, 0x07, 0x00, 0x00];
+        let mut payload = Payload::new(&data);
+        let res =
+            extract_diag_data_container(Some("test_param"), 2, 0, &mut payload, &dct, None, None)
+                .unwrap();
+        let crate::DiagDataTypeContainer::RawContainer(raw) = res else {
+            panic!("Expected raw container");
+        };
+        assert_eq!(raw.data, [] as [u8; 0]);
+        assert_eq!(payload.last_read_byte_pos(), data.len());
+    }
+
     // This test reproduces a response that contains only the RoutineControl header. The
     // required status record is missing, so decoding must fail.
     #[test]
@@ -2343,7 +2565,14 @@ mod tests {
         // Numeric JSON value 99999 is correctly rejected (bit-length check fires)
         let json_numeric = serde_json::json!(99999);
         assert!(
-            super::json_value_to_uds_data(&uint32_8bit, None, None, &json_numeric).is_err(),
+            super::json_value_to_uds_data(
+                &uint32_8bit,
+                None,
+                None,
+                &json_numeric,
+                BinaryEncoding::Hex
+            )
+            .is_err(),
             "Numeric 99999 should be rejected for 8-bit UInt32"
         );
 
@@ -2352,8 +2581,14 @@ mod tests {
         // without bit-length validation.
         let json_string = serde_json::json!("99999");
         assert!(
-            super::json_value_to_uds_data(&uint32_8bit, None, u32_physical_type, &json_string)
-                .is_err(),
+            super::json_value_to_uds_data(
+                &uint32_8bit,
+                None,
+                u32_physical_type,
+                &json_string,
+                BinaryEncoding::Hex
+            )
+            .is_err(),
             "String '99999' should be rejected for 8-bit UInt32, but bit-length validation is \
              skipped"
         );

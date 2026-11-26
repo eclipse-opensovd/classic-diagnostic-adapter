@@ -26,12 +26,12 @@ jobs:
     name: FlatBuffers Backward Compatibility
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.1.0
         with:
           fetch-depth: 0
 
       - name: Install flatc v25.9.23
-        uses: Nugine/setup-flatc@v1
+        uses: Nugine/setup-flatc@v1.2.5
         with:
           version: "25.9.23"
 
@@ -46,12 +46,12 @@ jobs:
     name: Protobuf Backward Compatibility
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.1.0
         with:
           fetch-depth: 0
 
       - name: Check Protobuf schema backward compatibility
-        uses: bufbuild/buf-action@v1
+        uses: bufbuild/buf-action@v1.7.0
         with:
           input: cda-database/proto
           breaking_against: '.git#branch=origin/main,subdir=cda-database/proto'

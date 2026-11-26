@@ -18,6 +18,7 @@ use strum_macros::Display;
 use crate::{
     DiagComm, DiagServiceError, DoipComParams, DynamicPlugin, EcuSchemas, HashMap,
     HashMapExtensions, HashSet, SecurityAccess, UDS_ID_RESPONSE_BITMASK, UdsComParams,
+    authentication::{AuthenticationState, AuthenticationSubFunction},
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
         ComponentOperationsInfo, DtcLookup, DtcReadInformationFunction, RoutineSubfunctions, SdSdg,
@@ -136,8 +137,21 @@ pub struct MuxCaseInfo {
 pub enum Connectivity {
     /// ECU responded to the last communication attempt.
     Online,
+    /// ECU was registered from a persisted topology with a last known state of
+    /// Online, but has not been contacted in the current session yet. Reported
+    /// as Online externally.
+    AssumedOnline,
     /// ECU is currently unreachable (never connected, or lost connection).
     Offline,
+}
+
+impl Connectivity {
+    /// Returns `true` for [`Online`](Self::Online) and
+    /// [`AssumedOnline`](Self::AssumedOnline).
+    #[must_use]
+    pub fn is_online(self) -> bool {
+        matches!(self, Self::Online | Self::AssumedOnline)
+    }
 }
 
 /// ECU variant detection result.
@@ -226,11 +240,31 @@ impl EcuState {
         self.variant_state.is_fallback()
     }
 
-    /// Returns `true` if the ECU is online with a successfully detected variant.
+    /// Returns `true` if the ECU is (assumed) online with a successfully detected
+    /// variant.
     #[must_use]
     pub fn is_online_and_detected(&self) -> bool {
-        self.connectivity == Connectivity::Online
-            && matches!(self.variant_state, VariantState::Detected { .. })
+        self.connectivity.is_online() && matches!(self.variant_state, VariantState::Detected { .. })
+    }
+
+    /// Marks the ECU as unreachable by setting its connectivity to
+    /// [`Offline`](Connectivity::Offline).
+    ///
+    /// An ECU that was online in the current session keeps its variant and is
+    /// thus reported as Disconnected. An [`AssumedOnline`](Connectivity::AssumedOnline)
+    /// ECU was never confirmed in the current session: its restored variant is
+    /// discarded, so it is reported as Offline and detected again once reachable.
+    ///
+    /// Returns `true` if the variant state was reset and must be published.
+    /// [[ dimpl~ecu-state-assumed-online-unreachable, An unreachable assumed online ECU becomes Offline and loses its restored variant, dimpl ]]
+    pub fn mark_unreachable(&mut self) -> bool {
+        let was_assumed_online = self.connectivity == Connectivity::AssumedOnline;
+        self.connectivity = Connectivity::Offline;
+        if was_assumed_online {
+            self.variant_state = VariantState::NotTested;
+            self.variant_index = None;
+        }
+        was_assumed_online
     }
 }
 
@@ -258,10 +292,42 @@ pub struct EcuRuntimeState {
     pub ecu_state: std::sync::Arc<std::sync::RwLock<EcuState>>,
     /// Active service states keyed by SID (0x10 = session, 0x27 = security, etc.).
     pub service_states: std::sync::Arc<std::sync::RwLock<HashMap<u8, String>>>,
+    /// Authentication state (SID 0x29), tracked separately because it is
+    /// independent of session and security access (ISO 14229-1 clause 10.6.4).
+    pub authentication: std::sync::Arc<std::sync::RwLock<AuthenticationState>>,
     /// Publishes every write to `ecu_state.variant_state`, so callers can await
     /// variant detection's conclusion instead of polling. `Arc`-wrapped so that
     /// cloning `EcuRuntimeState` shares one channel, like `ecu_state` itself.
     variant_state_tx: std::sync::Arc<tokio::sync::watch::Sender<VariantState>>,
+    /// Time of the last reply of the ECU. See [`LastSeen`].
+    last_seen: std::sync::Arc<std::sync::Mutex<LastSeen>>,
+}
+
+/// Time of the last reply of the ECU.
+///
+/// The newest write always wins, even if it is older than the previous value:
+/// vehicle clocks are often wrong at boot and corrected later, so keeping the
+/// maximum would pin a bogus future timestamp forever.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LastSeen {
+    /// The timestamp, `None` if the ECU was never contacted.
+    at: Option<std::time::SystemTime>,
+    /// Set on contact, cleared once the value has been persisted.
+    dirty: bool,
+}
+
+impl LastSeen {
+    /// The timestamp, `None` if the ECU was never contacted.
+    #[must_use]
+    pub fn at(&self) -> Option<std::time::SystemTime> {
+        self.at
+    }
+
+    /// `true` if the value has not been persisted yet.
+    #[must_use]
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
 }
 
 impl EcuRuntimeState {
@@ -272,7 +338,50 @@ impl EcuRuntimeState {
         Self {
             ecu_state: std::sync::Arc::new(std::sync::RwLock::new(EcuState::default())),
             service_states: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
+            authentication: std::sync::Arc::new(std::sync::RwLock::new(
+                AuthenticationState::default(),
+            )),
             variant_state_tx: std::sync::Arc::new(variant_state_tx),
+            last_seen: std::sync::Arc::new(std::sync::Mutex::new(LastSeen::default())),
+        }
+    }
+
+    /// Records a reply of the ECU now.
+    pub fn update_last_seen(&self) {
+        let mut last_seen = std_ext::lock_mutex(&self.last_seen);
+        last_seen.at = Some(std::time::SystemTime::now());
+        last_seen.dirty = true;
+    }
+
+    /// Restores a persisted timestamp. The value is not marked dirty, since it
+    /// is already persisted.
+    pub fn restore_last_seen(&self, at: std::time::SystemTime) {
+        let mut last_seen = std_ext::lock_mutex(&self.last_seen);
+        last_seen.at = Some(at);
+        last_seen.dirty = false;
+    }
+
+    /// Returns the time of the last reply of the ECU.
+    #[must_use]
+    pub fn last_seen(&self) -> Option<std::time::SystemTime> {
+        std_ext::lock_mutex(&self.last_seen).at
+    }
+
+    /// Snapshots the timestamp and its dirty flag without acknowledging it.
+    #[must_use]
+    pub fn last_seen_snapshot(&self) -> LastSeen {
+        *std_ext::lock_mutex(&self.last_seen)
+    }
+
+    /// Acknowledges the saved timestamp. A contact during storage that changed
+    /// the timestamp remains dirty.
+    ///
+    /// Known limitation: a newer contact that stores the exact same
+    /// `SystemTime` as `saved` is treated as persisted.
+    pub fn mark_last_seen_persisted(&self, saved: LastSeen) {
+        let mut last_seen = std_ext::lock_mutex(&self.last_seen);
+        if last_seen.at == saved.at {
+            last_seen.dirty = false;
         }
     }
 
@@ -404,6 +513,8 @@ impl ServicePayload {
     /// - `InputOutputControlByIdentifier` (0x2F): 2-byte `dataIdentifier` echo (Table 401)
     /// - `RoutineControl` (0x31): 1-byte `routineControlType` (bits 6-0 of `SubFunction`,
     ///   suppress-positive-response bit masked out) + 2-byte `routineIdentifier` (Table 428)
+    /// - `Authentication` (0x29): 1-byte `authenticationTask` (bits 6-0 of `SubFunction`,
+    ///   suppress-positive-response bit masked out)
     ///
     /// Returns `true` if:
     /// - The service does not require echo validation (no echo bytes defined), or
@@ -435,10 +546,10 @@ impl ServicePayload {
             return false; // Response too short to contain expected echo bytes.
         };
 
-        // For RoutineControl, the subfunction byte (index 1 of the request) may have the
-        // suppress-positive-response bit (0x80) set; the response never includes this bit.
-        // We mask it out for comparison.
-        if sent_sid == service_ids::ROUTINE_CONTROL {
+        // For RoutineControl and Authentication, the subfunction byte (index 1 of the
+        // request) may have the suppress-positive-response bit (0x80) set; the response
+        // never includes this bit. We mask it out for comparison.
+        if sent_sid == service_ids::ROUTINE_CONTROL || sent_sid == service_ids::AUTHENTICATION {
             let request_subfn =
                 request_echo.first().copied().unwrap_or(0) & crate::DEFAULT_SUBFUNCTION_MASK;
             let response_subfn = response_echo.first().copied().unwrap_or(0);
@@ -468,6 +579,9 @@ impl ServicePayload {
             | service_ids::INPUT_OUTPUT_CONTROL_BY_IDENTIFIER => 2,
             // RoutineControl: 1-byte subfunction + 2-byte RoutineIdentifier
             service_ids::ROUTINE_CONTROL => 3,
+            // Authentication: 1-byte authenticationTask (sub-function, Table 75 ff.)
+            // TransferData: 1-byte blockSequenceCounter (ISO 14229-1 clause 14.5)
+            service_ids::AUTHENTICATION | service_ids::TRANSFER_DATA => 1,
             _ => 0,
         }
     }
@@ -683,6 +797,12 @@ pub trait EcuStateManager: Send + Sync + 'static {
     /// # Errors
     /// Will return `DiagServiceError` if the default states cannot be resolved from the database.
     fn set_default_states(&self) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
+
+    /// Returns the tracked authentication state (SID 0x29).
+    fn authentication_state(&self) -> AuthenticationState;
+
+    /// Replaces the tracked authentication state (SID 0x29).
+    fn set_authentication_state(&self, state: AuthenticationState);
 }
 
 /// Validates security access and service preconditions.
@@ -722,6 +842,46 @@ pub trait EcuSecurity: Send + Sync + 'static {
         service: &DiagComm,
         security_plugin: &DynamicPlugin,
     ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
+
+    /// Authorizes a fully resolved UDS request immediately before transmission.
+    ///
+    /// Unlike [`Self::is_service_allowed`], which validates the MDD service definition,
+    /// this runs at the transport boundary on the final request bytes. The default
+    /// implementation allows every request.
+    ///
+    /// # Errors
+    /// Returns [`DiagServiceError::RequestNotAllowed`] when the request must not be sent.
+    fn validate_request_send(
+        &self,
+        _security_plugin: &DynamicPlugin,
+        _context: &crate::request_authorization::UdsRequestSendContext<'_>,
+    ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
+        std::future::ready(Ok(()))
+    }
+
+    /// Looks up the Authentication (SID 0x29) service of the current variant whose
+    /// request contains the given sub-function as coded constant.
+    /// # Errors
+    /// * `DiagServiceError::NotFound` if no such service exists.
+    fn lookup_authentication_service(
+        &self,
+        sub_function: AuthenticationSubFunction,
+    ) -> Result<DiagComm, DiagServiceError>;
+
+    /// Extracts the `authenticationReturnParameter` from a raw positive response of the
+    /// Authentication service for `sub_function`. `raw_response` is the payload as returned
+    /// by `DiagServiceResponse::get_raw`, which starts at the first DATA parameter. The parameter is located via the positive response
+    /// of the service in the diagnostic description: it is the first value parameter
+    /// following the response SID and sub-function.
+    /// Returns `None` if the description defines no such parameter.
+    /// # Errors
+    /// Returns `DiagServiceError` if the service cannot be found or the value
+    /// cannot be decoded from the payload.
+    fn authentication_return_value(
+        &self,
+        sub_function: AuthenticationSubFunction,
+        raw_response: &[u8],
+    ) -> Result<Option<u64>, DiagServiceError>;
 }
 
 /// Provides component metadata: data identifiers, routines, configurations, and jobs.
@@ -882,20 +1042,56 @@ pub trait VariantDetection: Send + Sync + 'static {
     /// Mark this ECU as having no variant detected. Sets the variant state to
     /// [`VariantState::NotDetected`] and unloads the database.
     async fn mark_as_no_variant_detected(&mut self);
+
+    /// Select the base variant without evaluating detection patterns and mark
+    /// the ECU online. Used for ECUs that define no variant detection services
+    /// once an online probe got a response.
+    /// # Errors
+    /// Returns `DiagServiceError` if the database has no base variant.
+    async fn set_base_variant_online(&mut self) -> Result<(), DiagServiceError>;
 }
 
-/// Callback interface for connectivity changes for ECUs behind a `DoIP` gateway.
+/// Outcome of [`EcuConnectivityHandler::on_gateway_connected`].
+///
+/// Both lists use the ECU names exactly as the caller passed them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GatewayConnectReport {
+    /// ECUs this call took from `Offline` to `Online` (the ones to revert).
+    pub brought_online: Vec<String>,
+    /// ECUs that need a variant detection after this connect.
+    pub needs_detection: Vec<String>,
+}
+
+/// Callback interface of the transports: connectivity changes for ECUs behind a
+/// `DoIP` gateway, and replies of ECUs that the transport does not pass on.
+///
+/// Implementations match ECU names case-insensitively, so a transport may pass
+/// a name in any casing, e.g. the one of the database.
 #[async_trait]
 pub trait EcuConnectivityHandler: Send + Sync + 'static {
     /// Called when a `DoIP` gateway connection is established or re-established.
     ///
     /// Notifies for all ECUs behind (and including) the gateway.
-    async fn on_gateway_connected(&self, ecu_names: &[String]);
+    ///
+    /// Only changes the connectivity state; it does not request a variant
+    /// detection itself. Requesting detection for
+    /// [`GatewayConnectReport::needs_detection`] is the job of the caller.
+    /// Both lists of the report use the names exactly as passed in
+    /// `ecu_names`.
+    async fn on_gateway_connected(&self, ecu_names: &[String]) -> GatewayConnectReport;
 
     /// Called when a `DoIP` gateway connection is lost.
     ///
     /// Notifies for all ECUs behind (and including) the gateway.
     async fn on_gateway_disconnected(&self, ecu_names: &[String]);
+
+    /// Called when the transport receives a UDS frame of the ECU that it does
+    /// not pass on as the answer to a request, e.g. a frame with another SID
+    /// or a tester present NRC. The frame still counts as a reply of the ECU.
+    ///
+    /// Called from the transport's receive path; implementations must return
+    /// promptly and must not wait on requests to the ECU.
+    async fn on_ecu_replied(&self, ecu_name: &str);
 }
 
 /// Resolves `DiagComm` handles from the database by various search criteria.
@@ -1065,6 +1261,65 @@ mod tests {
             ServicePayload::echo_byte_count(service_ids::ROUTINE_CONTROL),
             3
         );
+    }
+
+    #[test]
+    fn echo_byte_count_authentication() {
+        assert_eq!(
+            ServicePayload::echo_byte_count(service_ids::AUTHENTICATION),
+            1
+        );
+    }
+
+    #[test]
+    fn authentication_matching_sub_function_returns_true() {
+        let request = vec![0x29, 0x07, 0x00];
+        let response = make_payload(vec![0x69, 0x07, 0x12]);
+        assert!(response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn authentication_mismatched_sub_function_returns_false() {
+        // deAuthenticate request answered with a verifyProofOfOwnershipBidirectional response
+        let request = vec![0x29, 0x00];
+        let response = make_payload(vec![0x69, 0x07, 0x12]);
+        assert!(!response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn authentication_suppress_bit_is_masked() {
+        let request = vec![0x29, 0x88];
+        let response = make_payload(vec![0x69, 0x08, 0x02]);
+        assert!(response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn transfer_data_matching_block_sequence_counter_returns_true() {
+        let request = vec![0x36, 0x05, 0xAA, 0xBB];
+        let response = make_payload(vec![0x76, 0x05]);
+        assert!(response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn transfer_data_mismatched_block_sequence_counter_returns_false() {
+        // late answer to the previous block
+        let request = vec![0x36, 0x05, 0xAA, 0xBB];
+        let response = make_payload(vec![0x76, 0x04]);
+        assert!(!response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn transfer_data_missing_block_sequence_counter_returns_false() {
+        let request = vec![0x36, 0x05, 0xAA];
+        let response = make_payload(vec![0x76]);
+        assert!(!response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn transfer_data_negative_response_is_not_echo_checked() {
+        let request = vec![0x36, 0x05, 0xAA];
+        let response = make_payload(vec![0x7F, 0x36, 0x71]);
+        assert!(response.has_matching_echo_bytes(&request));
     }
 
     #[test]
@@ -1413,5 +1668,52 @@ mod tests {
             ),
             request_lock_key_for(true, 0x1000, 0x0712, None, "ecu1")
         );
+    }
+}
+
+#[cfg(test)]
+mod last_seen_tests {
+    use std::time::{Duration, SystemTime};
+
+    use super::EcuRuntimeState;
+
+    /// [[ test~ecu-last-seen, `last_seen` keeps the newest write and tracks persistence, test ]]
+    #[test]
+    fn last_seen_newest_write_wins_and_tracks_dirty() {
+        let state = EcuRuntimeState::new();
+        assert_eq!(state.last_seen(), None);
+        assert!(!state.last_seen_snapshot().is_dirty());
+
+        // A restored value is already persisted.
+        let future = SystemTime::now()
+            .checked_add(Duration::from_secs(3600))
+            .unwrap();
+        state.restore_last_seen(future);
+        assert_eq!(state.last_seen(), Some(future));
+        assert!(!state.last_seen_snapshot().is_dirty());
+
+        // A contact after a clock correction replaces the (future) value.
+        state.update_last_seen();
+        let touched = state.last_seen().unwrap();
+        assert!(touched < future);
+        let saved = state.last_seen_snapshot();
+        assert_eq!(saved.at(), Some(touched));
+        assert!(saved.is_dirty());
+        state.mark_last_seen_persisted(saved);
+        assert!(!state.last_seen_snapshot().is_dirty());
+
+        // A newer contact with a different timestamp is not acknowledged by the older save.
+        {
+            let mut last_seen = state.last_seen.lock().unwrap();
+            last_seen.at = Some(touched + Duration::from_secs(1));
+            last_seen.dirty = true;
+        }
+        state.mark_last_seen_persisted(saved);
+        assert!(
+            state.last_seen_snapshot().is_dirty(),
+            "a newer contact is not acknowledged"
+        );
+        state.mark_last_seen_persisted(state.last_seen_snapshot());
+        assert!(!state.last_seen_snapshot().is_dirty());
     }
 }

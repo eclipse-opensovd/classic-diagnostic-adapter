@@ -21,8 +21,11 @@ use axum::{
 use cda_comm_doip::DoipGatewaySetupError;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
-    communication_control::CommunicationAccess, datatypes::ComponentsConfig, dlt_ctx,
-    file_manager::FileManager, http_protection::registry::HttpRouteMatcher,
+    communication_control::{CommunicationAccess, DoipConnect},
+    datatypes::ComponentsConfig,
+    dlt_ctx,
+    file_manager::FileManager,
+    http_protection::registry::HttpRouteMatcher,
 };
 use cda_plugin_security::SecurityPluginLoader;
 use dynamic_router::DynamicRouter;
@@ -30,6 +33,7 @@ pub use dynamic_router::{RouteGroupNotFound, RouteHandle};
 pub use http::Method;
 use opensovd_axum_extra::ExtractHost;
 use sovd::apps::sovd2uds::bulk_data::runtimefiles::RuntimeUpdateRouteState;
+pub use sovd_interfaces::version_info;
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixListener;
@@ -39,7 +43,7 @@ use tower_http::{normalize_path::NormalizePathLayer, trace::TraceLayer};
 /// Public API surface re-exported from the crate-internal `sovd` module.
 pub use crate::sovd::{
     SovdLockStateProvider, error::VendorErrorCode, locks::Locks,
-    request_guard::install_http_restriction_guard, static_data::add_static_data_endpoint,
+    request_guard::install_http_restriction_guard,
 };
 pub mod dynamic_router;
 mod openapi;
@@ -59,6 +63,8 @@ pub enum WebServerConfig {
 /// Static configuration for vehicle SOVD routes.
 pub struct VehicleConfig {
     pub flash_files_path: String,
+    /// Default functional class used to resolve the flash services 0x34, 0x36 and 0x37.
+    pub flash_functional_class_default: String,
     pub functional_group_config: FunctionalDescriptionConfig,
     pub components_config: ComponentsConfig,
 }
@@ -70,6 +76,9 @@ pub struct VehicleResources<T, M> {
     pub locks: Arc<Locks>,
     /// Access-only view used to admit diagnostic communication activities.
     pub communication_access: Arc<dyn CommunicationAccess>,
+    /// Connect-only view of the transport, for connecting an ECU directly to an IP.
+    /// `None` disables the `doip-connect-ecu` operation.
+    pub doip_connect: Option<Arc<dyn DoipConnect>>,
 }
 
 /// [[ dimpl~sovd-api-http-server, Starts HTTP Server (TCP or Unix domain socket) ]]
@@ -86,6 +95,7 @@ pub struct VehicleResources<T, M> {
 #[tracing::instrument(skip(config, shutdown_signal))]
 pub async fn launch_webserver<F>(
     config: WebServerConfig,
+    binary_encoding: cda_interfaces::BinaryEncoding,
     shutdown_signal: F,
 ) -> Result<(DynamicRouter, tokio::task::JoinHandle<()>), DoipGatewaySetupError>
 where
@@ -103,7 +113,15 @@ where
 
     let middleware = tower::util::MapRequestLayer::new(rewrite_request_uri);
     let trim_trailing_slash_middleware = NormalizePathLayer::trim_trailing_slash();
-    let service_with_middleware = middleware.layer(trim_trailing_slash_middleware.layer(service));
+    // Applied to the top-level service so every route, including routes added
+    // later via the dynamic router, sees the configured binary encoding.
+    let binary_encoding_layer = axum::Extension(sovd::binary_encoding::DefaultBinaryEncoding(
+        binary_encoding,
+    ));
+    let service_with_middleware = middleware.layer(
+        trim_trailing_slash_middleware
+            .layer(binary_encoding_layer.layer(query_config_layer().layer(service))),
+    );
 
     let serve_future: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = match config {
         WebServerConfig::UnixSocket { path: socket_path } => {
@@ -195,8 +213,29 @@ where
     M: FileManager + Send + Sync + 'static,
     S: SecurityPluginLoader,
 {
+    #[cfg(feature = "doip-direct-connect")]
+    let doip_connect_enabled = resources.doip_connect.is_some();
     let vehicle_router = build_vehicle_routes::<T, M, S>(config, resources).await;
 
+    dynamic_router
+        .register_bulk_data_category(sovd::apps::sovd2uds::bulk_data::FLASHFILES_PATH)
+        .await;
+    #[cfg(feature = "doip-direct-connect")]
+    if doip_connect_enabled {
+        dynamic_router
+            .register_operation(
+                sovd::apps::sovd2uds::operations::doip_connect_ecu::PATH,
+                false,
+            )
+            .await;
+    }
+
+    dynamic_router
+        .register_data_resource(
+            sovd::apps::sovd2uds::data::NETWORKSTRUCTURE_PATH,
+            sovd::apps::sovd2uds::data::NETWORKSTRUCTURE_CATEGORY,
+        )
+        .await;
     let handle = dynamic_router.add_routes(vehicle_router).await;
 
     tracing::info!("Vehicle routes added to webserver");
@@ -220,10 +259,14 @@ where
         config.functional_group_config,
         config.components_config,
         &resources.ecu_uds,
-        config.flash_files_path,
+        sovd::FlashConfig {
+            files_path: config.flash_files_path,
+            functional_class_default: config.flash_functional_class_default,
+        },
         resources.file_managers,
         resources.locks,
         resources.communication_access,
+        resources.doip_connect,
     )
     .await
 }
@@ -256,6 +299,15 @@ where
         sovd::apps::sovd2uds::operations::runtimefilesupdate::routes::<S, P, L>(route_state);
     let router = bulk_data_router.merge(operations_router);
     let handle = dynamic_router.add_routes(router.into()).await;
+    for path in sovd::apps::sovd2uds::bulk_data::runtimefiles::CATEGORY_PATHS {
+        dynamic_router.register_bulk_data_category(path).await;
+    }
+    dynamic_router
+        .register_operation(
+            sovd::apps::sovd2uds::operations::runtimefilesupdate::PATH,
+            true,
+        )
+        .await;
     tracing::info!("Runtime update routes added to webserver");
     handle
 }
@@ -264,6 +316,85 @@ where
 #[must_use]
 pub fn routes_accessible_during_update() -> Vec<HttpRouteMatcher> {
     sovd::apps::sovd2uds::operations::runtimefilesupdate::routes_accessible_during_update()
+}
+
+/// SOVD API version served under `/vehicle/v15`.
+pub const SOVD_API_VERSION: &str = "1.1.0";
+
+/// Registers version endpoints using consistent implementation and API version information.
+pub struct VersionRegistrar {
+    vendor_name: String,
+    implementation_version: String,
+    commit: String,
+    build_date: String,
+}
+
+impl VersionRegistrar {
+    /// Creates a registrar with the server implementation's version and build information.
+    #[must_use]
+    pub fn new(
+        vendor_name: &str,
+        implementation_version: &str,
+        commit: &str,
+        build_date: &str,
+    ) -> Self {
+        Self {
+            vendor_name: vendor_name.to_owned(),
+            implementation_version: implementation_version.to_owned(),
+            commit: commit.to_owned(),
+            build_date: build_date.to_owned(),
+        }
+    }
+
+    /// Registers the standard `/version-info` endpoint.
+    pub async fn register_version_info(&self, dynamic_router: &DynamicRouter) {
+        const BASE_URI: &str = "/vehicle/v15";
+
+        let version_info = version_info::VersionInfo {
+            sovd_info: vec![version_info::SovdInfo {
+                version: SOVD_API_VERSION.to_owned(),
+                base_uri: BASE_URI.to_owned(),
+                vendor_info: version_info::VendorInfo {
+                    name: self.vendor_name.clone(),
+                    version: self.implementation_version.clone(),
+                    commit: self.commit.clone(),
+                    build_date: self.build_date.clone(),
+                },
+            }],
+            schema: Some(sovd::create_schema!(version_info::VersionInfo)),
+        };
+        sovd::static_data::add_static_data_endpoint(
+            dynamic_router,
+            version_info,
+            "/version-info",
+            "identData",
+        )
+        .await;
+    }
+
+    /// Registers a vendor-specific version data endpoint at `path`.
+    ///
+    /// Custom paths must be configured separately if they should remain accessible during
+    /// global HTTP protections such as runtime updates.
+    pub async fn register_data(&self, dynamic_router: &DynamicRouter, path: &str) {
+        let version = version_info::DataVersion {
+            id: "version".to_owned(),
+            data: version_info::VersionData {
+                name: self.vendor_name.clone(),
+                api: version_info::ApiVersion {
+                    version: SOVD_API_VERSION.to_owned(),
+                },
+                implementation: version_info::ImplementationVersion {
+                    version: self.implementation_version.clone(),
+                    commit: self.commit.clone(),
+                    build_date: self.build_date.clone(),
+                },
+            },
+            schema: Some(sovd::create_schema!(version_info::DataVersion)),
+        };
+        sovd::static_data::add_static_data_endpoint(dynamic_router, version, path, "identData")
+            .await;
+    }
 }
 
 /// `OpenAPI` spec regenerates on every recomposition, reflecting current routes.
@@ -301,6 +432,17 @@ pub async fn add_openapi_routes(dynamic_router: &DynamicRouter) {
                 .route(OPENAPI_JSON_ROUTE, openapi_route)
         }))
         .await;
+}
+
+/// Configures the `QsQuery` extractor for all routes.
+/// Form encoding percent-decodes keys before parsing nested keys, so
+/// `status%5BconfirmedDtc%5D=1` (as sent by most HTTP clients) is handled like
+/// `status[confirmedDtc]=1`. Without it, encoded brackets stay part of the key.
+fn query_config_layer() -> axum::Extension<serde_qs::axum::QsQueryConfig> {
+    axum::Extension(
+        serde_qs::axum::QsQueryConfig::new()
+            .config(serde_qs::Config::new().use_form_encoding(true)),
+    )
 }
 
 fn rewrite_request_uri<B>(mut req: Request<B>) -> Request<B> {
@@ -472,6 +614,14 @@ mod uri_rewrite_tests {
         assert!(query.suppress_service);
         assert!(delete_query.suppress_service);
     }
+
+    #[tokio::test]
+    async fn rewrite_request_uri_preserves_version_segment() {
+        let uri = rewrite_uri("/Vehicle/V1/components/ECU?include-schema=true").await;
+
+        assert_eq!(uri.path(), "/vehicle/v1/components/ecu");
+        assert_eq!(uri.query(), Some("include-schema=true"));
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -554,10 +704,43 @@ mod webserver_bind_tests {
         let (_dir, socket_path, config) = temp_socket_config();
         let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
-        let (_dynamic_router, webserver_task) = launch_webserver(config, shutdown_signal)
-            .await
-            .expect("failed to launch webserver on unix socket");
+        let (_dynamic_router, webserver_task) = launch_webserver(
+            config,
+            cda_interfaces::BinaryEncoding::default(),
+            shutdown_signal,
+        )
+        .await
+        .expect("failed to launch webserver on unix socket");
 
+        assert_reachable_then_shutdown(&socket_path, shutdown_tx, webserver_task).await;
+    }
+
+    #[tokio::test]
+    async fn launch_webserver_does_not_alias_version_segments() {
+        let (_dir, socket_path, config) = temp_socket_config();
+        let (shutdown_tx, shutdown_signal) = shutdown_channel();
+        let (dynamic_router, webserver_task) = launch_webserver(
+            config,
+            cda_interfaces::BinaryEncoding::default(),
+            shutdown_signal,
+        )
+        .await
+        .expect("failed to launch webserver on unix socket");
+        dynamic_router
+            .add_routes(aide::axum::ApiRouter::new().route(
+                "/vehicle/v15/example",
+                aide::axum::routing::get(|| async { http::StatusCode::OK }),
+            ))
+            .await;
+
+        assert_eq!(
+            get_over_unix_socket(&socket_path, "/vehicle/v15/example").await,
+            http::StatusCode::OK
+        );
+        assert_eq!(
+            get_over_unix_socket(&socket_path, "/vehicle/v1/example").await,
+            http::StatusCode::NOT_FOUND
+        );
         assert_reachable_then_shutdown(&socket_path, shutdown_tx, webserver_task).await;
     }
 
@@ -576,9 +759,13 @@ mod webserver_bind_tests {
         };
         let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
-        let (_dynamic_router, webserver_task) = launch_webserver(config, shutdown_signal)
-            .await
-            .expect("failed to launch webserver on tcp");
+        let (_dynamic_router, webserver_task) = launch_webserver(
+            config,
+            cda_interfaces::BinaryEncoding::default(),
+            shutdown_signal,
+        )
+        .await
+        .expect("failed to launch webserver on tcp");
 
         let client = reqwest::Client::new();
         let response = client
@@ -605,9 +792,13 @@ mod webserver_bind_tests {
 
         let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
-        let (_dynamic_router, webserver_task) = launch_webserver(config, shutdown_signal)
-            .await
-            .expect("failed to launch webserver despite stale socket file");
+        let (_dynamic_router, webserver_task) = launch_webserver(
+            config,
+            cda_interfaces::BinaryEncoding::default(),
+            shutdown_signal,
+        )
+        .await
+        .expect("failed to launch webserver despite stale socket file");
 
         assert_reachable_then_shutdown(&socket_path, shutdown_tx, webserver_task).await;
     }
@@ -622,7 +813,12 @@ mod webserver_bind_tests {
 
         let (_shutdown_tx, shutdown_signal) = shutdown_channel();
 
-        let result = launch_webserver(config, shutdown_signal).await;
+        let result = launch_webserver(
+            config,
+            cda_interfaces::BinaryEncoding::default(),
+            shutdown_signal,
+        )
+        .await;
         assert!(
             result.is_err(),
             "expected launch_webserver to fail when the stale socket path is a directory"
