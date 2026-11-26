@@ -19,13 +19,15 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use cda_interfaces::{
     communication_control::{CommunicationInitMode, CommunicationLifecycle},
-    topology::{DiscoveryStrategy, EcuTopologyStore, TopologyState, physical_gateways},
+    topology::{
+        DiscoveryStrategy, EcuTopologyStore, NetworkReset, TopologyState, physical_gateways,
+    },
 };
 
 use super::{
     TopologyDatabases, TopologyPlugin, TopologyPluginBuilder, TopologyPolicy, TopologySource,
 };
-use crate::{persist::TopologyPersistence, restore};
+use crate::{persist::TopologyPersistence, reset::TopologyReset, restore};
 
 /// Logical addresses of the physical gateways in the databases.
 async fn physical_db_gateways(databases: &dyn TopologyDatabases) -> Vec<u16> {
@@ -173,6 +175,26 @@ impl TopologyPlugin for DefaultTopologyPlugin {
         );
         self.persistence.set(Arc::clone(&persistence)).ok()?;
         Some(persistence)
+    }
+
+    fn reset_handle(&self, source: Arc<dyn TopologySource>) -> Arc<dyn NetworkReset> {
+        if self.is_enabled() && self.persistence.get().is_none() {
+            // Without the persist task, the reset neither runs its clear with that
+            // task nor waits for the rediscovered topology to be written; the
+            // lifecycle hook must be created first.
+            tracing::warn!(
+                "Network reset handle created before the topology lifecycle hook; a networkreset \
+                 is not coordinated with the topology persistence"
+            );
+        }
+        Arc::new(TopologyReset {
+            store: Arc::clone(&self.store),
+            state: Arc::clone(&self.topology_state),
+            source,
+            persistence: self.persistence.get().cloned(),
+            doip_enabled: self.config.doip_enabled,
+            timeout: self.config.network_reset_rediscovery_timeout,
+        })
     }
 }
 

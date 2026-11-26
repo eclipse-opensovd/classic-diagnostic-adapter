@@ -30,6 +30,7 @@ use cda_interfaces::{
         DetectionPhase, VariantDetectionMode, error::CommControlError,
     },
     dlt_ctx,
+    topology::EcuStateResetScope,
 };
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -1153,7 +1154,8 @@ impl<S: EcuGateway, T: EcuManager> CommunicationVariantDetection for UdsManager<
             DetectionPhase::Activation => true,
             DetectionPhase::Redetection => {
                 // Explicit re-detection: AssumedOnline -> NotTested.
-                self.reset_ecu_states().await;
+                self.reset_ecu_states(EcuStateResetScope::AssumedOnlineOnly)
+                    .await;
                 false
             }
         };

@@ -135,14 +135,28 @@ pub mod common {
         use serde::{Deserialize, Serialize};
 
         /// A single item in an operation IDs collection.
-        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         pub struct OperationIdItem {
             pub id: String,
         }
 
+        /// Response body returned by `POST /executions` of an operation.
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+        pub struct ExecutionCreatedResponse {
+            /// Unique execution identifier assigned by the server.
+            pub id: String,
+        }
+
+        /// Response body returned by `GET /executions` of an operation.
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+        pub struct ExecutionListResponse {
+            /// The identifiers of the executions of the operation.
+            pub items: Vec<OperationIdItem>,
+        }
+
         /// A single item in an operations collection.
         /// Spec Table 169 (`OperationDescription`).
-        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         pub struct OperationCollectionItem {
             /// Trimmed short-name used as the service identifier.
             pub id: String,

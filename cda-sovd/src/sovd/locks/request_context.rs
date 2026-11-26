@@ -31,14 +31,7 @@ fn most_specific_lock<'a>(
     target: &UdsRequestTarget,
     now: SystemTime,
 ) -> Option<&'a ActiveLock> {
-    let is_effective = |lock: &&ActiveLock| {
-        lock.expires_at > now
-            && lock.parent_vehicle_lock_id.as_deref().is_none_or(|parent| {
-                state
-                    .active_by_id(parent)
-                    .is_some_and(|parent| parent.expires_at > now)
-            })
-    };
+    let is_effective = |lock: &&ActiveLock| state.is_effective(lock, now);
     let effective = || state.active().filter(is_effective);
 
     let vehicle = || effective().find(|lock| lock.scope == ScopeKey::Vehicle);

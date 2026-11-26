@@ -30,10 +30,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use axum::{
-    Json,
-    response::{IntoResponse, Response},
-};
+use axum::response::Response;
 use cda_interfaces::http_protection::registry::{
     HttpProtectionReason, HttpRestrictionDenial, HttpRestrictionGuard,
 };
@@ -117,30 +114,30 @@ where
 ///
 /// - [`HttpProtectionReason::UpdateInProgress`] uses the standard SOVD
 ///   [`ErrorCode::UpdateProcessInProgress`] code with no vendor code.
-/// - [`HttpProtectionReason::CommunicationNotReady`] and
-///   [`HttpProtectionReason::Custom`] both use [`ErrorCode::VendorSpecific`]
-///   with [`VendorErrorCode::CommunicationNotReady`], since SOVD defines no
-///   standard code for either. The distinction rides in `denial.message`.
+/// - [`HttpProtectionReason::CommunicationNotReady`],
+///   [`HttpProtectionReason::NetworkResetInProgress`], and
+///   [`HttpProtectionReason::Custom`] use [`ErrorCode::VendorSpecific`] with
+///   [`VendorErrorCode::CommunicationNotReady`], since SOVD defines no standard
+///   code for them. The distinction rides in `denial.message`.
 fn http_restriction_denial_to_sovd_response(denial: HttpRestrictionDenial) -> Response {
     use crate::sovd::error::VendorErrorCode;
 
     let (error_code, vendor_code) = match &denial.reason {
         HttpProtectionReason::UpdateInProgress => (ErrorCode::UpdateProcessInProgress, None),
-        HttpProtectionReason::CommunicationNotReady | HttpProtectionReason::Custom(_) => (
+        HttpProtectionReason::CommunicationNotReady
+        | HttpProtectionReason::NetworkResetInProgress
+        | HttpProtectionReason::Custom(_) => (
             ErrorCode::VendorSpecific,
             Some(VendorErrorCode::CommunicationNotReady),
         ),
     };
 
-    let body = sovd_interfaces::error::ApiErrorResponse {
-        message: denial.message,
+    let response = crate::sovd::error::api_error_response(
+        denial.status,
         error_code,
         vendor_code,
-        parameters: None,
-        error_source: None,
-        schema: None,
-    };
-    let response = (denial.status, Json(body)).into_response();
+        denial.message,
+    );
 
     crate::sovd::with_retry_after(response, denial.retry_after)
 }

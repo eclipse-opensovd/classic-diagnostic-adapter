@@ -345,13 +345,69 @@ pub(crate) async fn insert_test_ecu_lock(locks: &Locks, ecu_name: &str) {
     locks.test_insert_active(lock).await;
 }
 
-#[cfg(feature = "doip-direct-connect")]
+/// Id of the vehicle lock inserted by the vehicle lock test helpers.
+const TEST_VEHICLE_LOCK_ID: &str = "test-vehicle-lock-id";
+
+/// Inserts an exclusive, unexpired vehicle lock of `subject`.
 pub(crate) async fn insert_test_vehicle_lock(locks: &Locks, subject: &str) {
-    let lock = test_lock("test-vehicle-lock-id")
+    insert_test_vehicle_lock_with(
+        locks,
+        subject,
+        true,
+        SystemTime::now()
+            .checked_add(Duration::from_secs(300))
+            .expect("test expiration should be representable"),
+    )
+    .await;
+}
+
+/// Inserts a vehicle lock of `subject` with the given exclusivity and expiration.
+pub(crate) async fn insert_test_vehicle_lock_with(
+    locks: &Locks,
+    subject: &str,
+    exclusive: bool,
+    expires_at: SystemTime,
+) {
+    let lock = test_lock(TEST_VEHICLE_LOCK_ID)
         .owner(subject)
         .vehicle()
+        .exclusive(exclusive)
+        .expires_at(expires_at)
         .build();
     locks.test_insert_active(lock).await;
+}
+
+/// Removes the vehicle lock inserted by [`insert_test_vehicle_lock`].
+pub(crate) async fn remove_test_vehicle_lock(locks: &Locks) {
+    locks
+        .test_mutate_store(|store| {
+            store
+                .state
+                .delete(TEST_VEHICLE_LOCK_ID)
+                .expect("Test vehicle lock should exist");
+        })
+        .await;
+}
+
+/// Preempts the vehicle lock inserted by [`insert_test_vehicle_lock`] with an exclusive
+/// vehicle lock of `new_owner`, so the previous owner's lock becomes defunct (broken).
+pub(crate) async fn break_test_vehicle_lock(locks: &Locks, new_owner: &str) {
+    locks
+        .test_mutate_store(|store| {
+            store
+                .state
+                .commit_replacement(
+                    &[TEST_VEHICLE_LOCK_ID.into()],
+                    test_lock("test-replacement-vehicle-lock-id")
+                        .owner(new_owner)
+                        .vehicle()
+                        .build(),
+                    new_owner,
+                    SystemTime::now(),
+                )
+                .expect("Test vehicle lock replacement should be committed");
+        })
+        .await;
 }
 
 async fn insert_policy_test_lock(locks: &Locks, cleanup_count: Arc<AtomicUsize>) -> String {

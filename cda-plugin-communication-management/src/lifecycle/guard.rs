@@ -66,16 +66,15 @@ impl Drop for ActiveGuard {
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::communication_control::CommunicationState;
-
     use super::*;
+    use crate::lifecycle::state::{EnabledActivity, LifecyclePhase};
 
     /// Each `register` adds exactly one entry and each drop releases exactly
     /// that one, so guards neither collide nor release each other's.
     #[test]
     fn guards_are_tracked_independently_and_release_on_drop() {
         let state = Arc::new(CommunicationStateStore::new(
-            CommunicationState::Enabled,
+            LifecyclePhase::Enabled(EnabledActivity::Idle),
             cda_interfaces::communication_control::VariantDetectionMode::Always,
         ));
         let guards = || state.lock().active_guards.len();

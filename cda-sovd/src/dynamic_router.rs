@@ -539,11 +539,8 @@ mod tests {
         dr.register_data_resource("/vehicle/v15/data/x-vendor-info", "sysInfo")
             .await;
         // Resources of other collections are not listed.
-        dr.register_data_resource(
-            "/vehicle/v15/apps/sovd2uds/data/networkstructure",
-            "sysInfo",
-        )
-        .await;
+        dr.register_data_resource(cda_interfaces::topology::NETWORK_STRUCTURE_ROUTE, "sysInfo")
+            .await;
 
         let resp = dr
             .get_router()

@@ -32,6 +32,7 @@ use cda_plugin_security::{
     DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
 };
 use cda_plugin_topology::TopologyPluginBuilder;
+use cda_plugin_vehicle_topology::VehicleTopologyPluginBuilder;
 use cda_storage::LocalStorage;
 use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
 use clap::{Parser, Subcommand};
@@ -293,9 +294,9 @@ pub async fn run_from_cli() -> Result<(), AppError> {
 ///
 /// # Errors
 /// Returns [`AppError`] if configuration loading, validation, or startup fails.
-pub async fn run_with_ext<SP, SL, UPB, CPB, TPB>(
+pub async fn run_with_ext<SP, SL, UPB, CPB, TPB, VTPB>(
     args: AppArgs,
-    setup: Setup<SP, SL, UPB, CPB, TPB>,
+    setup: Setup<SP, SL, UPB, CPB, TPB, VTPB>,
 ) -> Result<(), AppError>
 where
     SP: SecurityPlugin,
@@ -303,6 +304,7 @@ where
     UPB: UpdatePluginBuilder<SP>,
     CPB: CommunicationPluginBuilder,
     TPB: TopologyPluginBuilder,
+    VTPB: VehicleTopologyPluginBuilder,
 {
     if let Some(Command::GenerateConfig { output }) = args.command.as_ref() {
         // Exiting after generating config is on purpose.
@@ -366,7 +368,7 @@ async fn await_startup_stage<T>(
 /// let config: Configuration = // ... load or construct ...
 /// # todo!();
 ///
-/// run_with_ext_from_config::<MySecurityPlugin, MySecurityLoader, _, _, _>(
+/// run_with_ext_from_config::<MySecurityPlugin, MySecurityLoader, _, _, _, _>(
 ///     config,
 ///     Setup::new().with_update_plugin(update_plugin_fn(|infra| async move {
 ///         Ok(MyPlugin::new(infra))
@@ -376,9 +378,9 @@ async fn await_startup_stage<T>(
 ///
 /// # Errors
 /// Returns [`AppError`] if tracing setup, webserver startup, data loading, or route setup fails.
-pub async fn run_with_ext_from_config<SP, SL, UPB, CPB, TPB>(
+pub async fn run_with_ext_from_config<SP, SL, UPB, CPB, TPB, VTPB>(
     config: Configuration,
-    setup: Setup<SP, SL, UPB, CPB, TPB>,
+    setup: Setup<SP, SL, UPB, CPB, TPB, VTPB>,
 ) -> Result<(), AppError>
 where
     SP: SecurityPlugin,
@@ -386,6 +388,7 @@ where
     UPB: UpdatePluginBuilder<SP>,
     CPB: CommunicationPluginBuilder,
     TPB: TopologyPluginBuilder,
+    VTPB: VehicleTopologyPluginBuilder,
 {
     let tracing_guards = if setup.initialize_tracing {
         setup_tracing(&config)?
@@ -457,7 +460,7 @@ where
     // Retained for the full server lifetime, so its event dispatcher keeps
     // running until explicit shutdown.
     let Some(communication_runtime) = await_startup_stage(
-        setup::setup_runtime_routes::<SP, SL, UPB, CPB>(
+        setup::setup_runtime_routes::<SP, SL, UPB, CPB, VTPB>(
             config,
             vehicle_data,
             &webserver_state,
@@ -466,6 +469,7 @@ where
             storage,
             http_protections,
             Arc::clone(&topology),
+            setup.build_vehicle_topology_plugin,
         ),
         webserver_state.shutdown_signal.clone(),
     )
@@ -508,6 +512,7 @@ pub async fn run(args: AppArgs) -> Result<(), AppError> {
         _,
         _,
         _,
+        _,
     >(
         args,
         Setup::new().with_update_plugin(update_plugin_fn(|infra| async move {
@@ -529,6 +534,7 @@ pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
     Box::pin(run_with_ext_from_config::<
         DefaultSecurityPluginData,
         DefaultSecurityPlugin,
+        _,
         _,
         _,
         _,
@@ -940,6 +946,55 @@ mod webserver_lifecycle_tests {
         // abort() is asynchronous; yield to let the cancellation propagate.
         tokio::task::yield_now().await;
         assert!(abort_handle.is_finished());
+    }
+
+    #[tokio::test]
+    async fn vehicle_topology_builder_failure_aborts_startup() {
+        use cda_plugin_vehicle_topology::{
+            DefaultVehicleTopologyPlugin, vehicle_topology_plugin_fn,
+        };
+
+        let database_dir = tempfile::tempdir().expect("Create empty database directory");
+        let storage_dir = tempfile::tempdir().expect("Create empty storage directory");
+        let mut config = Configuration::default();
+        config.server.transport = crate::config::configfile::ServerTransport::Tcp {
+            address: "127.0.0.1".to_owned(),
+            port: 0,
+            unix_socket: None,
+        };
+        config.doip.tester_address = "127.0.0.1".to_owned();
+        config.database.dir = database_dir.path().to_string_lossy().into_owned();
+        config.database.exit_no_database_loaded = false;
+        config.runtime_update_config.storage_dir =
+            storage_dir.path().to_string_lossy().into_owned();
+
+        let setup = Setup::<DefaultSecurityPluginData, DefaultSecurityPlugin>::new()
+            .with_existing_tracing()
+            .with_shutdown_signal(cda_interfaces::shutdown_signal(std::future::pending()))
+            .with_update_plugin(update_plugin_fn(
+                |infra: setup::CdaRuntime<DefaultSecurityPluginData>| async move {
+                    create_default_update_plugin::<
+                            DefaultSecurityPluginData,
+                            DefaultSecurityPlugin,
+                        >(infra)
+                        .await
+                },
+            ))
+            .with_vehicle_topology_plugin(vehicle_topology_plugin_fn(|_deps| async {
+                Err::<DefaultVehicleTopologyPlugin, _>("vehicle topology construction failed")
+            }));
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            Box::pin(run_with_ext_from_config(config, setup)),
+        )
+        .await
+        .expect("Startup should finish");
+        assert!(matches!(
+            result,
+            Err(AppError::InitializationFailed(message))
+                if message == "vehicle topology construction failed"
+        ));
     }
 
     #[tokio::test]

@@ -34,14 +34,15 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use testcontainers::{
     ContainerAsync, ContainerRequest, GenericBuildableImage, GenericImage, Healthcheck, Image,
     ImageExt, TestcontainersError,
     bollard::{
         container::LogOutput,
+        errors::Error as BollardError,
         models::{HostConfig, PortBinding},
-        query_parameters::LogsOptionsBuilder,
+        query_parameters::{InspectContainerOptions, LogsOptionsBuilder},
     },
     core::{
         AccessMode, BuildImageOptions, IntoContainerPort, Mount, WaitFor,
@@ -549,8 +550,6 @@ pub(crate) async fn start_stopped(
     service: Service,
     owner: ContainerOwner,
 ) -> Result<(), TestcontainersError> {
-    // Taken before starting, so no output of the new run is missed.
-    let since = unix_time_secs();
     let mut started = container.start().await;
     for _ in 1..PORT_CONFLICT_ATTEMPTS {
         match &started {
@@ -559,8 +558,38 @@ pub(crate) async fn start_stopped(
         }
     }
     started?;
+    let since = started_at_secs(container.id()).await?;
     follow_logs_since(container.id().to_owned(), service, owner, since);
     Ok(())
+}
+
+/// The start time of the running container `container_id` in seconds since
+/// the Unix epoch, rounded down.
+///
+/// Docker stamps the logs with the clock of the container host, not with the
+/// test host's, so the start of a log window must come from that clock too.
+/// A stopped container cannot run `date +%s` before its start, and reading it
+/// after the start could miss the first output; the start time Docker records
+/// covers the whole new run.
+///
+/// # Errors
+/// Returns an error if Docker cannot be reached or does not report a valid
+/// start time.
+async fn started_at_secs(container_id: &str) -> Result<i32, TestcontainersError> {
+    let docker = docker_client_instance().await?;
+    let started_at = docker
+        .inspect_container(container_id, None::<InspectContainerOptions>)
+        .await
+        .map_err(TestcontainersError::other)?
+        .state
+        .and_then(|state| state.started_at)
+        .ok_or_else(|| {
+            TestcontainersError::other(format!("Container {container_id} has no start time"))
+        })?;
+    let started_at = started_at
+        .parse::<jiff::Timestamp>()
+        .map_err(TestcontainersError::other)?;
+    i32::try_from(started_at.as_second()).map_err(TestcontainersError::other)
 }
 
 /// Buffers the output of the container `container_id` from `since` (seconds
@@ -574,27 +603,15 @@ pub(crate) async fn start_stopped(
 /// Spawns onto the current runtime.
 fn follow_logs_since(container_id: String, service: Service, owner: ContainerOwner, since: i32) {
     tokio::spawn(async move {
-        let docker = match docker_client_instance().await {
-            Ok(docker) => docker,
+        let mut logs = match log_messages(&container_id, since, true).await {
+            Ok(logs) => logs,
             Err(e) => {
                 eprintln!("Failed to follow the logs of {service} {container_id}: {e}");
                 return;
             }
         };
-        let options = LogsOptionsBuilder::new()
-            .follow(true)
-            .stdout(true)
-            .stderr(true)
-            .since(since)
-            .build();
-        let mut logs = docker.logs(&container_id, Some(options));
-        while let Some(Ok(output)) = logs.next().await {
-            match output {
-                LogOutput::StdErr { message }
-                | LogOutput::StdOut { message }
-                | LogOutput::Console { message } => owner.record(service, &message),
-                LogOutput::StdIn { .. } => {}
-            }
+        while let Some(Ok(message)) = logs.next().await {
+            owner.record(service, message.as_ref());
         }
     });
 }
@@ -608,27 +625,50 @@ pub(crate) async fn container_logs_since(
     container_id: &str,
     since: i32,
 ) -> Result<String, TestingError> {
+    let mut logs = log_messages(container_id, since, false).await?;
+    let mut output = Vec::new();
+    while let Some(message) = logs.next().await {
+        let message = message.map_err(|e| {
+            TestingError::ProcessFailed(format!("Failed to read the logs of {container_id}: {e}"))
+        })?;
+        output.extend_from_slice(message.as_ref());
+    }
+    Ok(String::from_utf8_lossy(&output).into_owned())
+}
+
+/// The standard output, standard error and console messages of the container
+/// `container_id` from `since` (seconds since the Unix epoch) on. With
+/// `follow`, the stream continues until the container stops.
+///
+/// # Errors
+/// Returns [`TestingError::ProcessFailed`] if Docker cannot be reached.
+async fn log_messages(
+    container_id: &str,
+    since: i32,
+    follow: bool,
+) -> Result<impl Stream<Item = Result<impl AsRef<[u8]>, BollardError>> + Unpin, TestingError> {
     let docker = docker_client_instance()
         .await
         .map_err(|e| TestingError::ProcessFailed(format!("Failed to reach Docker: {e}")))?;
     let options = LogsOptionsBuilder::new()
+        .follow(follow)
         .stdout(true)
         .stderr(true)
         .since(since)
         .build();
-    let mut logs = docker.logs(container_id, Some(options));
-    let mut output = Vec::new();
-    while let Some(frame) = logs.next().await {
-        match frame.map_err(|e| {
-            TestingError::ProcessFailed(format!("Failed to read the logs of {container_id}: {e}"))
-        })? {
-            LogOutput::StdErr { message }
-            | LogOutput::StdOut { message }
-            | LogOutput::Console { message } => output.extend_from_slice(&message),
-            LogOutput::StdIn { .. } => {}
-        }
-    }
-    Ok(String::from_utf8_lossy(&output).into_owned())
+    Ok(docker
+        .logs(container_id, Some(options))
+        .filter_map(|output| {
+            std::future::ready(match output {
+                Ok(
+                    LogOutput::StdErr { message }
+                    | LogOutput::StdOut { message }
+                    | LogOutput::Console { message },
+                ) => Some(Ok(message)),
+                Ok(LogOutput::StdIn { .. }) => None,
+                Err(e) => Some(Err(e)),
+            })
+        }))
 }
 
 /// Seconds since the Unix epoch.

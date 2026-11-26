@@ -317,7 +317,7 @@ pub(crate) fn finish_vehicle_components<S: SecurityPlugin>(
         config.faults.clone(),
         request_lock_provider,
         communication_access,
-        Duration::from_secs(config.communication.deferred_retry_after_seconds),
+        config.deferred_retry_after(),
     );
     VehicleComponents {
         uds_manager,
