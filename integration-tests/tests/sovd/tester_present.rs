@@ -24,7 +24,7 @@ use crate::{
             send_cda_request,
         },
         locks::{COMPONENTS_FLXC1000_LOCKS as ECU_LOCK_ENDPOINT, create_lock, lock_operation},
-        test_env::{TestEnv, wait_for_ecu_offline, wait_for_ecus_online},
+        test_env::{TestEnv, Transport, skip_unless, wait_for_ecu_offline, wait_for_ecus_online},
     },
 };
 
@@ -187,6 +187,9 @@ async fn tester_present_sent_after_programming_session_switch() -> Result<(), Te
 /// connection is re-established, which is the bug this test aims to reproduce.
 #[tokio::test]
 async fn tester_present_sent_after_doip_reconnection() -> Result<(), TestingError> {
+    if skip_unless(Transport::uses_doip, "drops the DoIP TCP connection") {
+        return Ok(());
+    }
     let test_env = TestEnv::builder().await?;
     wait_for_ecus_online(&test_env.config).await?;
 
