@@ -929,7 +929,7 @@
 # direct_io = false
 # Load MDD files through the userfaultfd based pager instead of plain
 # `mmap`. Linux only; enabling it on other platforms is an error.
-# Defaults to true on Linux and false on all other platforms.
+# Defaults to `true` on Linux and `false` elsewhere (plain `mmap`).
 # enabled = true
 # Page replacement strategy used to pick eviction victims: `fifo`,
 # `random` or `prefetch-first`.

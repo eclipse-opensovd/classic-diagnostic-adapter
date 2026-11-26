@@ -30,8 +30,8 @@ use cda_interfaces::{
 use cda_tracing::LoggingConfig;
 use opensovd_cda_lib::config::configfile::{
     CanAddressingMode, CanConfig, CanEcuMapping, Configuration, DatabaseConfig, EcuComParams,
-    EcuConfig, RuntimeUpdateConfig, ServerConfig, ServerTransport, StrictConfig, TransportOverride,
-    TransportType,
+    EcuConfig, PagerConfig, RuntimeUpdateConfig, ServerConfig, ServerTransport, StrictConfig,
+    TransportOverride, TransportType,
 };
 
 use crate::util::{
@@ -202,7 +202,7 @@ fn base_test_config(
             ..Default::default()
         },
         can: None,
-        pager: Default::default(),
+        pager: PagerConfig::default(),
         database: DatabaseConfig {
             dir: mdd_file_path()?,
             naming_convention: DatabaseNamingConvention::default(),
