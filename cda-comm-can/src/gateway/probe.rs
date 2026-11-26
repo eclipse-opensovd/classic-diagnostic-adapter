@@ -40,14 +40,6 @@ impl ProbeRequest {
     }
 }
 
-async fn run_probes<T, R, F, Fut>(items: Vec<T>, probe: F) -> Vec<R>
-where
-    F: Fn(T) -> Fut,
-    Fut: Future<Output = R>,
-{
-    futures::future::join_all(items.into_iter().map(probe)).await
-}
-
 impl CanDiagGateway {
     pub(super) fn build_probe_sequence(
         config: &CanConfig,
@@ -219,30 +211,34 @@ impl CanDiagGateway {
                 .collect()
         };
 
-        let results = run_probes(targets, |(ecu_name, conn, logical_addr)| async move {
-            let probed_as = DiscoveredAs::from(&conn);
-            let result = self.probe_connection(&conn, logical_addr).await;
-            match &result {
-                Ok(()) => tracing::info!(
-                    ecu = %conn.ecu_name(),
-                    logical_addr = logical_addr,
-                    network_addr = %conn.network_address(),
-                    "ECU discovered on CAN"
-                ),
-                Err(e) => tracing::debug!(
-                    ecu = %conn.ecu_name(),
-                    logical_addr = logical_addr,
-                    error = %e,
-                    "ECU not responding on CAN"
-                ),
-            }
-            // Return the lowercase map key, not `conn.ecu_name`: for
-            // ECUs from [[can.ecu_mappings]] the latter carries the
-            // config-file casing, which the variant-detection
-            // consumer would not find in its lowercase-keyed ECU map.
-            (ecu_name, probed_as, result)
-        })
-        .await;
+        let futures: Vec<_> = targets
+            .into_iter()
+            .map(|(ecu_name, conn, logical_addr)| async move {
+                let probed_as = DiscoveredAs::from(&conn);
+                let result = self.probe_connection(&conn, logical_addr).await;
+                match &result {
+                    Ok(()) => tracing::info!(
+                        ecu = %conn.ecu_name(),
+                        logical_addr = logical_addr,
+                        network_addr = %conn.network_address(),
+                        "ECU discovered on CAN"
+                    ),
+                    Err(e) => tracing::debug!(
+                        ecu = %conn.ecu_name(),
+                        logical_addr = logical_addr,
+                        error = %e,
+                        "ECU not responding on CAN"
+                    ),
+                }
+                // Return the lowercase map key, not `conn.ecu_name`: for
+                // ECUs from [[can.ecu_mappings]] the latter carries the
+                // config-file casing, which the variant-detection
+                // consumer would not find in its lowercase-keyed ECU map.
+                (ecu_name, probed_as, result)
+            })
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
 
         let mut discovered = Vec::new();
         let mut cache = self.discovered_ecus.write().await;
@@ -269,10 +265,18 @@ impl CanDiagGateway {
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::TransportProbe;
+    #[cfg(feature = "can-socketcand")]
+    use std::time::Duration;
+
+    #[cfg(feature = "can-socketcand")]
+    use cda_interfaces::{CanId, util::test_utils::RecordingConnectivityHandler};
 
     use super::*;
-    use crate::{config::CanProbeConfig, gateway::test_helpers::ControlledProbe};
+    use crate::config::CanProbeConfig;
+    #[cfg(feature = "can-socketcand")]
+    use crate::{
+        CanEcuAddressing, config::CanAddressingMode, gateway::test_utils::shared_topology,
+    };
 
     #[test]
     fn default_probe_sequence_starts_with_tester_present() {
@@ -313,48 +317,44 @@ mod tests {
         assert!(CanDiagGateway::build_probe_sequence(&config).is_err());
     }
 
+    #[cfg(feature = "can-socketcand")]
     #[tokio::test]
-    async fn discovery_probes_ecus_concurrently_and_collects_results() {
-        let (probe, names, mut receiver) = ControlledProbe::fixture();
-        let batch = run_probes(names, |name| {
-            let probe = &probe;
-            async move {
-                let responding = probe.probe_ecu(&name).await;
-                (name, responding)
-            }
-        });
-        tokio::pin!(batch);
-        assert!(futures::poll!(&mut batch).is_pending());
+    async fn discovery_probes_unresponsive_ecus_concurrently() {
+        const INTERFACE: &str = "socketcand:127.0.0.1:29536:vcan0";
+        const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
-        // All probes must start before any response is released.
-        let mut pending = std::collections::HashMap::new();
-        while let Ok((name, complete)) = receiver.try_recv() {
-            pending.insert(name, complete);
-        }
-        assert_eq!(pending.len(), 3);
-        for (name, responding) in [("third", true), ("second", false)] {
-            pending
-                .remove(name)
-                .expect("probe started concurrently")
-                .send(responding)
-                .expect("complete probe");
-        }
-        assert!(
-            futures::poll!(&mut batch).is_pending(),
-            "wait for the entire batch"
+        let connections = [
+            ("first", 0x600, 0x608),
+            ("second", 0x610, 0x618),
+            ("third", 0x620, 0x628),
+        ]
+        .into_iter()
+        .map(|(name, request, response)| {
+            (
+                name,
+                CanEcuAddressing::new(
+                    name.to_owned(),
+                    INTERFACE.to_owned(),
+                    CanId::try_from(request).expect("valid request ID"),
+                    CanId::try_from(response).expect("valid response ID"),
+                    CanAddressingMode::Standard,
+                ),
+            )
+        })
+        .collect();
+        let mut gateway = CanDiagGateway::test_instance(
+            shared_topology(connections),
+            vec![],
+            Arc::new(RecordingConnectivityHandler::default()),
         );
-        pending
-            .remove("first")
-            .expect("first probe started")
-            .send(true)
-            .expect("complete last outstanding probe");
-        assert_eq!(
-            futures::poll!(&mut batch),
-            std::task::Poll::Ready(vec![
-                ("first".to_owned(), true),
-                ("second".to_owned(), false),
-                ("third".to_owned(), true),
-            ])
+        gateway.probe_timeout = PROBE_TIMEOUT;
+
+        let start = Instant::now();
+        assert!(gateway.discover_ecus().await.is_empty());
+        assert!(
+            start.elapsed() < PROBE_TIMEOUT.saturating_mul(2),
+            "three probes should complete near one timeout, not three: {:?}",
+            start.elapsed()
         );
     }
 }
