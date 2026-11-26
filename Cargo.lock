@@ -696,7 +696,7 @@ dependencies = [
  "libc",
  "nix 0.27.1",
  "parking_lot",
- "schemars 1.2.2",
+ "schemars 1.2.3",
  "serde",
  "thiserror 2.0.21",
  "tracing",
@@ -3124,7 +3124,7 @@ dependencies = [
  "linkme",
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.10",
  "tokio",
  "tracing",
 ]
@@ -3442,7 +3442,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6e4d69d0fa3e7f6f9cf6b53a0e83e4fc99ba3586f65ce166cff30bd13bb4ad2"
 dependencies = [
  "heck 0.4.1",
- "itertools",
+ "itertools 0.12.1",
  "log",
  "multimap",
  "petgraph",
