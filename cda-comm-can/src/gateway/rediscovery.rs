@@ -286,12 +286,7 @@ mod concurrency_tests {
 
     #[tokio::test]
     async fn rediscovery_probes_unresponsive_ecus_concurrently() {
-        let names = ["missing-1", "missing-2", "missing-3"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-        let (started, mut receiver) = mpsc::unbounded_channel();
-        let probe = ControlledProbe { started };
+        let (probe, names, mut receiver) = ControlledProbe::fixture();
         let cancel = CancellationToken::new();
         let batch = probe_names(&probe, names, &cancel);
         tokio::pin!(batch);
@@ -303,7 +298,7 @@ mod concurrency_tests {
             pending.insert(name, complete);
         }
         assert_eq!(pending.len(), 3);
-        for name in ["missing-1", "missing-2", "missing-3"] {
+        for name in ["first", "second", "third"] {
             pending
                 .remove(name)
                 .expect("probe started concurrently")
@@ -318,12 +313,7 @@ mod concurrency_tests {
 
     #[tokio::test]
     async fn rediscovery_cancellation_interrupts_pending_probes() {
-        let names = ["missing-1", "missing-2", "missing-3"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-        let (started, mut receiver) = mpsc::unbounded_channel();
-        let probe = ControlledProbe { started };
+        let (probe, names, mut receiver) = ControlledProbe::fixture();
         let cancel = CancellationToken::new();
         let batch = probe_names(&probe, names, &cancel);
         tokio::pin!(batch);
@@ -344,11 +334,10 @@ mod concurrency_tests {
 
     #[tokio::test]
     async fn cancelled_rediscovery_returns_explicit_error() {
-        let (started, mut receiver) = mpsc::unbounded_channel();
-        let probe = ControlledProbe { started };
+        let (probe, names, mut receiver) = ControlledProbe::fixture();
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let batch = probe_names(&probe, vec!["missing".to_owned()], &cancel);
+        let batch = probe_names(&probe, names, &cancel);
         tokio::pin!(batch);
 
         assert_eq!(

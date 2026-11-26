@@ -270,7 +270,6 @@ impl CanDiagGateway {
 #[cfg(test)]
 mod tests {
     use cda_interfaces::TransportProbe;
-    use tokio::sync::mpsc;
 
     use super::*;
     use crate::{config::CanProbeConfig, gateway::test_helpers::ControlledProbe};
@@ -316,12 +315,7 @@ mod tests {
 
     #[tokio::test]
     async fn discovery_probes_ecus_concurrently_and_collects_results() {
-        let names = ["first", "second", "third"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-        let (started, mut receiver) = mpsc::unbounded_channel();
-        let probe = ControlledProbe { started };
+        let (probe, names, mut receiver) = ControlledProbe::fixture();
         let batch = run_probes(names, |name| {
             let probe = &probe;
             async move {

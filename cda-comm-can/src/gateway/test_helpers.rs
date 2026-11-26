@@ -14,8 +14,22 @@
 use cda_interfaces::{RouteStatus, TransportProbe};
 use tokio::sync::{mpsc, oneshot};
 
+type ProbeReceiver = mpsc::UnboundedReceiver<(String, oneshot::Sender<bool>)>;
+
 pub(super) struct ControlledProbe {
-    pub(super) started: mpsc::UnboundedSender<(String, oneshot::Sender<bool>)>,
+    started: mpsc::UnboundedSender<(String, oneshot::Sender<bool>)>,
+}
+
+impl ControlledProbe {
+    /// Builds the shared ECU names and channels for controlled probe tests.
+    pub(super) fn fixture() -> (Self, Vec<String>, ProbeReceiver) {
+        let names = ["first", "second", "third"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let (started, receiver) = mpsc::unbounded_channel();
+        (Self { started }, names, receiver)
+    }
 }
 
 impl TransportProbe for ControlledProbe {
