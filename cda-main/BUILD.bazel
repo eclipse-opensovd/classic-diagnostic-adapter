@@ -69,6 +69,7 @@ workspace_rust_library(
         "//cda-extra:cda_extra",
         "//cda-health:cda_health",
         "//cda-interfaces:cda_interfaces",
+        "//cda-pager:cda_pager",
         "//cda-plugin-communication-management:cda_plugin_communication_management",
         "//cda-plugin-lock-priority:cda_plugin_lock_priority",
         "//cda-plugin-runtime-update:cda_plugin_runtime_update",
