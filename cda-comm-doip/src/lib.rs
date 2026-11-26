@@ -38,6 +38,10 @@ use doip_definitions::{
     },
 };
 use futures::FutureExt;
+// Ensure mbedtls-rs is considered "used" when the feature is enabled,
+// even if `openssl` is also enabled and takes precedence.
+#[cfg(feature = "mbedtls")]
+use mbedtls_rs as _;
 use tokio::{
     sync::{Mutex, RwLock, broadcast, mpsc},
     task::JoinHandle,
@@ -2926,7 +2930,10 @@ mod tests {
                 .flatten()
                 .expect("the discovery must be finished");
         assert!(!outcome.full_vir_discovery);
-        assert!(gateway.state.topology.connected().is_empty());
+        assert_eq!(
+            gateway.state.topology.connected(),
+            [] as [cda_interfaces::topology::KnownGateway; 0]
+        );
         session.connection_tasks.shutdown().await;
     }
 

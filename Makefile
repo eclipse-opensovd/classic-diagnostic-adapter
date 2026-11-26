@@ -19,7 +19,7 @@ STABLE := $(shell sed -n 's/^rust-version = "\([^"]*\)"$$/\1/p' '$(CARGO_TOML)')
 ifeq ($(shell printf '%s' '$(STABLE)' | grep -Ex '[0-9]+\.[0-9]+\.[0-9]+'),)
 $(error rust-version in $(CARGO_TOML) must be a full version like 1.88.0, found "$(STABLE)")
 endif
-NIGHTLY := nightly-2026-07-21
+NIGHTLY := nightly-2026-11-12
 CARGO_DENY_VERSION := 0.20.2
 CARGO_LLVM_COV_VERSION := 0.9.1
 PROTOC_VERSION := 34.1
@@ -48,7 +48,7 @@ endif
 	precommit precommit-all-features \
 	coverage coverage-can integration-coverage deny deny-unused-ignores \
 	generate-config generate-test-config generate-flatbuffers generate-protos docs rustdoc \
-	tool-versions setup-devenv install-uv install-protoc doctor run profile depgraph clean clean-doc help
+	tool-versions setup-devenv install-uv install-protoc doctor run heap-profiling depgraph clean clean-doc help update
 
 build:
 	cargo +$(STABLE) build --locked $(ARGS)
@@ -144,6 +144,10 @@ deny:
 
 deny-unused-ignores:
 	$(MAKE) --no-print-directory deny ARGS="advisories -A vulnerability -A unmaintained -A unsound -A notice -A yanked -D advisory-not-detected"
+
+# Update dependencies via Nightly, because dependency cooldown is only available with Rust 1.100.
+update:
+	cargo +$(NIGHTLY) update
 
 generate-config:
 	cargo +$(STABLE) run --locked --all-features -- generate-config --output $(or $(OUTPUT),opensovd-cda.toml)
@@ -243,8 +247,8 @@ doctor:
 run:
 	cargo +$(STABLE) run --locked --release -- $(ARGS)
 
-profile:
-	RUSTFLAGS="-C force-frame-pointers=yes" cargo +$(STABLE) build --profile release-with-debug --bin opensovd-cda --features heap-profiling
+heap-profiling:
+	RUSTFLAGS="--cfg heap_profiling -C force-frame-pointers=yes" cargo +$(STABLE) build --profile release-with-debug --bin opensovd-cda
 
 depgraph:
 	cargo +$(STABLE) depgraph --target-deps --dedup-transitive-deps --workspace-only | dot -Tpng > depgraph.png
@@ -284,6 +288,7 @@ help:
 		'integration-coverage         Generate integration-test LCOV coverage' \
 		'deny ARGS="..."              Run all or selected cargo-deny checks (FORMAT=json for JSON)' \
 		'deny-unused-ignores          Fail on advisory ignores in deny.toml that are no longer needed' \
+		'update                       Update Cargo.lock dependencies' \
 		'generate-config              Regenerate opensovd-cda.toml' \
 		'generate-test-config         Generate testcontainer/cda-test-config*.toml for docker compose' \
 		'generate-flatbuffers         Regenerate FlatBuffers sources' \
@@ -294,6 +299,6 @@ help:
 		'setup-devenv                 Install pinned development tools' \
 		'doctor                       Check development prerequisites' \
 		'run ARGS="..."               Run the release binary' \
-		'profile                      Build the heap-profiling binary' \
+		'heap-profiling               Build the heap-profiling binary' \
 		'depgraph                     Generate depgraph.png' \
 		'clean / clean-doc            Clean all artifacts or Rustdoc artifacts'

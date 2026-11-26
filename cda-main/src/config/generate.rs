@@ -510,10 +510,11 @@ fn walk_schema(
 fn is_toml_section_header(trimmed: &str) -> bool {
     if trimmed.starts_with("[[") {
         trimmed.ends_with("]]") && !trimmed.contains('"') && !trimmed.contains(',')
-    } else if trimmed.starts_with('[') {
-        trimmed.ends_with(']') && !trimmed.contains('"') && !trimmed.contains(',')
     } else {
-        false
+        trimmed.starts_with('[')
+            && trimmed.ends_with(']')
+            && !trimmed.contains('"')
+            && !trimmed.contains(',')
     }
 }
 
