@@ -453,11 +453,13 @@ pub(crate) mod security {
     pub(super) fn validate_send_key_size(
         key: &str,
         expected_size: Option<usize>,
+        binary_encoding: BinaryEncoding,
     ) -> Result<(), ApiError> {
         let Some(expected_size) = expected_size else {
             return Ok(());
         };
-        let actual_size = cda_interfaces::decode_hex_with_optional_prefix(key)
+        let actual_size = binary_encoding
+            .decode(key)
             .map_err(|error| ApiError::BadRequest(error.to_string()))?
             .len();
         if actual_size != expected_size {
@@ -537,7 +539,9 @@ pub(crate) mod security {
                     .into_response();
                 }
             };
-            if let Err(error) = validate_send_key_size(&key, parameter_info.byte_size) {
+            if let Err(error) =
+                validate_send_key_size(&key, parameter_info.byte_size, binary_encoding)
+            {
                 return ErrorWrapper {
                     error,
                     include_schema,
@@ -1257,11 +1261,28 @@ mod tests {
 
     #[test]
     fn send_key_size_mismatch_is_bad_request() {
-        assert!(security::validate_send_key_size("0x01, 0x02", Some(2)).is_ok());
-        assert!(matches!(
-            security::validate_send_key_size("0x01", Some(2)),
-            Err(crate::sovd::error::ApiError::BadRequest(_))
-        ));
+        for (encoding, valid, short, invalid) in [
+            (
+                cda_interfaces::BinaryEncoding::Hex,
+                "0x01, 0x02",
+                "0x01",
+                "0xZZ",
+            ),
+            (
+                cda_interfaces::BinaryEncoding::Base64,
+                "AQI=",
+                "AQ==",
+                "not base64!",
+            ),
+        ] {
+            assert!(security::validate_send_key_size(valid, Some(2), encoding).is_ok());
+            for key in [short, invalid] {
+                assert!(matches!(
+                    security::validate_send_key_size(key, Some(2), encoding),
+                    Err(crate::sovd::error::ApiError::BadRequest(_))
+                ));
+            }
+        }
     }
 
     #[tokio::test]

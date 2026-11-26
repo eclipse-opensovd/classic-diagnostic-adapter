@@ -433,9 +433,17 @@ pub(crate) fn byte_size_from_value_param(param: &datatypes::Parameter<'_>) -> (O
     };
     let data_op = datatypes::DataOperation(dop);
     match data_op.variant() {
-        Ok(datatypes::DataOperationVariant::Normal(n)) => {
-            (byte_size_from_diag_coded_type(n.diag_coded_type()), false)
-        }
+        Ok(datatypes::DataOperationVariant::Normal(n)) => match n.diag_coded_type() {
+            Ok(dct)
+                if matches!(
+                    dct.type_(),
+                    datatypes::DiagCodedTypeVariant::LeadingLengthInfo(_)
+                ) =>
+            {
+                (None, false)
+            }
+            dct => (byte_size_from_diag_coded_type(dct), false),
+        },
         Ok(datatypes::DataOperationVariant::Mux(_)) => (None, true),
         _ => (None, false),
     }
@@ -1107,6 +1115,39 @@ mod tests {
         let (size, is_mux) = byte_size_from_value_param(&tdb.param(0));
         assert_eq!(size, Some(4));
         assert!(!is_mux);
+    }
+
+    #[test]
+    fn byte_size_leading_length_key_is_variable() {
+        let mut db = EcuDataBuilder::new();
+        let protocol_name = Protocol::default().to_string();
+        let protocol = db.create_protocol(&protocol_name, None, None, None);
+        let diag_type = db.create_diag_coded_type(
+            None,
+            DataType::ByteField,
+            true,
+            datatypes::DiagCodedTypeVariant::LeadingLengthInfo(8),
+        );
+        let compu = db.create_compu_method(CompuCategory::Identical, None, None);
+        let dop = db.create_regular_normal_dop("key_dop", diag_type, compu);
+        let key = db.create_value_param_with_semantic("key", "DATA", dop, 2);
+        let request = db.create_request(Some(vec![key]), None);
+        let tdb = finish_test_db!(db, protocol, request);
+        let param = tdb.param(0);
+
+        assert_eq!(byte_size_from_value_param(&param), (None, false));
+        let data_op =
+            datatypes::DataOperation(param.specific_data_as_value().unwrap().dop().unwrap());
+        let datatypes::DataOperationVariant::Normal(normal) = data_op.variant().unwrap() else {
+            panic!("expected a normal DOP");
+        };
+        let mut payload = Vec::new();
+        normal
+            .diag_coded_type()
+            .unwrap()
+            .encode(vec![0x01, 0x02, 0x03], &mut payload, 0, 0)
+            .unwrap();
+        assert_eq!(payload, [0x03, 0x01, 0x02, 0x03]);
     }
 
     #[test]
