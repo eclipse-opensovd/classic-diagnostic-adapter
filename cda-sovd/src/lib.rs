@@ -589,7 +589,7 @@ mod uri_rewrite_tests {
     #[tokio::test]
     async fn rewrite_request_uri_normalizes_only_path() {
         let uri =
-            rewrite_uri("/Vehicle/%45CU?x-sovd2uds-suppressService=true&caseSensitive=AbC%26X%3DY")
+            rewrite_uri("/vehicle/%45CU?x-sovd2uds-suppressService=true&caseSensitive=AbC%26X%3DY")
                 .await;
 
         assert_eq!(uri.path(), "/vehicle/ecu");
@@ -602,7 +602,7 @@ mod uri_rewrite_tests {
     #[tokio::test]
     async fn rewrite_request_uri_preserves_operation_queries() {
         let uri = rewrite_uri(concat!(
-            "/Vehicle/v15/components/ECU/operations/Routine/executions/id",
+            "/vehicle/v15/components/ECU/operations/Routine/executions/id",
             "?x-sovd2uds-suppressService=true"
         ))
         .await;
@@ -617,7 +617,7 @@ mod uri_rewrite_tests {
 
     #[tokio::test]
     async fn rewrite_request_uri_preserves_version_segment() {
-        let uri = rewrite_uri("/Vehicle/V1/components/ECU?include-schema=true").await;
+        let uri = rewrite_uri("/vehicle/V1/components/ECU?include-schema=true").await;
 
         assert_eq!(uri.path(), "/vehicle/v1/components/ecu");
         assert_eq!(uri.query(), Some("include-schema=true"));

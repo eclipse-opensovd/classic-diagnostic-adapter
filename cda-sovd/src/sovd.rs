@@ -894,7 +894,7 @@ async fn get_components<T: UdsEcu + SchemaProvider + Clone>(
 ) -> Response {
     fn ecu_to_resource(ecu: String) -> Resource {
         Resource {
-            href: format!("http://localhost:20002/Vehicle/v15/components/{ecu}"),
+            href: format!("http://localhost:20002/vehicle/v15/components/{ecu}"),
             id: ecu.to_lowercase(),
             name: ecu,
             translation_id: None,
@@ -945,7 +945,7 @@ fn docs_components(op: TransformOperation) -> TransformOperation {
         .response_with::<200, Json<sovd_interfaces::ResourceResponse>, _>(|res| {
             res.example(sovd_interfaces::ResourceResponse {
                 items: vec![sovd_interfaces::Resource {
-                    href: "http://localhost:20002/Vehicle/v15/components/my_ecu".into(),
+                    href: "http://localhost:20002/vehicle/v15/components/my_ecu".into(),
                     id: "my_ecu".into(),
                     name: "My ECU".into(),
                     translation_id: None,
