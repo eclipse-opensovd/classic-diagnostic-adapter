@@ -88,10 +88,14 @@ workspace_rust_binary(
     crate_name = "opensovd_cda",
     crate_root = "src/main.rs",
     # Keep linkme service registration sections in the release binary.
-    rustc_flags = [
-        "-C",
-        "link-arg=-Wl,--no-gc-sections",
-    ],
+    # `--no-gc-sections` is ELF-only, Mach-O linkers reject it.
+    rustc_flags = select({
+        "@rules_rust//rust/platform:linux": [
+            "-C",
+            "link-arg=-Wl,--no-gc-sections",
+        ],
+        "//conditions:default": [],
+    }),
     deps = [
         ":opensovd_cda_lib",
     ],

@@ -19,6 +19,7 @@ build:can --define=can=true
 # workaround for Xcode build tools using absolute paths on macOS
 build:macos-clt --repo_env=DEVELOPER_DIR=/Library/Developer/CommandLineTools
 build:macos-clt --action_env=DEVELOPER_DIR=/Library/Developer/CommandLineTools
+build:macos-clt --host_action_env=DEVELOPER_DIR=/Library/Developer/CommandLineTools
 # on macos we disable codegen strip to avoid issues with the latest version.
 build --enable_platform_specific_config
 build:macos --@rules_rust//rust/settings:extra_exec_rustc_flags=--codegen=strip=none
