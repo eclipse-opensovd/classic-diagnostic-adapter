@@ -129,6 +129,27 @@ async fn test_short_ecu_response_returns_error() {
         "Expected 400 Bad Request when ECU responds with truncated payload, got: {result:?}"
     );
 
+    let mut raw_headers = test_env.auth_header().await.unwrap();
+    raw_headers.insert(
+        header::ACCEPT,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    let raw_result = send_cda_request(
+        &test_env.config,
+        &format!("{COMPONENTS_FLXC1000_DATA}/fluxcapacitorpowerconsumption"),
+        StatusCode::BAD_REQUEST,
+        Method::GET,
+        None,
+        Some(&raw_headers),
+        None,
+    )
+    .await;
+
+    assert!(
+        raw_result.is_ok(),
+        "Expected 400 Bad Request for truncated octet-stream response, got: {raw_result:?}"
+    );
+
     ecusim::clear_interceptor(&test_env.ecu_sim, "FLXC1000", "truncated_response")
         .await
         .expect("Failed to remove interceptor");

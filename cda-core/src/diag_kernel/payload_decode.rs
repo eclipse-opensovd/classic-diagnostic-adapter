@@ -192,6 +192,20 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             .to_vec();
 
             if response_type == datatypes::ResponseType::Positive && !map_to_json {
+                // Raw responses skip parameter decoding, so validate known fixed DATA extents.
+                // Variable or unresolved layouts have no fixed size here and currently bypass
+                // truncation validation.
+                let fixed_data_size =
+                    super::param_metadata::raw_response_layout(&params, data_semantic)?
+                        .and_then(|layout| layout.fixed_data_size);
+                if let Some(expected) = fixed_data_size
+                    && raw_uds_payload.len() < expected
+                {
+                    return Err(DiagServiceError::NotEnoughData {
+                        expected,
+                        actual: raw_uds_payload.len(),
+                    });
+                }
                 return Ok(DiagServiceResponseStruct {
                     service: diag_service.clone(),
                     data: raw_uds_payload,
@@ -2145,11 +2159,9 @@ fn is_application_data_semantic(
     data_semantic: &str,
     service_id_rq_semantic: &str,
 ) -> bool {
-    // Exclude known protocol fields, but retain other semantics because the
-    // semantic list can be extended by manufacturers.
-    semantic.is_none_or(|value| {
-        value == data_semantic || (value != "DID" && value != service_id_rq_semantic)
-    })
+    // Exclude the configured request service ID, but retain other semantics because
+    // the semantic list can be extended by manufacturers.
+    semantic.is_none_or(|value| value == data_semantic || value != service_id_rq_semantic)
 }
 
 fn parameter_type_has_application_data(
@@ -2225,7 +2237,7 @@ mod tests {
             "SERVICE-ID-RQ"
         ));
         assert!(is_application_data_semantic(None, "DATA", "SERVICE-ID-RQ"));
-        assert!(!is_application_data_semantic(
+        assert!(is_application_data_semantic(
             Some("DID"),
             "DATA",
             "SERVICE-ID-RQ"
@@ -2239,6 +2251,12 @@ mod tests {
             &Ok(datatypes::ParamType::Value),
             Some("MANUFACTURER-DATA"),
             "DATA"
+        ));
+        assert!(parameter_has_application_data(
+            &Ok(datatypes::ParamType::Value),
+            Some("DID"),
+            "DATA",
+            "SERVICE-ID-RQ",
         ));
         assert!(parameter_type_has_application_data(
             &Ok(datatypes::ParamType::CodedConst),
@@ -2690,6 +2708,29 @@ mod tests {
         );
         assert!(longer_response.has_application_data);
         assert_eq!(longer_response.data, vec![response_sid, 0xA5]);
+    }
+
+    #[tokio::test]
+    async fn raw_response_with_truncated_fixed_data_returns_not_enough_data() {
+        let (ecu_manager, service, response_sid) =
+            create_ecu_manager_with_phys_const_normal_dop_service();
+        let error = ecu_manager
+            .convert_from_uds(
+                &service,
+                &create_payload(vec![response_sid, 0xF1, 0x90]),
+                false,
+                None,
+            )
+            .await
+            .expect_err("missing fixed-size DATA bytes must be rejected");
+
+        assert!(matches!(
+            error,
+            DiagServiceError::NotEnoughData {
+                expected: 1,
+                actual: 0
+            }
+        ));
     }
 
     #[tokio::test]
