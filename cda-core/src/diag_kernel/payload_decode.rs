@@ -165,8 +165,9 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             let response_type = response.response_type().try_into()?;
             // Use MDD metadata so raw responses need not be decoded just to choose the HTTP status.
             let data_semantic = &self.database_naming_convention.semantics.data;
+            let service_id_rq_semantic = &self.database_naming_convention.semantics.service_id_rq;
             let has_application_data = response_type == datatypes::ResponseType::Positive
-                && response_has_application_data(&params, data_semantic);
+                && response_has_application_data(&params, data_semantic, service_id_rq_semantic);
             // in case of a positive response update potential session or security access changes
             if response_type == datatypes::ResponseType::Positive {
                 let (new_session, new_security) =
@@ -258,16 +259,19 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             // Returning a response here, because even valid databases may not define a
             // response for a service.
             tracing::warn!("No matching response found for SID: {sid}");
+            let response_type = if *response_first_byte == service_ids::NEGATIVE_RESPONSE {
+                DiagServiceResponseType::Negative
+            } else {
+                DiagServiceResponseType::Positive
+            };
             Ok(DiagServiceResponseStruct {
                 service: diag_service.clone(),
                 data: payload.data.clone(),
                 mapped_data: None,
-                response_type: if *response_first_byte == service_ids::NEGATIVE_RESPONSE {
-                    DiagServiceResponseType::Negative
-                } else {
-                    DiagServiceResponseType::Positive
-                },
-                has_application_data: !payload.data.is_empty(),
+                response_type,
+                // The SID is protocol overhead; retain longer unknown responses conservatively.
+                has_application_data: response_type == DiagServiceResponseType::Positive
+                    && payload.data.len() > 1,
             })
         }
     }
@@ -2111,27 +2115,56 @@ fn create_diag_service_response(
     }
 }
 
-fn response_has_application_data(params: &[datatypes::Parameter<'_>], data_semantic: &str) -> bool {
+fn response_has_application_data(
+    params: &[datatypes::Parameter<'_>],
+    data_semantic: &str,
+    service_id_rq_semantic: &str,
+) -> bool {
     params.iter().any(|param| {
-        is_application_data_semantic(param.semantic(), data_semantic)
-            && parameter_type_has_application_data(&param.param_type())
+        parameter_has_application_data(
+            &param.param_type(),
+            param.semantic(),
+            data_semantic,
+            service_id_rq_semantic,
+        )
     })
 }
 
-fn is_application_data_semantic(semantic: Option<&str>, data_semantic: &str) -> bool {
-    // Treat parameters without an explicit semantic as application data.
-    semantic.is_none_or(|value| value == data_semantic)
+fn parameter_has_application_data(
+    param_type: &Result<datatypes::ParamType, DiagServiceError>,
+    semantic: Option<&str>,
+    data_semantic: &str,
+    service_id_rq_semantic: &str,
+) -> bool {
+    is_application_data_semantic(semantic, data_semantic, service_id_rq_semantic)
+        && parameter_type_has_application_data(param_type, semantic, data_semantic)
+}
+
+fn is_application_data_semantic(
+    semantic: Option<&str>,
+    data_semantic: &str,
+    service_id_rq_semantic: &str,
+) -> bool {
+    // Exclude known protocol fields, but retain other semantics because the
+    // semantic list can be extended by manufacturers.
+    semantic.is_none_or(|value| {
+        value == data_semantic || (value != "DID" && value != service_id_rq_semantic)
+    })
 }
 
 fn parameter_type_has_application_data(
     param_type: &Result<datatypes::ParamType, DiagServiceError>,
+    semantic: Option<&str>,
+    data_semantic: &str,
 ) -> bool {
     match param_type {
+        Ok(datatypes::ParamType::CodedConst | datatypes::ParamType::PhysConst) => {
+            semantic == Some(data_semantic)
+        }
         Ok(
-            datatypes::ParamType::CodedConst
-            | datatypes::ParamType::MatchingRequestParam
-            | datatypes::ParamType::PhysConst
+            datatypes::ParamType::MatchingRequestParam
             | datatypes::ParamType::NrcConst
+            | datatypes::ParamType::Reserved
             | datatypes::ParamType::System,
         ) => false,
         // Preserve unknown parameter types rather than silently dropping response content.
@@ -2181,19 +2214,76 @@ mod tests {
 
     #[test]
     fn response_data_classifier_ignores_non_data_semantics() {
-        assert!(is_application_data_semantic(Some("DATA"), "DATA"));
-        assert!(is_application_data_semantic(None, "DATA"));
-        assert!(!is_application_data_semantic(Some("DID"), "DATA"));
-        assert!(!is_application_data_semantic(Some("SERVICE-ID-RQ"), "DATA"));
-        assert!(parameter_type_has_application_data(&Ok(
-            datatypes::ParamType::Value
-        )));
-        assert!(!parameter_type_has_application_data(&Ok(
-            datatypes::ParamType::CodedConst
-        )));
-        assert!(!parameter_type_has_application_data(&Ok(
-            datatypes::ParamType::MatchingRequestParam
-        )));
+        assert!(is_application_data_semantic(
+            Some("DATA"),
+            "DATA",
+            "SERVICE-ID-RQ"
+        ));
+        assert!(is_application_data_semantic(
+            Some("MANUFACTURER-DATA"),
+            "DATA",
+            "SERVICE-ID-RQ"
+        ));
+        assert!(is_application_data_semantic(None, "DATA", "SERVICE-ID-RQ"));
+        assert!(!is_application_data_semantic(
+            Some("DID"),
+            "DATA",
+            "SERVICE-ID-RQ"
+        ));
+        assert!(!is_application_data_semantic(
+            Some("SERVICE-ID-RQ"),
+            "DATA",
+            "SERVICE-ID-RQ"
+        ));
+        assert!(parameter_type_has_application_data(
+            &Ok(datatypes::ParamType::Value),
+            Some("MANUFACTURER-DATA"),
+            "DATA"
+        ));
+        assert!(parameter_type_has_application_data(
+            &Ok(datatypes::ParamType::CodedConst),
+            Some("DATA"),
+            "DATA"
+        ));
+        assert!(parameter_type_has_application_data(
+            &Ok(datatypes::ParamType::PhysConst),
+            Some("DATA"),
+            "DATA"
+        ));
+        assert!(!parameter_type_has_application_data(
+            &Ok(datatypes::ParamType::CodedConst),
+            Some("MANUFACTURER-DATA"),
+            "DATA"
+        ));
+        assert!(!parameter_type_has_application_data(
+            &Ok(datatypes::ParamType::PhysConst),
+            Some("SERVICE-ID-RQ"),
+            "DATA"
+        ));
+        assert!(!parameter_type_has_application_data(
+            &Ok(datatypes::ParamType::MatchingRequestParam),
+            Some("DATA"),
+            "DATA"
+        ));
+    }
+
+    #[test]
+    fn response_data_classifier_ignores_reserved_padding() {
+        let sid_is_application_data = parameter_has_application_data(
+            &Ok(datatypes::ParamType::CodedConst),
+            Some("SERVICE-ID-RQ"),
+            "DATA",
+            "SERVICE-ID-RQ",
+        );
+        let padding_is_application_data = parameter_has_application_data(
+            &Ok(datatypes::ParamType::Reserved),
+            None,
+            "DATA",
+            "SERVICE-ID-RQ",
+        );
+
+        assert!(!sid_is_application_data);
+        assert!(!padding_is_application_data);
     }
 
     async fn assert_uds_converts_to_json(
@@ -2570,6 +2660,36 @@ mod tests {
             result.unwrap().response_type,
             DiagServiceResponseType::Negative
         );
+    }
+
+    #[tokio::test]
+    async fn test_unknown_positive_response_sid_only_has_no_application_data() {
+        let (ecu_manager, service, sid, _) = create_ecu_manager_with_struct_service(1);
+        let response_sid = sid.saturating_add(cda_interfaces::UDS_ID_RESPONSE_BITMASK);
+
+        let sid_only = ecu_manager
+            .convert_from_uds(&service, &create_payload(vec![response_sid]), false, None)
+            .await
+            .expect("SID-only positive response should use the fallback");
+        assert_eq!(sid_only.response_type, DiagServiceResponseType::Positive);
+        assert!(!sid_only.has_application_data);
+        assert_eq!(sid_only.data, vec![response_sid]);
+
+        let longer_response = ecu_manager
+            .convert_from_uds(
+                &service,
+                &create_payload(vec![response_sid, 0xA5]),
+                false,
+                None,
+            )
+            .await
+            .expect("Longer positive response should use the fallback");
+        assert_eq!(
+            longer_response.response_type,
+            DiagServiceResponseType::Positive
+        );
+        assert!(longer_response.has_application_data);
+        assert_eq!(longer_response.data, vec![response_sid, 0xA5]);
     }
 
     #[tokio::test]
