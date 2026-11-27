@@ -269,7 +269,7 @@ mod tests {
     use std::time::Duration;
 
     #[cfg(feature = "can-socketcand")]
-    use cda_interfaces::CanId;
+    use cda_interfaces::{CanId, util::test_utils::RecordingConnectivityHandler};
 
     use super::*;
     use crate::config::CanProbeConfig;
@@ -317,58 +317,42 @@ mod tests {
         assert!(CanDiagGateway::build_probe_sequence(&config).is_err());
     }
 
-    /// Each address has no responder, so all probes must time out together
-    /// rather than one after another.
     #[cfg(feature = "can-socketcand")]
     #[tokio::test]
     async fn discovery_probes_unresponsive_ecus_concurrently() {
         const INTERFACE: &str = "socketcand:127.0.0.1:29536:vcan0";
         const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
+        let connections = [
+            ("first", 0x600, 0x608),
+            ("second", 0x610, 0x618),
+            ("third", 0x620, 0x628),
+        ]
+        .into_iter()
+        .map(|(name, request, response)| {
+            (
+                name,
+                CanEcuAddressing::new(
+                    name.to_owned(),
+                    INTERFACE.to_owned(),
+                    CanId::try_from(request).expect("valid request ID"),
+                    CanId::try_from(response).expect("valid response ID"),
+                    CanAddressingMode::Standard,
+                ),
+            )
+        })
+        .collect();
         let mut gateway = CanDiagGateway::test_instance(
-            shared_topology(vec![
-                (
-                    "missing-1",
-                    CanEcuAddressing::new(
-                        "missing-1".to_owned(),
-                        INTERFACE.to_owned(),
-                        CanId::try_from(0x600).unwrap(),
-                        CanId::try_from(0x608).unwrap(),
-                        CanAddressingMode::Standard,
-                    ),
-                ),
-                (
-                    "missing-2",
-                    CanEcuAddressing::new(
-                        "missing-2".to_owned(),
-                        INTERFACE.to_owned(),
-                        CanId::try_from(0x610).unwrap(),
-                        CanId::try_from(0x618).unwrap(),
-                        CanAddressingMode::Standard,
-                    ),
-                ),
-                (
-                    "missing-3",
-                    CanEcuAddressing::new(
-                        "missing-3".to_owned(),
-                        INTERFACE.to_owned(),
-                        CanId::try_from(0x620).unwrap(),
-                        CanId::try_from(0x628).unwrap(),
-                        CanAddressingMode::Standard,
-                    ),
-                ),
-            ]),
+            shared_topology(connections),
             vec![],
-            std::sync::Arc::new(
-                cda_interfaces::util::test_utils::RecordingConnectivityHandler::default(),
-            ),
+            Arc::new(RecordingConnectivityHandler::default()),
         );
         gateway.probe_timeout = PROBE_TIMEOUT;
 
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         assert_eq!(gateway.discover_ecus().await, [] as [String; 0]);
         assert!(
-            start.elapsed() < PROBE_TIMEOUT * 2,
+            start.elapsed() < PROBE_TIMEOUT.saturating_mul(2),
             "three probes should complete near one timeout, not three: {:?}",
             start.elapsed()
         );

@@ -23,8 +23,8 @@
 //! probe in `ecu_online`. The transport is responsible for presenting
 //! settled online/offline states on its own.
 //!
-//! Bus load is bounded: only currently-undiscovered ECUs are probed, one
-//! round per interval, sequentially.
+//! Only currently-undiscovered ECUs are probed, once per interval. Probes run
+//! concurrently across ECUs, so peak bus load grows with the number of targets.
 
 use std::{sync::Arc, time::Duration};
 
@@ -39,6 +39,58 @@ use super::{
 /// within a few seconds without turning absent ECUs into permanent probe
 /// chatter on the bus.
 const REDISCOVERY_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+enum RediscoveryError {
+    #[error("CAN rediscovery cancelled")]
+    Cancelled,
+    #[error("Variant detection channel closed")]
+    ChannelClosed,
+}
+
+/// Probes undiscovered ECUs concurrently and collects the names that respond.
+/// Waits for the whole batch; cancellation drops pending probes.
+async fn probe_undiscovered<T, F, Fut>(
+    undiscovered: Vec<T>,
+    probe: F,
+    cancel: &CancellationToken,
+) -> Result<Vec<String>, RediscoveryError>
+where
+    F: Fn(T) -> Fut,
+    Fut: Future<Output = Option<String>>,
+{
+    let probes = undiscovered.into_iter().map(probe);
+
+    tokio::select! {
+        // Prefer shutdown over completing a pending batch.
+        biased;
+        () = cancel.cancelled() => Err(RediscoveryError::Cancelled),
+        results = futures::future::join_all(probes) => {
+            Ok(results.into_iter().flatten().collect())
+        }
+    }
+}
+
+/// Sends recovered ECU names as a single variant-detection request.
+/// Returns an error on cancellation or channel closure.
+/// Cancellation also interrupts waiting for channel capacity.
+async fn notify_recovered(
+    variant_detection: &VariantDetectionSender,
+    recovered: Vec<String>,
+    cancel: &CancellationToken,
+) -> Result<(), RediscoveryError> {
+    tokio::select! {
+        // Prefer cancellation over blocking on a full channel.
+        biased;
+        () = cancel.cancelled() => Err(RediscoveryError::Cancelled),
+        result = variant_detection.send(VariantDetectionRequest::new(recovered)) => {
+            result.map_err(|_| {
+                tracing::warn!("Variant detection channel closed, stopping CAN rediscovery");
+                RediscoveryError::ChannelClosed
+            })
+        }
+    }
+}
 
 impl CanDiagGateway {
     /// Starts the background task that periodically re-probes ECUs the
@@ -67,32 +119,33 @@ impl CanDiagGateway {
                     continue;
                 }
 
-                let mut recovered = Vec::new();
-                for (ecu_name, conn, logical_addr) in targets {
-                    if task_cancel.is_cancelled() {
-                        return;
-                    }
-                    if gateway
-                        .probe_and_record(&conn, logical_addr, ecu_name.clone())
-                        .await
-                    {
-                        recovered.push(ecu_name);
-                    }
-                }
+                let Ok(recovered) = probe_undiscovered(
+                    targets,
+                    |(ecu_name, conn, logical_addr)| {
+                        let gateway = &gateway;
+                        async move {
+                            let responding = gateway
+                                .probe_and_record(&conn, logical_addr, ecu_name.clone())
+                                .await;
+                            responding.then_some(ecu_name)
+                        }
+                    },
+                    &task_cancel,
+                )
+                .await
+                else {
+                    break;
+                };
 
                 if !recovered.is_empty() {
                     tracing::info!(
                         ecus = ?recovered,
                         "ECUs rediscovered on CAN"
                     );
-                    if variant_detection
-                        .send(VariantDetectionRequest::new(recovered))
+                    if notify_recovered(&variant_detection, recovered, &task_cancel)
                         .await
                         .is_err()
                     {
-                        tracing::warn!(
-                            "Variant detection channel closed, stopping CAN rediscovery"
-                        );
                         break;
                     }
                 }
@@ -204,5 +257,169 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("ecu1", 0x7E0)]
         );
+    }
+}
+
+#[cfg(test)]
+mod concurrency_tests {
+    use cda_interfaces::TransportProbe;
+    use tokio::sync::{mpsc, oneshot};
+
+    use super::*;
+    use crate::gateway::test_helpers::ControlledProbe;
+
+    async fn probe_names<P: TransportProbe>(
+        gateway: &P,
+        names: Vec<String>,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<String>, RediscoveryError> {
+        probe_undiscovered(
+            names,
+            |ecu_name| async move {
+                let responding = gateway.probe_ecu(&ecu_name).await;
+                responding.then_some(ecu_name)
+            },
+            cancel,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn rediscovery_probes_unresponsive_ecus_concurrently() {
+        let (probe, names, mut receiver) = ControlledProbe::fixture();
+        let cancel = CancellationToken::new();
+        let batch = probe_names(&probe, names, &cancel);
+        tokio::pin!(batch);
+        assert!(futures::poll!(&mut batch).is_pending());
+
+        // Every probe must start before any is allowed to complete.
+        let mut pending = std::collections::HashMap::new();
+        while let Ok((name, complete)) = receiver.try_recv() {
+            pending.insert(name, complete);
+        }
+        assert_eq!(pending.len(), 3);
+        for name in ["first", "second", "third"] {
+            pending
+                .remove(name)
+                .expect("probe started concurrently")
+                .send(false)
+                .expect("finish unresponsive probe");
+        }
+        assert_eq!(
+            futures::poll!(&mut batch),
+            std::task::Poll::Ready(Ok(vec![]))
+        );
+    }
+
+    #[tokio::test]
+    async fn rediscovery_cancellation_interrupts_pending_probes() {
+        let (probe, names, mut receiver) = ControlledProbe::fixture();
+        let cancel = CancellationToken::new();
+        let batch = probe_names(&probe, names, &cancel);
+        tokio::pin!(batch);
+        assert!(futures::poll!(&mut batch).is_pending());
+        let mut pending = Vec::new();
+        while let Ok((_, complete)) = receiver.try_recv() {
+            pending.push(complete);
+        }
+        assert_eq!(pending.len(), 3);
+
+        cancel.cancel();
+        assert_eq!(
+            futures::poll!(&mut batch),
+            std::task::Poll::Ready(Err(RediscoveryError::Cancelled))
+        );
+        assert!(pending.iter().all(oneshot::Sender::is_closed));
+    }
+
+    #[tokio::test]
+    async fn cancelled_rediscovery_returns_explicit_error() {
+        let (probe, names, mut receiver) = ControlledProbe::fixture();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let batch = probe_names(&probe, names, &cancel);
+        tokio::pin!(batch);
+
+        assert_eq!(
+            futures::poll!(&mut batch),
+            std::task::Poll::Ready(Err(RediscoveryError::Cancelled))
+        );
+        assert!(receiver.try_recv().is_err(), "no probe should start");
+    }
+
+    #[tokio::test]
+    async fn rediscovery_notifies_variant_detection_with_one_recovered_batch() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let sender = VariantDetectionSender::new(sender);
+        let recovered = vec!["first".to_owned(), "last".to_owned()];
+
+        assert_eq!(
+            notify_recovered(&sender, recovered.clone(), &CancellationToken::new()).await,
+            Ok(())
+        );
+        assert_eq!(
+            receiver
+                .try_recv()
+                .expect("recovered batch sent")
+                .into_ecus(),
+            recovered
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn rediscovery_cancellation_interrupts_a_blocked_notification() {
+        // Fill a one-slot channel so the next send must wait for the receiver to make room.
+        let (sender, mut receiver) = mpsc::channel(1);
+        let sender = VariantDetectionSender::new(sender);
+        let queued = VariantDetectionRequest::new(vec!["queued".to_owned()]);
+        sender.send(queued.clone()).await.expect("fill channel");
+        let cancel = CancellationToken::new();
+        let notification = notify_recovered(&sender, vec!["recovered".to_owned()], &cancel);
+        // Poll this same future before cancelling to prove the send is already blocked.
+        tokio::pin!(notification);
+        assert!(futures::poll!(&mut notification).is_pending());
+        cancel.cancel();
+        assert_eq!(notification.await, Err(RediscoveryError::Cancelled));
+        assert_eq!(receiver.try_recv().expect("original batch remains"), queued);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn closed_variant_detection_channel_returns_explicit_error() {
+        let (sender, receiver) = mpsc::channel(1);
+        drop(receiver);
+        let sender = VariantDetectionSender::new(sender);
+        assert_eq!(
+            notify_recovered(
+                &sender,
+                vec!["recovered".to_owned()],
+                &CancellationToken::new()
+            )
+            .await,
+            Err(RediscoveryError::ChannelClosed)
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_takes_priority_over_available_channel_capacity() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let sender = VariantDetectionSender::new(sender);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert_eq!(
+            notify_recovered(&sender, vec!["recovered".to_owned()], &cancel).await,
+            Err(RediscoveryError::Cancelled)
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 }
