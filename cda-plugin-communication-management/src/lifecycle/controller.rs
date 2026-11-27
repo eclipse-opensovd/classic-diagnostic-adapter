@@ -19,9 +19,10 @@ use std::{fmt::Display, sync::Arc};
 
 use cda_interfaces::{
     communication_control::{
-        CommunicationError, CommunicationGuard, CommunicationInitMode, CommunicationLifecycle,
-        CommunicationOperation, CommunicationOperationFailure, CommunicationState,
-        CommunicationVariantDetection, TransportControl, VariantDetectionMode,
+        CommunicationError, CommunicationGuard, CommunicationInUse, CommunicationInitMode,
+        CommunicationLifecycle, CommunicationOperation, CommunicationOperationFailure,
+        CommunicationState, CommunicationVariantDetection, PreemptibleCommunicationGuard,
+        TransportControl, VariantDetectionMode,
     },
     dlt_ctx,
 };
@@ -32,8 +33,10 @@ use tokio::{
 
 use super::{
     disable::{DisableError, DisableLease, DisableLeaseId, DisableOwner, DisableReason},
-    guard::ActiveGuard,
-    state::{CommunicationStateStore, EnablingResultReceiver, detection_mode},
+    guard::{ActiveGuard, PreemptibleGuard},
+    state::{
+        CommunicationStateData, CommunicationStateStore, EnablingResultReceiver, detection_mode,
+    },
     transition::{self, LifecycleDecision, LifecycleRequest},
     worker::{self, LifecycleCommand, WorkerSender},
 };
@@ -44,6 +47,9 @@ use crate::plugin::{CommunicationPlugin, CommunicationPluginBuilder};
 /// `build_communication_runtime`.
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
+
+#[cfg(test)]
+mod drain_tests;
 
 /// Result of applying a [`LifecycleDecision`].
 enum ClaimOutcome {
@@ -100,6 +106,34 @@ impl CommunicationHandle {
         // Must be atomic with the admission check above. Otherwise a
         // `disable()` could claim `Enabled -> Disabling` in the gap.
         Ok(ActiveGuard::register(&mut state, Arc::clone(&self.state)))
+    }
+
+    /// Acquires communication for preemptible background work, such as tester
+    /// present.
+    ///
+    /// The guard blocks neither a `disable()` nor a new whole-vehicle
+    /// detection. It is admitted while `Enabled` and while a disable waits for
+    /// in-flight requests. A disable that proceeds stops its holder during
+    /// deinitialization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when communication is not available for preemptible
+    /// work.
+    pub fn acquire_preemptible(&self) -> Result<PreemptibleCommunicationGuard, CommunicationError> {
+        let mut state = self.state.lock();
+        transition::preemptible_guard_admission(&state)?;
+        Ok(PreemptibleGuard::register(
+            &mut state,
+            Arc::clone(&self.state),
+        ))
+    }
+
+    /// Sets how long a `disable()` waits for in-flight requests and detection
+    /// to finish before refusing with [`DisableError::InUse`]. Zero refuses
+    /// immediately.
+    pub fn set_disable_drain_timeout(&self, timeout: std::time::Duration) {
+        self.state.lock().disable_drain_timeout = timeout;
     }
 
     /// Registers a hook that runs during subsequent lifecycle transitions.
@@ -454,7 +488,7 @@ impl CommunicationHandle {
 
         // The sender died without publishing. Clear the slot so the next caller
         // claims a fresh detection instead of joining a dead one.
-        state.detection_in_flight = None;
+        state.clear_detection_in_flight();
         state.variant_detection = VariantDetectionMode::Never;
         ClaimOutcome::Settled(Err(CommunicationOperationFailure::WorkerUnavailable {
             operation: CommunicationOperation::Detect,
@@ -517,7 +551,7 @@ impl CommunicationHandle {
                 operation: CommunicationOperation::Detect,
             });
         }
-        state.detection_in_flight = None;
+        state.clear_detection_in_flight();
         if result.is_err() {
             state.variant_detection = VariantDetectionMode::Never;
         }
@@ -546,7 +580,7 @@ impl CommunicationHandle {
                 .as_ref()
                 .is_some_and(|current| current.same_channel(failed))
             {
-                state.detection_in_flight = None;
+                state.clear_detection_in_flight();
                 state.variant_detection = VariantDetectionMode::Never;
             }
             return failure;
@@ -591,18 +625,30 @@ impl CommunicationHandle {
                 self.worker.is_shutting_down(),
                 LifecycleRequest::Disable,
             ) {
-                LifecycleDecision::ClaimDisable { resumes_transport } => {
+                LifecycleDecision::ClaimDisable {
+                    resumes_transport,
+                    drain,
+                } => {
                     // Decide under one lock whether releasing brings the
                     // transport back, and whether it detects when it does.
                     let resume_detects = state.variant_detection == VariantDetectionMode::Always;
+                    // Claiming `Disabling` right away refuses new request
+                    // guards, so a stream of short requests cannot keep the
+                    // wait below from ever finishing.
                     state.state = CommunicationState::Disabling;
                     state.disable_owner = Some(DisableOwner {
                         id,
                         resumes_transport,
                         resume_detects,
+                        draining: drain,
                     });
                 }
-                LifecycleDecision::GuardsHeld => return Err(DisableError::InUse),
+                LifecycleDecision::GuardsHeld => {
+                    return Err(DisableError::InUse(in_use_snapshot(
+                        &state,
+                        std::time::Duration::ZERO,
+                    )));
+                }
                 LifecycleDecision::ShuttingDown => {
                     return Err(DisableError::Failed(
                         CommunicationOperationFailure::ShuttingDown {
@@ -632,8 +678,7 @@ impl CommunicationHandle {
         }
 
         match self.spawn_disable(id, reason).await {
-            Ok(Ok(lease)) => Ok(lease),
-            Ok(Err(failure)) => Err(DisableError::Failed(failure)),
+            Ok(result) => result,
             Err(join_error) => {
                 tracing::error!(%join_error, "Communication disable task failed");
                 let failure = CommunicationOperationFailure::TransitionFailure {
@@ -649,7 +694,7 @@ impl CommunicationHandle {
         &self,
         id: DisableLeaseId,
         reason: DisableReason,
-    ) -> JoinHandle<Result<DisableLease, CommunicationOperationFailure>> {
+    ) -> JoinHandle<Result<DisableLease, DisableError>> {
         let handle = self.clone();
         cda_interfaces::spawn_named!("communication-disable", async move {
             handle.run_disable_operation(id, reason).await
@@ -661,6 +706,104 @@ impl CommunicationHandle {
     /// so an abandoned task still finishes and the lease's `Drop` still defers
     /// back to `Disabled`.
     async fn run_disable_operation(
+        &self,
+        id: DisableLeaseId,
+        reason: DisableReason,
+    ) -> Result<DisableLease, DisableError> {
+        self.drain_for_disable(id).await?;
+        self.run_disable_on_worker(id, reason)
+            .await
+            .map_err(DisableError::Failed)
+    }
+
+    /// Waits until no request guard is held and no detection runs, then lets
+    /// the claimed disable proceed. A no-op when the disable did not claim a
+    /// wait.
+    ///
+    /// Runs in the detached disable task, so a caller that gives up cannot
+    /// leave the state stuck: every exit either proceeds or restores
+    /// `Enabled`.
+    ///
+    /// [[ dimpl~communication-disable-drain, Disable waits for in-flight requests, dimpl ]]
+    async fn drain_for_disable(&self, id: DisableLeaseId) -> Result<(), DisableError> {
+        let (timeout, idle) = {
+            let state = self.state.lock();
+            match state.disable_owner {
+                Some(owner) if owner.id == id && owner.draining => {
+                    (state.disable_drain_timeout, Arc::clone(&state.idle))
+                }
+                _ => return Ok(()),
+            }
+        };
+        let started = tokio::time::Instant::now();
+        let deadline = started.checked_add(timeout).unwrap_or(started);
+        // Restores `Enabled` unless disarmed, also if this task is aborted.
+        let mut rollback = DrainRollback {
+            handle: self,
+            id,
+            armed: true,
+        };
+
+        tracing::debug!(
+            timeout_ms = timeout.as_millis(),
+            "Disable waiting for in-flight requests to finish"
+        );
+        loop {
+            // Registered before the check, so a release between the check and
+            // the await below still wakes this task.
+            let notified = idle.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut state = self.state.lock();
+                if state.shutting_down || self.worker.is_shutting_down() {
+                    return Err(DisableError::Failed(
+                        CommunicationOperationFailure::ShuttingDown {
+                            operation: CommunicationOperation::Disable,
+                        },
+                    ));
+                }
+                let owner = match state.disable_owner {
+                    Some(owner) if owner.id == id && owner.draining => owner,
+                    // Someone else (shutdown) already took the state over.
+                    _ => {
+                        rollback.armed = false;
+                        return Err(DisableError::Failed(
+                            CommunicationOperationFailure::TransitionFailure {
+                                operation: CommunicationOperation::Disable,
+                            },
+                        ));
+                    }
+                };
+                if !state.blocks_disable() {
+                    // Committing under the lock: from here preemptible
+                    // guards are refused too.
+                    state.disable_owner = Some(DisableOwner {
+                        draining: false,
+                        ..owner
+                    });
+                    rollback.armed = false;
+                    tracing::debug!(
+                        waited_ms = started.elapsed().as_millis(),
+                        "In-flight requests finished, disable proceeds"
+                    );
+                    return Ok(());
+                }
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                let state = self.state.lock();
+                if state.blocks_disable() {
+                    let in_use = in_use_snapshot(&state, started.elapsed());
+                    drop(state);
+                    tracing::info!(%in_use, "Disable refused, communication still in use");
+                    return Err(DisableError::InUse(in_use));
+                }
+                // Became idle exactly at the deadline. Re-check and proceed.
+            }
+        }
+    }
+
+    async fn run_disable_on_worker(
         &self,
         id: DisableLeaseId,
         reason: DisableReason,
@@ -775,7 +918,12 @@ impl CommunicationHandle {
         // Set under the state lock before the worker starts tearing down. Every
         // racing state write then either lands before it and is overwritten by
         // the worker's terminal write, or observes the flag and skips.
-        self.state.lock().shutting_down = true;
+        {
+            let mut state = self.state.lock();
+            state.shutting_down = true;
+            // Stops a disable that is waiting for requests to finish.
+            state.idle.notify_waiters();
+        }
         self.worker.shutdown().await;
         if let Some(task) = self.worker_task.lock().await.take()
             && let Err(error) = task.await
@@ -795,11 +943,53 @@ impl CommunicationHandle {
             };
             state.disable_owner = None;
             state.enabling_result = None;
-            state.detection_in_flight = None;
+            state.clear_detection_in_flight();
             state.state =
                 CommunicationState::Error(CommunicationOperationFailure::WorkerUnavailable {
                     operation,
                 });
+        }
+    }
+}
+
+/// Reports what still blocks a disable, for [`DisableError::InUse`].
+fn in_use_snapshot(
+    state: &CommunicationStateData,
+    waited: std::time::Duration,
+) -> CommunicationInUse {
+    CommunicationInUse {
+        requests_in_flight: state.active_guards.len(),
+        detection_in_flight: state.detection_in_flight.is_some(),
+        waited,
+    }
+}
+
+/// Restores `Enabled` when a disable stops waiting without proceeding: on a
+/// timeout, an error, or when its task is aborted.
+struct DrainRollback<'a> {
+    handle: &'a CommunicationHandle,
+    id: DisableLeaseId,
+    armed: bool,
+}
+
+impl Drop for DrainRollback<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut state = self.handle.state.lock();
+        // Shutdown publishes its own terminal state.
+        if state.shutting_down {
+            return;
+        }
+        if state
+            .disable_owner
+            .is_some_and(|owner| owner.id == self.id && owner.draining)
+        {
+            // Nothing physical changed while waiting, so the transport is
+            // still up and the runtime is still enabled.
+            state.disable_owner = None;
+            state.state = CommunicationState::Enabled;
         }
     }
 }
@@ -827,6 +1017,7 @@ impl Drop for WorkerBuildGuard {
 ///
 /// `init_mode` is passed through unchanged for the plugin to interpret.
 /// `variant_detection` is framework policy, applied by the worker.
+/// `disable_drain_timeout` is how long a disable waits for in-flight requests.
 ///
 /// # Errors
 ///
@@ -836,6 +1027,7 @@ pub async fn build_communication_runtime<B>(
     transport_control: Arc<dyn TransportControl>,
     init_mode: CommunicationInitMode,
     variant_detection: VariantDetectionMode,
+    disable_drain_timeout: std::time::Duration,
 ) -> Result<CommunicationRuntime, BuildCommunicationRuntimeError<B::Error>>
 where
     B: CommunicationPluginBuilder,
@@ -845,6 +1037,7 @@ where
         CommunicationState::Disabled,
         variant_detection,
     ));
+    state.lock().disable_drain_timeout = disable_drain_timeout;
     let (sender, receivers) = worker::channel();
     let worker_task = Arc::new(tokio::sync::Mutex::new(None));
     let handle = CommunicationHandle {
@@ -1480,7 +1673,7 @@ mod tests {
         let guard = handle.acquire().unwrap();
         assert!(matches!(
             handle.disable(DisableReason::RuntimeUpdate).await,
-            Err(DisableError::InUse)
+            Err(DisableError::InUse(_))
         ));
         drop(guard);
 
@@ -2049,7 +2242,7 @@ mod tests {
         assert!(
             matches!(
                 handle.disable(DisableReason::RuntimeUpdate).await,
-                Err(DisableError::InUse)
+                Err(DisableError::InUse(_))
             ),
             "detection is a use of communication, so a lease must wait for it"
         );

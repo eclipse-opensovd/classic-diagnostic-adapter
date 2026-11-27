@@ -382,6 +382,24 @@ impl LifecycleWorker {
         self.state.lock().publish_enabling_result(result, operation)
     }
 
+    /// Deinitialization must stop all preemptible work before the transport
+    /// goes down. A guard left over here belongs to work that no
+    /// `deinitialize` hook stops, which is a bug in that work.
+    fn check_preemptible_guards_released(&self) {
+        let remaining = self.state.lock().preemptible_guards.len();
+        debug_assert_eq!(
+            remaining, 0,
+            "preemptible communication guards still held after deinitialization"
+        );
+        if remaining > 0 {
+            tracing::warn!(
+                remaining,
+                "Preemptible communication guards still held after deinitialization, their work \
+                 is cut off by the transport disable"
+            );
+        }
+    }
+
     /// Disables the transport for the current lease owner.
     async fn execute_disable(
         &self,
@@ -411,6 +429,7 @@ impl LifecycleWorker {
         }
 
         deinitialize_all(&self.resources.initializers).await;
+        self.check_preemptible_guards_released();
 
         match self.resources.transport_control.disable().await {
             Ok(()) => {
@@ -550,7 +569,9 @@ impl LifecycleWorker {
         };
         state.disable_owner = None;
         state.enabling_result = None;
-        state.detection_in_flight = None;
+        state.clear_detection_in_flight();
+        // A disable waiting for requests to finish must stop waiting now.
+        state.idle.notify_waiters();
         drop(state);
     }
 

@@ -474,6 +474,12 @@
 # The value (in seconds) for the HTTP `Retry-After` header returned when a
 # diagnostic request arrives while initialization is still pending.
 # deferred_retry_after_seconds = 30
+# How long (in milliseconds) an exclusive disable, e.g. for a runtime
+# update, waits for in-flight diagnostic requests and variant detection
+# to finish before refusing. New requests are refused while it waits.
+# Background tester present never blocks a disable. `0` refuses
+# immediately while any request is in flight.
+# disable_drain_timeout_ms = 5000
 # Controls when diagnostic transport network activation begins:
 # - "Always": whole-vehicle communication initializes eagerly at startup,
 #   always with a full VIR discovery (default).

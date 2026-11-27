@@ -21,7 +21,8 @@ use async_trait::async_trait;
 use cda_interfaces::communication_control::{
     ActivationCause, CommunicationError, CommunicationGuard, CommunicationInitMode,
     CommunicationLifecycle, CommunicationOperationFailure, CommunicationState,
-    CommunicationVariantDetection, DetectionCause, VariantDetectionMode,
+    CommunicationVariantDetection, DetectionCause, PreemptibleCommunicationGuard,
+    VariantDetectionMode,
 };
 
 // Re-export CommunicationHandle for plugin builders
@@ -53,6 +54,21 @@ pub trait CommunicationPlugin: cda_interfaces::Shutdown {
     ///
     /// Returns an error when communication is not enabled.
     fn acquire(&self) -> Result<CommunicationGuard, CommunicationError>;
+
+    /// Acquires communication for preemptible background work, such as tester
+    /// present, which a disable may cut off at any time. See
+    /// [`PreemptibleCommunicationGuard`].
+    ///
+    /// The default falls back to [`acquire`](Self::acquire), which keeps
+    /// custom plugins correct but lets the work block a disable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when communication is not available for preemptible
+    /// work.
+    fn acquire_preemptible(&self) -> Result<PreemptibleCommunicationGuard, CommunicationError> {
+        self.acquire().map(PreemptibleCommunicationGuard::new)
+    }
 
     /// Activates communication or attempts recovery from an error.
     ///

@@ -654,6 +654,62 @@ Post-Update Deferred Communication
         @enduml
 
 
+Exclusive Disable Waits for In-Flight Requests
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. arch:: Exclusive Disable Waits for In-Flight Requests
+    :id: arch~dt-disable-drain
+    :links: dimpl~communication-disable-drain, dimpl~communication-preemptible-guard, testset~communication-disable-drain
+    :status: draft
+
+    The exclusive disable lease (e.g. for a runtime update) must not cut off communication that
+    is really in progress, such as a flash transfer, but must not fail because of short requests
+    or the CDA's own background traffic either. Two kinds of communication guards exist:
+
+    * **Request guards** are held by every client-triggered UDS operation. A disable waits for
+      them, and for an in-flight whole-vehicle variant detection, for up to
+      ``communication.disable_drain_timeout_ms`` (default 5000 ms). While it waits, the state
+      is ``Disabling`` and new request guards are refused with ``503 Service Unavailable`` and
+      ``Retry-After``, so a stream of short requests cannot prevent the disable. If requests are
+      still running at the deadline, the state returns to ``Enabled`` and the disable is
+      refused, reporting how many requests were in flight and whether detection was running.
+      ``0`` refuses immediately.
+    * **Preemptible guards** are held by background work that may be cut off at any time,
+      currently only tester present. They block neither a disable nor a variant detection,
+      and are still admitted while the disable waits, so ECU sessions survive a wait that times
+      out. Once the disable proceeds, they are refused, and the lifecycle hooks' deinitialization
+      stops their holders (tester present loops are aborted) before the transport goes down.
+
+    .. uml::
+        :caption: Disable Waiting for In-Flight Requests
+
+        @startuml
+        skinparam backgroundColor #FFFFFF
+        skinparam sequenceArrowThickness 2
+
+        participant "Runtime Update" as Update
+        participant "Communication Lifecycle" as Lifecycle
+        participant "Client Request" as Request
+        participant "Tester Present" as TP
+        participant "Diagnostic Transport" as Transport
+
+        Request -> Lifecycle: acquire request guard
+        Update -> Lifecycle: disable
+        Lifecycle -> Lifecycle: Disabling (waiting)
+        TP -> Lifecycle: acquire preemptible guard
+        Lifecycle --> TP: admitted
+        alt request finishes before the timeout
+            Request -> Lifecycle: release request guard
+            Lifecycle -> TP: deinitialize (abort tester present)
+            Lifecycle -> Transport: disable
+            Lifecycle --> Update: exclusive disable lease
+        else timeout
+            Lifecycle -> Lifecycle: Enabled
+            Lifecycle --> Update: in use (requests in flight)
+        end
+        @enduml
+
+
 Health Monitoring
 ^^^^^^^^^^^^^^^^^
 

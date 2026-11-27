@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use cda_interfaces::communication_control::CommunicationGuard;
+use cda_interfaces::communication_control::{CommunicationGuard, PreemptibleCommunicationGuard};
 
 use super::state::{CommunicationStateData, CommunicationStateStore};
 
@@ -59,7 +59,46 @@ impl ActiveGuard {
 impl Drop for ActiveGuard {
     fn drop(&mut self) {
         if let Some(id) = self.id.take() {
-            let _removed = self.state.lock().active_guards.remove(&id);
+            let mut state = self.state.lock();
+            if state.active_guards.remove(&id) && state.active_guards.is_empty() {
+                // Wakes a disable waiting for in-flight requests to finish.
+                state.idle.notify_waiters();
+            }
+        }
+    }
+}
+
+/// Marks communication as used by preemptible background work, such as tester
+/// present. Unlike [`ActiveGuard`] it does not block a disable, which instead
+/// stops the holder during deinitialization. Dropping releases the slot
+/// synchronously.
+pub(crate) struct PreemptibleGuard {
+    id: Option<CommunicationGuardId>,
+    state: Arc<CommunicationStateStore>,
+}
+
+impl PreemptibleGuard {
+    /// Registers a new preemptible guard entry in `data`.
+    ///
+    /// Takes the caller's live borrow for the same reason as
+    /// [`ActiveGuard::register`].
+    pub(crate) fn register(
+        data: &mut CommunicationStateData,
+        state: Arc<CommunicationStateStore>,
+    ) -> PreemptibleCommunicationGuard {
+        let id = CommunicationGuardId(uuid::Uuid::new_v4());
+        data.preemptible_guards.insert(id);
+        PreemptibleCommunicationGuard::new(Self {
+            id: Some(id),
+            state,
+        })
+    }
+}
+
+impl Drop for PreemptibleGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            let _removed = self.state.lock().preemptible_guards.remove(&id);
         }
     }
 }
@@ -89,5 +128,21 @@ mod tests {
         assert_eq!(guards(), 1, "a guard must not release another's entry");
         drop(guard2);
         assert_eq!(guards(), 0);
+    }
+
+    /// Preemptible guards are tracked separately and never count as request
+    /// guards.
+    #[test]
+    fn preemptible_guards_are_tracked_separately() {
+        let state = Arc::new(CommunicationStateStore::new(
+            CommunicationState::Enabled,
+            cda_interfaces::communication_control::VariantDetectionMode::Always,
+        ));
+        let guard = PreemptibleGuard::register(&mut state.lock(), Arc::clone(&state));
+        assert_eq!(state.lock().preemptible_guards.len(), 1);
+        assert!(state.lock().active_guards.is_empty());
+        assert!(!state.lock().blocks_disable());
+        drop(guard);
+        assert!(state.lock().preemptible_guards.is_empty());
     }
 }
