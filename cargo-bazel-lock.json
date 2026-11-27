@@ -1,5 +1,5 @@
 {
-  "checksum": "af41e0a00fd1fef3951c9f82f94eda1b1c58c469ce43b6740ef8f1cf86120cc4",
+  "checksum": "c6122cf87e7d07b17c247fa6240ce8129c939337c10adebbd2dc2919193bab44",
   "crates": {
     "aho-corasick 1.1.5": {
       "name": "aho-corasick",
@@ -7718,7 +7718,7 @@
             ],
             "cfg(windows)": [
               {
-                "id": "windows-sys 0.52.0",
+                "id": "windows-sys 0.61.2",
                 "target": "windows_sys"
               }
             ]
@@ -21350,7 +21350,7 @@
                 "alias": "libc_errno"
               },
               {
-                "id": "windows-sys 0.52.0",
+                "id": "windows-sys 0.61.2",
                 "target": "windows_sys"
               }
             ],
@@ -24993,7 +24993,7 @@
             ],
             "cfg(windows)": [
               {
-                "id": "windows-sys 0.52.0",
+                "id": "windows-sys 0.61.2",
                 "target": "windows_sys"
               }
             ],
@@ -30109,16 +30109,6 @@
         "compile_data_glob": [
           "**"
         ],
-        "crate_features": {
-          "common": [
-            "Win32",
-            "Win32_Foundation",
-            "Win32_Storage",
-            "Win32_Storage_FileSystem",
-            "default"
-          ],
-          "selects": {}
-        },
         "deps": {
           "common": [
             {
