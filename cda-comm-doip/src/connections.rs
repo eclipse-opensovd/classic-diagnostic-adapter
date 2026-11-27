@@ -509,6 +509,7 @@ fn spawn_connection_reset_task(
 }
 
 #[tracing::instrument(
+    level = "debug",
     skip_all,
     fields(dlt_context = dlt_ctx!("DOIP"))
 )]

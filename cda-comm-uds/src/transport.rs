@@ -286,6 +286,7 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuSecurity> UdsManager<S, 
     ///
     /// Used for housekeeping traffic (tester present, session/security resets) that carries
     /// no request-scoped credentials and therefore skips the pre-send authorization hook.
+    #[tracing::instrument(skip_all, fields(ecu_name = %ecu_name, dlt_context = dlt_ctx!("UDS")))]
     pub(crate) async fn send_with_raw_payload(
         &self,
         ecu_name: &str,
@@ -315,6 +316,7 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuSecurity> UdsManager<S, 
         reason = "Splitting the send/receive flow would reduce readability"
     )]
     #[tracing::instrument(
+        level = "debug",
         skip(self, payload, security_plugin),
         fields(ecu_name,
             expect_response,
@@ -876,7 +878,7 @@ async fn await_gateway_task(mut task: SupervisedGatewayTask, ecu_name: &str) {
     }
 }
 
-#[tracing::instrument(skip_all,
+#[tracing::instrument(level = "debug", skip_all,
     fields(dlt_context = dlt_ctx!("UDS"))
 )]
 pub(crate) fn validate_timeout_by_policy(

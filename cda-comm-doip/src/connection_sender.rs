@@ -20,6 +20,7 @@ use tokio::{
     sync::{mpsc, watch},
     time::Interval,
 };
+use tracing::Instrument as _;
 
 use crate::{
     DiagnosticResponse,
@@ -42,6 +43,17 @@ pub(crate) fn spawn_gateway_sender_task<T>(
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    // The loop runs as long as the connection, so it gets its own root span instead of
+    // keeping the span of the caller open. The DLT context is set for everything it logs.
+    let span = tracing::info_span!(
+        parent: None,
+        "doip_gateway_sender",
+        gateway_ip = %gateway_connection.gateway_doip_config.gateway_ip,
+        gateway_name = %gateway_connection.gateway_doip_config.name,
+        dlt_context = dlt_ctx!("DOIP"),
+    );
+    span.follows_from(tracing::Span::current());
+
     cda_interfaces::spawn_named!(
         &format!(
             "doip-gateway-sender-{}",
@@ -182,6 +194,7 @@ where
                 }
             }
         }
+        .instrument(span)
     )
 }
 

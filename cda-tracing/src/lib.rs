@@ -10,7 +10,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use std::ops::Deref;
+use std::{io::IsTerminal as _, ops::Deref};
 
 use opentelemetry::trace::TracerProvider;
 use serde::{Deserialize, Serialize};
@@ -130,6 +130,13 @@ pub fn new_term_subscriber<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>
 ) -> Result<BoxedLayer<S>, TracingSetupError> {
     // Ensure tracing is initialized
     let term_subscriber = tracing_subscriber::fmt::layer::<S>()
+        // Color codes only help on a terminal. Elsewhere (journald, docker logs, pipes) they
+        // clutter the output, and formatting them for every span field costs CPU.
+        // `with_ansi` overrides the `NO_COLOR` check of the default, so repeat it here.
+        .with_ansi(
+            std::io::stdout().is_terminal()
+                && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()),
+        )
         .with_file(false)
         .with_line_number(false)
         .with_target(true)
@@ -171,6 +178,7 @@ pub fn new_file_subscriber<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>
     let (non_blocking_appender, guard) = tracing_appender::non_blocking(appender);
 
     let file_subscriber = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
         .with_file(false)
         .with_line_number(false)
         .with_span_events(

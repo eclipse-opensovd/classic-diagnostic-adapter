@@ -233,7 +233,7 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe>
 impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe> PhysicalTransport
     for DiagnosticTransportRouter<D, C>
 {
-    #[tracing::instrument(skip_all, fields(
+    #[tracing::instrument(level = "debug", skip_all, fields(
         ecu = %transmission_params.ecu_name,
         gateway_addr = transmission_params.gateway_address
     ))]

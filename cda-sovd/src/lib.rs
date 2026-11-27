@@ -476,8 +476,8 @@ where
             .make_span_with(|request: &axum::http::Request<_>| {
                 tracing::info_span!(
                         "request",
-                    method = ?request.method(),
-                        path = request.uri().to_string(),
+                    method = %request.method(),
+                        path = %request.uri(),
                         status_code = tracing::field::Empty,
                         latency = tracing::field::Empty,
                         error = tracing::field::Empty,
@@ -496,14 +496,14 @@ where
                  latency: std::time::Duration,
                  span: &tracing::Span| {
                     span.record("status_code", response.status().as_u16());
-                    span.record("latency", format!("{latency:?}"));
+                    span.record("latency", tracing::field::debug(latency));
                 },
             )
             .on_failure(
                 |error: tower_http::classify::ServerErrorsFailureClass,
                  latency: std::time::Duration,
                  span: &tracing::Span| {
-                    span.record("latency", format!("{latency:?}"));
+                    span.record("latency", tracing::field::debug(latency));
                     if let tower_http::classify::ServerErrorsFailureClass::StatusCode(status) =
                         error
                     {
