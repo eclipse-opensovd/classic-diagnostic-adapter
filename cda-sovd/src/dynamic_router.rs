@@ -114,6 +114,109 @@ impl BulkDataCategories {
 /// Insertion order determines override precedence in the fallback chain.
 type RouteGroups = Arc<RwLock<IndexMap<u64, RouteGroup>>>;
 
+/// Routes to register with a [`DynamicRouter`].
+///
+/// Besides an [`ApiRouter`] it can carry the already serialized documentation of nested
+/// routers, see [`FinishedDocs`].
+pub struct ApiRoutes {
+    router: ApiRouter,
+    finished_paths: Vec<Box<[u8]>>,
+}
+
+impl ApiRoutes {
+    pub(crate) fn new(router: ApiRouter, finished_docs: FinishedDocs) -> Self {
+        Self {
+            router,
+            finished_paths: finished_docs.0,
+        }
+    }
+}
+
+impl From<ApiRouter> for ApiRoutes {
+    fn from(router: ApiRouter) -> Self {
+        Self::new(router, FinishedDocs::default())
+    }
+}
+
+/// Documentation of nested routers, finished and serialized one router at a time.
+///
+/// [`ApiRouter::nest_api_service`] keeps the in-memory documentation of every nested router
+/// until the whole router is finished. With many nested routers (e.g. the routes of each
+/// ECU) that is a large, short-lived peak. Nesting through [`FinishedDocs::nest`] keeps only
+/// one nested router's documentation in memory at a time.
+#[derive(Default)]
+pub(crate) struct FinishedDocs(Vec<Box<[u8]>>);
+
+impl FinishedDocs {
+    /// Nests `routes` under `path` like [`ApiRouter::nest_api_service`], but finishes and
+    /// serializes their documentation right away.
+    pub(crate) fn nest<S: Clone + Send + Sync + 'static>(
+        &mut self,
+        router: ApiRouter<S>,
+        path: &str,
+        routes: ApiRouter,
+    ) -> ApiRouter<S> {
+        let (nested, paths_json) = finish_nested(path, routes);
+        self.0.extend(paths_json);
+        router.nest_service(path, nested)
+    }
+}
+
+/// Finishes the documentation of `routes` nested under `path` and serializes its paths.
+fn finish_nested(path: &str, routes: ApiRouter) -> (axum::Router, Option<Box<[u8]>>) {
+    // `finish_api` takes the schema definitions collected so far and resets aide's
+    // thread-local generation context. Move the schema generator out of the way while
+    // finishing, so schema names stay unique across all routes and the definitions remain
+    // for the final `finish_api` of the whole group, as with `nest_api_service`.
+    let schema_generator = aide::generate::in_context(|ctx| std::mem::take(&mut ctx.schema));
+    let mut api = OpenApi::default();
+    let router = routes.finish_api(&mut api);
+    configure_openapi_generation();
+    aide::generate::in_context(|ctx| ctx.schema = schema_generator);
+
+    let paths_json = api.paths.and_then(|paths| {
+        // Same path joining as `ApiRouter::nest_api_service`.
+        let nested = Paths {
+            paths: paths
+                .paths
+                .into_iter()
+                .map(|(route, item)| (nested_route_path(path, &route), item))
+                .collect(),
+            extensions: paths.extensions,
+        };
+        serialize_paths(&nested)
+    });
+    (router, paths_json)
+}
+
+/// Configures aide's thread-local `OpenAPI` generation context.
+fn configure_openapi_generation() {
+    aide::generate::extract_schemas(true);
+    aide::generate::on_error(|e| {
+        if let aide::Error::DuplicateRequestBody = e {
+            // skip DuplicateRequestBody
+            // those are triggered when overwriting the input type
+            return;
+        }
+        tracing::error!(error = %e, "OpenAPI generation error");
+    });
+}
+
+fn nested_route_path(path: &str, route: &str) -> String {
+    match (path.ends_with('/'), route) {
+        (true, _) => format!("{path}{}", route.trim_start_matches('/')),
+        (false, "/") => path.to_owned(),
+        (false, _) => format!("{path}{route}"),
+    }
+}
+
+fn serialize_paths(paths: &Paths) -> Option<Box<[u8]>> {
+    serde_json::to_vec(paths)
+        .inspect_err(|e| tracing::error!(error = %e, "Failed to serialize OpenAPI paths"))
+        .ok()
+        .map(Vec::into_boxed_slice)
+}
+
 /// A route group split into its request-handling router and its `OpenAPI` paths.
 ///
 /// The [`ApiRouter`] is split once on registration, so recompositions only clone the
@@ -122,28 +225,39 @@ type RouteGroups = Arc<RwLock<IndexMap<u64, RouteGroup>>>;
 /// in-memory [`Paths`] and only needs to be parsed when `openapi.json` is requested.
 struct RouteGroup {
     router: axum::Router,
-    paths_json: Option<Box<[u8]>>,
+    /// Serialized [`Paths`]: those of the router itself, then those of nested routers
+    /// finished with [`FinishedDocs::nest`].
+    paths_json: Vec<Box<[u8]>>,
 }
 
 impl RouteGroup {
     fn paths(&self) -> Option<Paths> {
-        let json = self.paths_json.as_deref()?;
-        serde_json::from_slice(json)
-            .inspect_err(|e| tracing::error!(error = %e, "Failed to deserialize OpenAPI paths"))
-            .ok()
+        self.paths_json.iter().fold(None, |acc, json| {
+            match serde_json::from_slice::<Paths>(json) {
+                Ok(paths) => {
+                    let mut acc: Paths = acc.unwrap_or_default();
+                    acc.paths.extend(paths.paths);
+                    Some(acc)
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to deserialize OpenAPI paths");
+                    acc
+                }
+            }
+        })
     }
 }
 
-impl From<ApiRouter> for RouteGroup {
-    fn from(routes: ApiRouter) -> Self {
+impl From<ApiRoutes> for RouteGroup {
+    fn from(routes: ApiRoutes) -> Self {
         let mut api = OpenApi::default();
-        let router = routes.finish_api(&mut api);
-        let paths_json = api.paths.and_then(|paths| {
-            serde_json::to_vec(&paths)
-                .inspect_err(|e| tracing::error!(error = %e, "Failed to serialize OpenAPI paths"))
-                .ok()
-                .map(Vec::into_boxed_slice)
-        });
+        let router = routes.router.finish_api(&mut api);
+        let paths_json = api
+            .paths
+            .and_then(|paths| serialize_paths(&paths))
+            .into_iter()
+            .chain(routes.finished_paths)
+            .collect();
         Self { router, paths_json }
     }
 }
@@ -200,15 +314,7 @@ impl DynamicRouter {
     /// Creates a new [`DynamicRouter`] with default base layers and no route groups.
     #[must_use]
     pub fn new() -> Self {
-        aide::generate::extract_schemas(true);
-        aide::generate::on_error(|e| {
-            if let aide::Error::DuplicateRequestBody = e {
-                // skip DuplicateRequestBody
-                // those are triggered when overwriting the input type
-                return;
-            }
-            tracing::error!(error = %e, "OpenAPI generation error");
-        });
+        configure_openapi_generation();
 
         let route_groups = Arc::new(RwLock::new(IndexMap::new()));
         let finalizers: Arc<RwLock<Vec<RouteFinalizer>>> = Arc::new(RwLock::new(Vec::new()));
@@ -307,11 +413,11 @@ impl DynamicRouter {
     ///
     /// Retain the returned handle if you will need to hot-swap these routes at runtime
     /// (e.g., replacing vehicle routes after an MDD database reload).
-    pub async fn add_routes(&self, routes: ApiRouter) -> RouteHandle {
+    pub async fn add_routes(&self, routes: impl Into<ApiRoutes>) -> RouteHandle {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         {
             let mut groups = self.route_groups.write().await;
-            groups.insert(id, routes.into());
+            groups.insert(id, routes.into().into());
         }
         self.recompose().await;
         RouteHandle { id }
@@ -330,13 +436,13 @@ impl DynamicRouter {
     pub async fn replace_routes(
         &self,
         handle: &RouteHandle,
-        routes: ApiRouter,
+        routes: impl Into<ApiRoutes>,
     ) -> Result<(), RouteGroupNotFound> {
         {
             let mut groups = self.route_groups.write().await;
             match groups.entry(handle.id) {
                 indexmap::map::Entry::Occupied(mut entry) => {
-                    let _ = entry.insert(routes.into());
+                    let _ = entry.insert(routes.into().into());
                 }
                 indexmap::map::Entry::Vacant(_) => {
                     return Err(RouteGroupNotFound { id: handle.id });
@@ -726,6 +832,88 @@ mod tests {
         let api = dr.get_openapi().await;
         assert_eq!(get_path_description(&api, "/foo").as_deref(), Some("b foo"));
         assert_eq!(get_path_description(&api, "/bar").as_deref(), Some("a bar"));
+    }
+
+    #[tokio::test]
+    async fn finished_nested_docs_match_nest_api_service() {
+        // Two different types with the same name: the schema generator numbers them
+        // (`Item`, `Item2`), which only stays consistent with a shared generator.
+        mod first {
+            #[derive(serde::Serialize, schemars::JsonSchema)]
+            pub(super) struct Item {
+                pub(super) a: u8,
+            }
+        }
+        mod second {
+            #[derive(serde::Serialize, schemars::JsonSchema)]
+            pub(super) struct Item {
+                pub(super) b: String,
+            }
+        }
+        fn main_routes() -> ApiRouter {
+            ApiRouter::new().api_route(
+                "/components",
+                routing::get_with(
+                    || async { axum::Json(first::Item { a: 1 }) },
+                    |op| op.description("list"),
+                ),
+            )
+        }
+        fn ecu_routes() -> ApiRouter {
+            ApiRouter::new()
+                .api_route(
+                    "/",
+                    routing::get_with(|| async { "root" }, |op| op.description("root")),
+                )
+                .api_route(
+                    "/data/{id}",
+                    routing::get_with(
+                        || async {
+                            axum::Json(second::Item {
+                                b: "data".to_owned(),
+                            })
+                        },
+                        |op| op.description("data"),
+                    ),
+                )
+        }
+
+        let expected = {
+            let dr = DynamicRouter::new();
+            dr.add_routes(
+                main_routes()
+                    .nest_api_service("/components/a", ecu_routes())
+                    .nest_api_service("/components/b", ecu_routes()),
+            )
+            .await;
+            serde_json::to_value(&*dr.get_openapi().await).unwrap()
+        };
+
+        let dr = DynamicRouter::new();
+        let mut docs = FinishedDocs::default();
+        let router = docs.nest(main_routes(), "/components/a", ecu_routes());
+        let router = docs.nest(router, "/components/b", ecu_routes());
+        dr.add_routes(ApiRoutes::new(router, docs)).await;
+
+        let actual = serde_json::to_value(&*dr.get_openapi().await).unwrap();
+        assert!(
+            actual.to_string().contains("#/components/schemas/Item2"),
+            "expected numbered schema names in {actual}"
+        );
+        assert_eq!(actual, expected);
+        for (path, body) in [
+            ("/components/a", "root"),
+            ("/components/b/data/x", r#"{"b":"data"}"#),
+        ] {
+            let resp = dr
+                .get_router()
+                .await
+                .oneshot(request("GET", path))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{path}");
+            assert_eq!(body_to_string(resp.into_body()).await, body, "{path}");
+        }
     }
 
     #[tokio::test]

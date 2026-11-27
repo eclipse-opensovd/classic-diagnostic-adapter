@@ -64,6 +64,7 @@ use uuid::Uuid;
 
 use crate::{
     VendorErrorCode,
+    dynamic_router::{ApiRoutes, FinishedDocs},
     sovd::components::ecu::{
         configurations, data, data_categories, faults, genericservice, modes, operations,
         x_single_ecu_jobs, x_sovd2uds_bulk_data, x_sovd2uds_download,
@@ -786,7 +787,7 @@ pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: Securi
     locks: Arc<Locks>,
     communication_access: Arc<dyn CommunicationAccess>,
     doip_connect: Option<Arc<dyn DoipConnect>>,
-) -> Router {
+) -> ApiRoutes {
     let flash_data = Arc::new(RwLock::new(sovd_interfaces::sovd2uds::FileList {
         files: Vec::new(),
         path: Some(PathBuf::from(flash_config.files_path)),
@@ -802,12 +803,14 @@ pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: Securi
         doip_connect,
     };
 
-    let router = components_route::<T, U>(state.clone(), &mut file_manager).await;
+    let mut ecu_docs = FinishedDocs::default();
+    let router = components_route::<T, U>(state.clone(), &mut file_manager, &mut ecu_docs).await;
 
-    vehicle_route::<T, S>(state, router, functional_group_config)
+    let router = vehicle_route::<T, S>(state, router, functional_group_config)
         .await
         .layer(middleware::from_fn(security_plugin_middleware::<S>))
-        .with_state(uds.clone())
+        .with_state(uds.clone());
+    ApiRoutes::new(router, ecu_docs)
 }
 
 async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoader>(
@@ -956,9 +959,13 @@ fn docs_components(op: TransformOperation) -> TransformOperation {
         })
 }
 
+/// The ECU routers are nested through `ecu_docs`, which finishes their documentation one
+/// ECU at a time: with dozens of ECUs, the in-memory documentation of all of them at once
+/// is a large startup peak that the allocator cannot fully return afterwards.
 async fn components_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
     state: WebserverState<T>,
     file_manager: &mut HashMap<String, U>,
+    ecu_docs: &mut FinishedDocs,
 ) -> Router<WebserverState<T>> {
     let mut router = Router::new().api_route(
         "/vehicle/v15/components",
@@ -968,7 +975,7 @@ async fn components_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + '
     for ecu_name in ecus.drain(0..) {
         match ecu_route::<T, U>(&ecu_name, &state, file_manager) {
             Ok((ecu_path, nested)) => {
-                router = router.nest_api_service(&ecu_path, nested);
+                router = ecu_docs.nest(router, &ecu_path, nested);
             }
             Err(e) => {
                 tracing::error!(error = %e, "Failed to create route for ECU '{ecu_name}'");

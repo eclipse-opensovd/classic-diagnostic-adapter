@@ -249,7 +249,7 @@ where
 pub async fn build_vehicle_routes<T, M, S>(
     config: VehicleConfig,
     resources: VehicleResources<T, M>,
-) -> aide::axum::ApiRouter
+) -> dynamic_router::ApiRoutes
 where
     T: UdsEcu + SchemaProvider + Clone + Send + Sync + 'static,
     M: FileManager + Send + Sync + 'static,
@@ -298,7 +298,9 @@ where
     let operations_router =
         sovd::apps::sovd2uds::operations::runtimefilesupdate::routes::<S, P, L>(route_state);
     let router = bulk_data_router.merge(operations_router);
-    let handle = dynamic_router.add_routes(router.into()).await;
+    let handle = dynamic_router
+        .add_routes(aide::axum::ApiRouter::from(router))
+        .await;
     for path in sovd::apps::sovd2uds::bulk_data::runtimefiles::CATEGORY_PATHS {
         dynamic_router.register_bulk_data_category(path).await;
     }
