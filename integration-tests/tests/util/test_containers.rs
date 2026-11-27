@@ -355,6 +355,11 @@ pub(crate) async fn cda_container_for(
         image
             .with_mount(read_only_bind(databases_dir, CDA_DATABASES_DIR))
             .with_cmd(["--databases-dir", CDA_DATABASES_DIR])
+            // The userfaultfd pager needs the syscall. The kernel only allows it
+            // without `vm.unprivileged_userfaultfd` with `CAP_SYS_PTRACE`, and
+            // the builtin seccomp profile of Docker blocks it even then.
+            .with_cap_add("SYS_PTRACE")
+            .with_security_opt("seccomp=unconfined")
             // The healthcheck of the image, probed every 100 ms while the CDA
             // starts, see HEALTHCHECK_START_INTERVAL.
             .with_health_check(

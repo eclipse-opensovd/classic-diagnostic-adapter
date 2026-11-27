@@ -396,6 +396,10 @@ where
         }
     };
     tracing::info!("Starting CDA - version {}", cda_version());
+    cda_pager::init(&config.pager).map_err(|e| AppError::ConfigurationError {
+        message: e.to_string(),
+        source: Some(Box::new(e)),
+    })?;
     // Emitted here rather than in `validate_sanity`, which runs before tracing is set up.
     config
         .database

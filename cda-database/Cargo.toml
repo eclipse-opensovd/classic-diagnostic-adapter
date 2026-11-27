@@ -28,6 +28,7 @@ path = "src/lib.rs"
 [dependencies]
 # internal dependencies
 cda-interfaces = { workspace = true }
+cda-pager = { workspace = true }
 # external
 bytes = { workspace = true }
 prost = { workspace = true }

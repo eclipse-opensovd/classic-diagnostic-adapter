@@ -67,6 +67,10 @@ fn reference_config_instance() -> Configuration {
         ..config.functional_description
     };
 
+    // `pager.enabled` defaults to true on Linux only. Pin it so the reference
+    // config does not depend on the platform it is generated on.
+    config.pager.enabled = true;
+
     // `server` defaults to the `Tcp` transport already (see `ServerTransport::default`),
     // so no extra example value is needed here. The `unix_socket` alternative is
     // documented on the `ServerTransport::UnixSocket` variant's doc comments.

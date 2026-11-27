@@ -55,5 +55,8 @@ mbedtls-4*
 # Heaptrack allocation captures
 heaptrack.*
 
+# VS Code launch trace captures
+Launch_opensovd-cda_*.trace/
+
 # Per-user trailer for PR descriptions (see .opencode/skills/cda-git-workflow)
 .opencode/pr-trailer

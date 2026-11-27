@@ -922,6 +922,32 @@
 # nanos = 0
 # secs = 3600
 
+# Userfaultfd based paging of MDD files with a global resident-page budget.
+[pager]
+# Read file data with `O_DIRECT`, bypassing the kernel page cache.
+# Falls back to buffered reads if the filesystem rejects it.
+# direct_io = false
+# Load MDD files through the userfaultfd based pager instead of plain
+# `mmap`. Linux only; enabling it on other platforms is an error.
+# Defaults to `true` on Linux and `false` elsewhere (plain `mmap`).
+# enabled = true
+# Page replacement strategy used to pick eviction victims: `fifo`,
+# `random` or `prefetch-first`.
+# eviction = "fifo"
+# Minimum fraction (0.0..=1.0) of the pool to evict whenever eviction
+# is triggered. Batching amortizes the eviction overhead.
+# eviction_batch_fraction = 0.0
+# Pager page size in bytes. Must be a power of two and at least 4096.
+# page_size = 4096
+# Global budget for resident pages across all open MDD files, in bytes.
+# pool_size_bytes = 104857600
+# Load the prefetch batch preceding the faulting page instead of the
+# pages following it.
+# prefetch_backward = false
+# Number of contiguous pages speculatively loaded per fault. Capped at
+# the pool size in pages.
+# prefetch_pages = 32
+
 # Configuration for update plugin, i.e. storage paths
 [runtime_update_config]
 # Value of the Retry-After header (in seconds) sent when the service is
