@@ -141,7 +141,7 @@ console-subscriber = "0.5.0"
 percent-encoding = "2.3.2"
 
 # ---- opentelemetry crates ----
-opentelemetry = { version = "0.32.0", default-features = false }
+opentelemetry = { version = "0.33.1", default-features = false }
 opentelemetry_sdk = { version = "0.32.1", default-features = false }
 opentelemetry-otlp = "0.32.0"
 opentelemetry-semantic-conventions = "0.32.1"
