@@ -99,7 +99,11 @@ pub mod tokio_ext {
     #[cfg(not(all(tokio_unstable, feature = "tokio-tracing")))]
     macro_rules! spawn_named {
         ($name:expr, $future:expr) => {{
-            let _ = &$name; // ignore the name in non-tracing builds
+            // ignore the name in non-tracing builds, without evaluating it: names are often
+            // built with `format!`, which would allocate on every spawn.
+            let _ = || {
+                let _ = &$name;
+            };
             tokio::task::spawn($future)
         }};
     }

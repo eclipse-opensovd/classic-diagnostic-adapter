@@ -127,7 +127,8 @@ pub(crate) type ExecutionLock<E> = StdRwLock<HashMap<String, IndexMap<Uuid, E>>>
 
 #[derive(Clone)]
 pub(crate) struct WebserverEcuState<T: UdsEcu + Clone, U: FileManager> {
-    ecu_name: String,
+    // Shared, as axum clones the state for every request.
+    ecu_name: Arc<str>,
     uds: T,
     locks: Arc<Locks>,
     // Map of Execution Id -> ComParamMap
@@ -988,7 +989,7 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
 ) -> Result<(String, Router), SovdError> {
     let ecu_lower = ecu_name.to_lowercase();
     let ecu_state = WebserverEcuState {
-        ecu_name: ecu_lower.clone(),
+        ecu_name: Arc::from(ecu_lower.as_str()),
         uds: state.uds.clone(),
         locks: Arc::<Locks>::clone(&state.locks),
         comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
@@ -2109,7 +2110,7 @@ pub(crate) mod tests {
         file_manager: U,
     ) -> WebserverEcuState<T, U> {
         WebserverEcuState {
-            ecu_name,
+            ecu_name: ecu_name.into(),
             uds,
             locks: Arc::new(Locks::new()),
             comparam_executions: Arc::new(RwLock::new(IndexMap::new())),

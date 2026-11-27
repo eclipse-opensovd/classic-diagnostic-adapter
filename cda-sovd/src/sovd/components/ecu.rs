@@ -112,7 +112,7 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
         StatusCode::OK,
         Json(sovd_interfaces::components::ecu::get::Response {
             id: ecu_name.to_lowercase(),
-            name: ecu_name.clone(),
+            name: ecu_name.to_string(),
             variant,
             last_seen,
             locks: format!("{base_path}/locks"),

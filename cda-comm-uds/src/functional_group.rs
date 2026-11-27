@@ -108,7 +108,7 @@ impl<S: EcuGateway, T: UdsEcuDb + PayloadDecoder + EcuSecurity> UdsManager<S, T>
             Ok(uds_responses) => {
                 let mut result_map = HashMap::new();
 
-                let Some(fgl_ecu) = self.ecus.get(&self.functional_description_database) else {
+                let Some(fgl_ecu) = self.ecus.get(&*self.functional_description_database) else {
                     tracing::error!(
                         "Functional description database ECU not found: {}",
                         self.functional_description_database
@@ -181,7 +181,7 @@ impl<S: EcuGateway, T: UdsEcuDb + EcuSecurity> UdsManager<S, T> {
         }
         let bridge = self
             .ecus
-            .get(&self.functional_description_database)
+            .get(&*self.functional_description_database)
             .ok_or_else(|| {
                 DiagServiceError::NotFound(format!(
                     "Functional description database {} not found",
@@ -311,7 +311,7 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
             }
         };
 
-        let Some(globals_ecu) = self.ecus.get(&self.functional_description_database) else {
+        let Some(globals_ecu) = self.ecus.get(&*self.functional_description_database) else {
             tracing::warn!(
                 functional_group = %functional_group,
                 description_database = %self.functional_description_database,
@@ -667,8 +667,8 @@ mod tests {
             security_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
             authentication_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
             state_coordinator: EcuStateCoordinator::new(HashMap::<String, EcuRuntimeState>::new()),
-            functional_description_database: "functional".to_owned(),
-            fault_config: FaultConfig::default(),
+            functional_description_database: Arc::from("functional"),
+            fault_config: Arc::new(FaultConfig::default()),
             request_lock_provider,
             communication_access: enabled_communication_access_for_test(),
             communication_retry_after: Duration::from_secs(1),

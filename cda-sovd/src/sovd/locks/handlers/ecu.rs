@@ -52,7 +52,7 @@ pub(crate) mod lock {
         delete_handler(
             &locks,
             LockScope::Ecu {
-                name: ecu_name.clone(),
+                name: ecu_name.to_string(),
             },
             &lock,
             &claims,
@@ -85,7 +85,7 @@ pub(crate) mod lock {
             LockUpdateContext {
                 all_locks: &locks,
                 scope: LockScope::Ecu {
-                    name: ecu_name.clone(),
+                    name: ecu_name.to_string(),
                 },
             },
             &lock,
@@ -115,7 +115,7 @@ pub(crate) mod lock {
         get_id_handler(
             &locks,
             LockScope::Ecu {
-                name: ecu_name.clone(),
+                name: ecu_name.to_string(),
             },
             &lock,
             &claims,
@@ -166,9 +166,9 @@ pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
     let (acquisition, pending, request) = match locks
         .evaluate_acquisition(
             cda_interfaces::lock_priority_api::LockScope::Ecu {
-                name: ecu_name.clone(),
+                name: ecu_name.to_string(),
             },
-            LockCoverage::new([ecu_name.clone()]),
+            LockCoverage::new([ecu_name.to_string()]),
             &body,
             &claims,
         )
@@ -222,7 +222,7 @@ pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
             all_locks: &locks,
             acquisition,
             pending,
-            coverage: LockCoverage::new([ecu_name.clone()]),
+            coverage: LockCoverage::new([ecu_name.to_string()]),
         },
         request,
         uri.path(),
@@ -284,7 +284,7 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
     get_handler(
         &locks,
         LockScope::Ecu {
-            name: ecu_name.clone(),
+            name: ecu_name.to_string(),
         },
         &claims,
         query.include_schema,

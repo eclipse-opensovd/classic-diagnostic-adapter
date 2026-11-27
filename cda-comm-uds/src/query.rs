@@ -51,7 +51,7 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
     async fn get_physical_ecus(&self) -> Vec<String> {
         self.ecus
             .keys()
-            .filter(|ecu| **ecu != self.functional_description_database)
+            .filter(|ecu| ecu.as_str() != &*self.functional_description_database)
             .cloned()
             .collect()
     }
@@ -174,7 +174,7 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
         }
 
         // Build functional groups from the functional description database
-        let group_names = match self.ecus.get(&self.functional_description_database) {
+        let group_names = match self.ecus.get(&*self.functional_description_database) {
             Some(func_desc_ecu) => func_desc_ecu.read().await.functional_groups(),
             None => Vec::new(),
         };

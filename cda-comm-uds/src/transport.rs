@@ -1135,8 +1135,8 @@ pub(crate) mod send_tests {
                 security_reset_tasks: Arc::new(RwLock::new(HashMap::default())),
                 authentication_reset_tasks: Arc::new(RwLock::new(HashMap::default())),
                 state_coordinator,
-                functional_description_database: String::new(),
-                fault_config,
+                functional_description_database: Arc::from(""),
+                fault_config: Arc::new(fault_config),
                 request_lock_provider: Arc::new(
                     cda_interfaces::request_authorization::NoRequestLockProvider,
                 ),

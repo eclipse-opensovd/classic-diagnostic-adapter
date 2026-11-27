@@ -146,8 +146,9 @@ pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
     /// Pending deAuthenticate after `mode_expiration`, one per ECU. See [`ResetTask`].
     authentication_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, ResetTask>>>,
     state_coordinator: EcuStateCoordinator,
-    functional_description_database: String,
-    fault_config: FaultConfig,
+    // Shared, so cloning the manager per request stays cheap.
+    functional_description_database: Arc<str>,
+    fault_config: Arc<FaultConfig>,
     request_lock_provider: Arc<dyn RequestLockProvider>,
     communication_access: Arc<dyn CommunicationAccess>,
     /// Configured retry hint surfaced on [`DiagServiceError::CommunicationNotReady`].
@@ -237,10 +238,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             security_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
             authentication_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
             state_coordinator,
-            functional_description_database: functional_description_config
-                .description_database
-                .clone(),
-            fault_config,
+            functional_description_database: Arc::from(
+                functional_description_config.description_database.as_str(),
+            ),
+            fault_config: Arc::new(fault_config),
             request_lock_provider,
             communication_access,
             communication_retry_after,
@@ -460,8 +461,8 @@ impl<S: Clone + EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
             security_reset_tasks: Arc::clone(&self.security_reset_tasks),
             authentication_reset_tasks: Arc::clone(&self.authentication_reset_tasks),
             state_coordinator: self.state_coordinator.clone(),
-            functional_description_database: self.functional_description_database.clone(),
-            fault_config: self.fault_config.clone(),
+            functional_description_database: Arc::clone(&self.functional_description_database),
+            fault_config: Arc::clone(&self.fault_config),
             request_lock_provider: Arc::clone(&self.request_lock_provider),
             communication_access: Arc::clone(&self.communication_access),
             communication_retry_after: self.communication_retry_after,
