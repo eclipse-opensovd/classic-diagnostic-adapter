@@ -26,9 +26,10 @@ use cda_interfaces::{
     request_authorization::{UdsRequestSendContext, UdsRequestTarget},
     service_ids,
 };
+use futures::FutureExt as _;
 use tokio::{
     sync::{OwnedSemaphorePermit, RwLock, mpsc},
-    task::{AbortHandle, JoinHandle},
+    task::JoinHandle,
 };
 
 use crate::{UdsEcuDb, UdsManager, types::UdsParameters};
@@ -52,28 +53,47 @@ pub(crate) enum CommunicationReadiness {
     AssumeReady,
 }
 
+/// A per-request gateway task together with the ECU permits it must hold until it has finished.
+///
+/// The normal path joins the task via [`await_gateway_task`]. Only when the request is
+/// cancelled while the task is still running does `Drop` abort the task and spawn a small
+/// holder task that releases the permits once the aborted task has really ended. This keeps
+/// the common path free of an extra task spawn per request.
 struct SupervisedGatewayTask {
-    abort_handle: AbortHandle,
-    supervisor: JoinHandle<()>,
+    task: Option<JoinHandle<()>>,
+    ecu_permits: Option<Arc<[OwnedSemaphorePermit]>>,
 }
 
 impl SupervisedGatewayTask {
     fn new(gateway_task: JoinHandle<()>, ecu_permits: Arc<[OwnedSemaphorePermit]>) -> Self {
-        let abort_handle = gateway_task.abort_handle();
-        let supervisor = tokio::spawn(async move {
-            log_gateway_task_result(gateway_task.await);
-            drop(ecu_permits);
-        });
         Self {
-            abort_handle,
-            supervisor,
+            task: Some(gateway_task),
+            ecu_permits: Some(ecu_permits),
         }
     }
 }
 
 impl Drop for SupervisedGatewayTask {
     fn drop(&mut self) {
-        self.abort_handle.abort();
+        let Some(task) = self.task.take() else {
+            return;
+        };
+        if task.is_finished() {
+            if let Some(result) = task.now_or_never() {
+                log_gateway_task_result(result);
+            }
+            return;
+        }
+        task.abort();
+        let ecu_permits = self.ecu_permits.take();
+        // Without a runtime (shutdown) the task cannot run anymore, so the permits
+        // can be released right away.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                log_gateway_task_result(task.await);
+                drop(ecu_permits);
+            });
+        }
     }
 }
 
@@ -864,18 +884,26 @@ pub(crate) fn needs_variant_detection(status: &EcuState) -> bool {
 /// and the next attempt's fresh one. If the grace period elapses first, the
 /// task is aborted and joined.
 async fn await_gateway_task(mut task: SupervisedGatewayTask, ecu_name: &str) {
-    match tokio::time::timeout(RETRY_TEARDOWN_GRACE, &mut task.supervisor).await {
-        Ok(result) => log_gateway_task_result(result),
+    // The handle stays inside `task` while awaiting: if this future is cancelled, `Drop`
+    // still aborts the gateway task and keeps the permits until it has finished.
+    let Some(handle) = task.task.as_mut() else {
+        return;
+    };
+    let result = match tokio::time::timeout(RETRY_TEARDOWN_GRACE, &mut *handle).await {
+        Ok(result) => result,
         Err(_elapsed) => {
             tracing::warn!(
                 ecu_name,
                 grace_period = ?RETRY_TEARDOWN_GRACE,
                 "Gateway task did not finish within the teardown grace period; aborting it"
             );
-            task.abort_handle.abort();
-            log_gateway_task_result((&mut task.supervisor).await);
+            handle.abort();
+            (&mut *handle).await
         }
-    }
+    };
+    // Joined: nothing left for `Drop` to do, the permits are released with `task`.
+    task.task = None;
+    log_gateway_task_result(result);
 }
 
 #[tracing::instrument(level = "debug", skip_all,
