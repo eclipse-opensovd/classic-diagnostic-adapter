@@ -1122,7 +1122,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         length_key_name: &str,
         param_ctx: ParamContext<'_>,
     ) -> Result<(), DiagServiceError> {
-        let byte_count = match data.get(length_key_name) {
+        let bit_count = match data.get(length_key_name) {
             Some(DiagDataTypeContainer::RawContainer(raw)) => {
                 let phys_val = operations::uds_data_to_serializable(
                     raw.data_type,
@@ -1162,9 +1162,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let physical_type = physical_base_type(normal_dop);
         let data_type = diag_coded_type.base_datatype();
 
-        if byte_count == 0 {
+        if bit_count == 0 {
             tracing::debug!(
-                "PARAM-LENGTH-INFO-TYPE resolved byte_count=0; inserting empty value (possible \
+                "PARAM-LENGTH-INFO-TYPE resolved bit_count=0; inserting empty value (possible \
                  database anomaly)"
             );
             data.insert(
@@ -1182,16 +1182,20 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         let byte_pos = param_ctx.read_byte_pos(uds_payload);
         let uds_bytes = uds_payload.data()?;
-        let (decoded_bytes, bit_len) =
-            diag_coded_type.decode_with_runtime_byte_length(uds_bytes, byte_pos, byte_count)?;
+        let (decoded_bytes, end) = diag_coded_type.decode_with_runtime_bit_length(
+            uds_bytes,
+            byte_pos,
+            param_ctx.parameter.bit_position() as usize,
+            bit_count,
+        )?;
 
-        uds_payload.set_last_read_byte_pos(byte_pos.saturating_add(byte_count));
+        uds_payload.set_last_read_byte_pos(end);
 
         data.insert(
             short_name,
             DiagDataTypeContainer::RawContainer(DiagDataTypeContainerRaw {
                 data: decoded_bytes,
-                bit_len,
+                bit_len: bit_count,
                 data_type,
                 compu_method,
                 physical_type,
@@ -2629,8 +2633,8 @@ mod tests {
         assert_uds_converts_to_json(
             &ecu_manager,
             &dc,
-            vec![pos_sid, 0x03, 0xAA, 0xBB, 0xCC],
-            json!({"pos_sid": u32::from(pos_sid), "len_key": 3, "var_data": "0xAA 0xBB 0xCC"}),
+            vec![pos_sid, 0x18, 0xAA, 0xBB, 0xCC],
+            json!({"pos_sid": u32::from(pos_sid), "len_key": 24, "var_data": "0xAA 0xBB 0xCC"}),
         )
         .await;
     }
@@ -2647,8 +2651,8 @@ mod tests {
         assert_uds_converts_to_json(
             &ecu_manager,
             &dc,
-            vec![pos_sid, 0x02, 0xAA, 0xBB],
-            json!({"pos_sid": u32::from(pos_sid), "len_key": 2, "var_data": "0xAA 0xBB"}),
+            vec![pos_sid, 0x10, 0xAA, 0xBB],
+            json!({"pos_sid": u32::from(pos_sid), "len_key": 16, "var_data": "0xAA 0xBB"}),
         )
         .await;
     }
@@ -2658,7 +2662,7 @@ mod tests {
         let (ecu_manager, dc, sid) =
             create_ecu_manager_with_param_length_info_service_ordered(false);
         let response = ecu_manager
-            .convert_request_from_uds(&dc, &create_payload(vec![sid, 0x02, 0xAA, 0xBB]), true)
+            .convert_request_from_uds(&dc, &create_payload(vec![sid, 0x10, 0xAA, 0xBB]), true)
             .await
             .expect("request with forward-referenced length key must decode");
         let mapped = response.mapped_data.expect("mapped data");

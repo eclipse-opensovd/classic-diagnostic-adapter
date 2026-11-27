@@ -200,32 +200,50 @@ impl DiagCodedType {
         }
     }
 
-    /// Extracts `byte_count` bytes at `byte_pos` from `uds_payload` for a PARAM-LENGTH-INFO field.
+    /// Extracts a PARAM-LENGTH-INFO field of `bit_len` bits, the physical value
+    /// of its LENGTH-KEY (ISO 22901-1:2008 7.3.6.2), starting at `byte_pos` and
+    /// `bit_pos`. Returns the data and the position following the field.
     ///
     /// # Errors
-    /// Returns `DiagServiceError::NotEnoughData` if the payload is too short.
-    pub fn decode_with_runtime_byte_length(
+    /// Returns `DiagServiceError::NotEnoughData` if the payload is too short,
+    /// and `DiagServiceError::BadPayload` if `bit_len` is not allowed for the
+    /// base data type (ISO 22901-1:2008 7.3.6.2.2).
+    pub fn decode_with_runtime_bit_length(
         &self,
         uds_payload: &[u8],
         byte_pos: usize,
-        byte_count: usize,
+        bit_pos: usize,
+        bit_len: usize,
     ) -> Result<(Vec<u8>, usize), DiagServiceError> {
-        if byte_count == 0 {
-            return Ok((Vec::new(), 0));
+        self.validate_bit_pos(bit_pos)?;
+        if bit_len == 0 {
+            return Ok((Vec::new(), byte_pos));
         }
-        let end_pos = byte_pos.saturating_add(byte_count);
-        if uds_payload.len() < end_pos {
-            return Err(DiagServiceError::NotEnoughData {
+        let checked_bit_len = BitLength::try_from(bit_len).map_err(|_| {
+            DiagServiceError::BadPayload(format!("Length of {bit_len} bit is out of range"))
+        })?;
+        self.base_datatype.validate_bit_len(checked_bit_len)?;
+        // The length is only known at runtime, so the whole-byte rule for byte
+        // based types (ISO 22901-1:2008 7.3.5.4) is checked here.
+        if matches!(
+            self.base_datatype,
+            DataType::ByteField | DataType::AsciiString | DataType::Utf8String
+        ) && !bit_len.is_multiple_of(8)
+        {
+            return Err(DiagServiceError::BadPayload(format!(
+                "Length must be a multiple of 8 bit for {:?}, got {bit_len} bit",
+                self.base_datatype
+            )));
+        }
+        let end_pos = byte_pos.saturating_add(bit_pos.saturating_add(bit_len).div_ceil(8));
+        let bytes = uds_payload
+            .get(byte_pos..end_pos)
+            .ok_or(DiagServiceError::NotEnoughData {
                 expected: end_pos,
                 actual: uds_payload.len(),
-            });
-        }
-        // bounds already verified above
-        let data = uds_payload
-            .get(byte_pos..end_pos)
-            .unwrap_or_default()
-            .to_vec();
-        Ok((data, byte_count.saturating_mul(8)))
+            })?;
+        let (data, _) = unpack_data(bit_len, bit_pos, None, bytes, self.byte_order())?;
+        Ok((data, end_pos))
     }
 
     #[must_use]
@@ -274,8 +292,8 @@ impl DiagCodedType {
 
             DiagCodedTypeVariant::ParamLengthInfo(ref key_name) => {
                 Err(DiagServiceError::InvalidDatabase(format!(
-                    "ParamLengthInfo '{key_name}' requires a runtime-resolved byte length; call \
-                     decode_with_runtime_byte_length instead"
+                    "ParamLengthInfo '{key_name}' requires a runtime-resolved bit length; call \
+                     decode_with_runtime_bit_length instead"
                 )))
             }
         }?;
@@ -1331,6 +1349,38 @@ mod tests {
     }
 
     #[test]
+    fn test_param_length_info_runtime_decode_numeric() {
+        let high_low = DiagCodedType::new_high_low_byte_order(
+            DataType::UInt32,
+            DiagCodedTypeVariant::ParamLengthInfo("LK".to_owned()),
+        )
+        .unwrap();
+        let (bytes, end) = high_low
+            .decode_with_runtime_bit_length(&[0x10, 0xAB, 0xCD], 1, 0, 12)
+            .unwrap();
+        assert_eq!(bytes, vec![0x0B, 0xCD]);
+        assert_eq!(end, 3);
+
+        // Whole bytes are normalized like STANDARD-LENGTH values.
+        let low_high = DiagCodedType::new(
+            DataType::UInt32,
+            DiagCodedTypeVariant::ParamLengthInfo("LK".to_owned()),
+            false,
+        )
+        .unwrap();
+        let (bytes, end) = low_high
+            .decode_with_runtime_bit_length(&[0x10, 0x34, 0x12], 1, 0, 16)
+            .unwrap();
+        assert_eq!(bytes, vec![0x12, 0x34]);
+        assert_eq!(end, 3);
+
+        assert!(matches!(
+            high_low.decode_with_runtime_bit_length(&[0x10; 10], 1, 0, 72),
+            Err(DiagServiceError::BadPayload(_))
+        ));
+    }
+
+    #[test]
     fn test_param_length_info_decode_requires_runtime_length() {
         let diag_type = DiagCodedType::new_high_low_byte_order(
             DataType::ByteField,
@@ -1340,7 +1390,7 @@ mod tests {
 
         let err = diag_type.decode(&[0xAA, 0xBB], 0, 0).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("decode_with_runtime_byte_length"));
+        assert!(msg.contains("decode_with_runtime_bit_length"));
     }
 
     #[test]
@@ -1351,17 +1401,39 @@ mod tests {
         )
         .unwrap();
 
-        let (bytes, bit_len) = diag_type
-            .decode_with_runtime_byte_length(&[0x10, 0x20, 0x30, 0x40], 1, 2)
+        let (bytes, end) = diag_type
+            .decode_with_runtime_bit_length(&[0x10, 0x20, 0x30, 0x40], 1, 0, 16)
             .unwrap();
         assert_eq!(bytes, vec![0x20, 0x30]);
-        assert_eq!(bit_len, 16);
+        assert_eq!(end, 3);
 
-        let (empty, empty_len) = diag_type
-            .decode_with_runtime_byte_length(&[0x10, 0x20], 1, 0)
+        let err = diag_type
+            .decode_with_runtime_bit_length(&[0x10, 0xAB, 0xCD], 1, 0, 12)
+            .unwrap_err();
+        assert!(
+            matches!(&err, DiagServiceError::BadPayload(msg) if msg.contains("multiple of 8")),
+            "unexpected error: {err:?}"
+        );
+
+        let err = diag_type
+            .decode_with_runtime_bit_length(&[0x10, 0x20], 1, 0, 16)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DiagServiceError::NotEnoughData {
+                    expected: 3,
+                    actual: 2
+                }
+            ),
+            "unexpected error: {err:?}"
+        );
+
+        let (empty, end) = diag_type
+            .decode_with_runtime_bit_length(&[0x10, 0x20], 1, 0, 0)
             .unwrap();
         assert_eq!(empty, [] as [u8; 0]);
-        assert_eq!(empty_len, 0);
+        assert_eq!(end, 1);
 
         let mut uds_payload = Vec::new();
         diag_type

@@ -1530,7 +1530,7 @@ mod tests {
         let (ecu_manager, dc, sid) = create_ecu_manager_with_param_length_info_service();
 
         let payload_data = hex_param_map(
-            serde_json::from_value(json!({"len_key": 3, "var_data": "0xAA 0xBB 0xCC"})).unwrap(),
+            serde_json::from_value(json!({"len_key": 24, "var_data": "0xAA 0xBB 0xCC"})).unwrap(),
         );
 
         let result = ecu_manager
@@ -1538,7 +1538,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.data, vec![sid, 0x03, 0xAA, 0xBB, 0xCC]);
+        assert_eq!(result.data, vec![sid, 0x18, 0xAA, 0xBB, 0xCC]);
     }
 
     #[tokio::test]
@@ -1547,16 +1547,16 @@ mod tests {
         let pos_sid = sid.saturating_add(cda_interfaces::UDS_ID_RESPONSE_BITMASK);
 
         let payload_data = hex_param_map(
-            serde_json::from_value(json!({"len_key": 3, "var_data": "0xAA 0xBB 0xCC"})).unwrap(),
+            serde_json::from_value(json!({"len_key": 24, "var_data": "0xAA 0xBB 0xCC"})).unwrap(),
         );
         let encoded = ecu_manager
             .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data), None)
             .await
             .unwrap();
 
-        assert_eq!(encoded.data, vec![sid, 0x03, 0xAA, 0xBB, 0xCC]);
+        assert_eq!(encoded.data, vec![sid, 0x18, 0xAA, 0xBB, 0xCC]);
 
-        let response_bytes = vec![pos_sid, 0x03, 0xAA, 0xBB, 0xCC];
+        let response_bytes = vec![pos_sid, 0x18, 0xAA, 0xBB, 0xCC];
         let decoded = ecu_manager
             .convert_from_uds(&dc, &create_payload(response_bytes), true, None)
             .await
@@ -1567,7 +1567,7 @@ mod tests {
             .unwrap()
             .data;
         assert_eq!(json_out.get("var_data"), Some(&json!("0xAA 0xBB 0xCC")));
-        assert_eq!(json_out.get("len_key"), Some(&json!(3)));
+        assert_eq!(json_out.get("len_key"), Some(&json!(24)));
     }
 
     #[tokio::test]
@@ -1576,18 +1576,18 @@ mod tests {
         let pos_sid = sid.saturating_add(cda_interfaces::UDS_ID_RESPONSE_BITMASK);
 
         let payload_data = UdsPayloadData::ParameterMap(
-            serde_json::from_value(json!({"len_key": 3, "var_data": "qrvM"})).unwrap(),
+            serde_json::from_value(json!({"len_key": 24, "var_data": "qrvM"})).unwrap(),
             BinaryEncoding::Base64,
         );
         let encoded = ecu_manager
             .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data), None)
             .await
             .unwrap();
-        assert_eq!(encoded.data, vec![sid, 0x03, 0xAA, 0xBB, 0xCC]);
+        assert_eq!(encoded.data, vec![sid, 0x18, 0xAA, 0xBB, 0xCC]);
 
         // Hex input must be rejected when base64 is selected.
         let hex_payload = UdsPayloadData::ParameterMap(
-            serde_json::from_value(json!({"len_key": 3, "var_data": "0xAA 0xBB 0xCC"})).unwrap(),
+            serde_json::from_value(json!({"len_key": 24, "var_data": "0xAA 0xBB 0xCC"})).unwrap(),
             BinaryEncoding::Base64,
         );
         assert!(
@@ -1597,7 +1597,7 @@ mod tests {
                 .is_err()
         );
 
-        let response_bytes = vec![pos_sid, 0x03, 0xAA, 0xBB, 0xCC];
+        let response_bytes = vec![pos_sid, 0x18, 0xAA, 0xBB, 0xCC];
         let decoded = ecu_manager
             .convert_from_uds(&dc, &create_payload(response_bytes), true, None)
             .await
@@ -1607,7 +1607,7 @@ mod tests {
             .unwrap()
             .data;
         assert_eq!(json_out.get("var_data"), Some(&json!("qrvM")));
-        assert_eq!(json_out.get("len_key"), Some(&json!(3)));
+        assert_eq!(json_out.get("len_key"), Some(&json!(24)));
     }
 
     #[tokio::test]
@@ -1618,7 +1618,7 @@ mod tests {
 
         let payload_data = hex_param_map(
             serde_json::from_value(json!({
-                "len_key": 3,
+                "len_key": 24,
                 "var_data": "0xAA 0xBB 0xCC",
                 "suffix": 500,
             }))
@@ -1632,11 +1632,11 @@ mod tests {
 
         assert_eq!(
             encoded.data,
-            vec![sid, 0x03, 0xAA, 0xBB, 0xCC, 0x01, 0xF4],
+            vec![sid, 0x18, 0xAA, 0xBB, 0xCC, 0x01, 0xF4],
             "suffix must be placed after the variable-length data, not at byte 0"
         );
 
-        let response_bytes = vec![pos_sid, 0x03, 0xAA, 0xBB, 0xCC, 0x01, 0xF4];
+        let response_bytes = vec![pos_sid, 0x18, 0xAA, 0xBB, 0xCC, 0x01, 0xF4];
         let decoded = ecu_manager
             .convert_from_uds(&dc, &create_payload(response_bytes), true, None)
             .await
@@ -1646,7 +1646,7 @@ mod tests {
             .serialize_to_json(cda_interfaces::BinaryEncoding::Hex)
             .unwrap()
             .data;
-        assert_eq!(json_out.get("len_key"), Some(&json!(3)));
+        assert_eq!(json_out.get("len_key"), Some(&json!(24)));
         assert_eq!(json_out.get("var_data"), Some(&json!("0xAA 0xBB 0xCC")));
         assert_eq!(
             json_out.get("suffix"),
