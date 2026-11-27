@@ -15,7 +15,10 @@
 // within a WipOffset<T> where we cannot provide a conversion for.
 // This is only the case for types where we have to be able to name the type, i.e.
 // for function parameters and return types.
-pub use dataformat::{DefaultCase, ParentRefType as DataFormatParentRefType, SwitchKey};
+pub use dataformat::{
+    DOP as DataFormatDop, DefaultCase, Param as DataFormatParam,
+    ParentRefType as DataFormatParentRefType, SwitchKey,
+};
 use flatbuffers::UnionWIPOffset;
 pub use flatbuffers::WIPOffset;
 
@@ -179,6 +182,7 @@ impl TransmissionMode {
 pub struct EcuDataBuilder<'a> {
     fbb: flatbuffers::FlatBufferBuilder<'a>,
     max_param_id: u32,
+    without_param_ids: bool,
 }
 
 impl Default for EcuDataBuilder<'_> {
@@ -193,6 +197,7 @@ impl<'a> EcuDataBuilder<'a> {
         Self {
             fbb: flatbuffers::FlatBufferBuilder::new(),
             max_param_id: 0,
+            without_param_ids: false,
         }
     }
 
@@ -746,7 +751,11 @@ impl<'a> EcuDataBuilder<'a> {
         self.max_param_id = self.max_param_id.saturating_add(1);
 
         let param_args = dataformat::ParamArgs {
-            id: self.max_param_id,
+            id: if self.without_param_ids {
+                0
+            } else {
+                self.max_param_id
+            },
             param_type: params.param_type,
             short_name: short_name_offset,
             semantic: semantic_offset,
@@ -759,6 +768,72 @@ impl<'a> EcuDataBuilder<'a> {
         };
 
         dataformat::Param::create(&mut self.fbb, &param_args)
+    }
+
+    /// Leaves the id of all params created afterwards at its default, as
+    /// databases written by the MDD converter do.
+    pub fn without_param_ids(&mut self) {
+        self.without_param_ids = true;
+    }
+
+    /// Creates a SYSTEM param at `byte_pos` coded with `dop`.
+    pub fn create_system_param(
+        &mut self,
+        name: &'a str,
+        dop: WIPOffset<dataformat::DOP<'a>>,
+        byte_pos: u32,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let sys_param = Some(self.fbb.create_string("TIMESTAMP"));
+        let specific_data = Some(
+            dataformat::ParamSpecificData::tag_as_system(dataformat::System::create(
+                &mut self.fbb,
+                &dataformat::SystemArgs {
+                    dop: Some(dop),
+                    sys_param,
+                },
+            ))
+            .value_offset(),
+        );
+
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::SYSTEM,
+            short_name: Some(name),
+            semantic: None,
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: Some(byte_pos),
+            bit_position: Some(0),
+            specific_data_type: dataformat::ParamSpecificData::System,
+            specific_data,
+        })
+    }
+
+    /// Creates a RESERVED param of `bit_length` bits at `byte_pos`.
+    pub fn create_reserved_param(
+        &mut self,
+        name: &'a str,
+        byte_pos: u32,
+        bit_length: u32,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let specific_data = Some(
+            dataformat::ParamSpecificData::tag_as_reserved(dataformat::Reserved::create(
+                &mut self.fbb,
+                &dataformat::ReservedArgs { bit_length },
+            ))
+            .value_offset(),
+        );
+
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::RESERVED,
+            short_name: Some(name),
+            semantic: None,
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: Some(byte_pos),
+            bit_position: Some(0),
+            specific_data_type: dataformat::ParamSpecificData::Reserved,
+            specific_data,
+        })
     }
 
     pub fn create_coded_const_param(
@@ -958,6 +1033,16 @@ impl<'a> EcuDataBuilder<'a> {
         name: &'a str,
         dop: WIPOffset<dataformat::DOP<'a>>,
     ) -> WIPOffset<dataformat::Param<'a>> {
+        self.create_value_param_no_byte_pos_with_semantic(name, dop, None)
+    }
+
+    /// Creates a VALUE param with an optional semantic and no BYTE-POSITION.
+    pub fn create_value_param_no_byte_pos_with_semantic(
+        &mut self,
+        name: &'a str,
+        dop: WIPOffset<dataformat::DOP<'a>>,
+        semantic: Option<&'a str>,
+    ) -> WIPOffset<dataformat::Param<'a>> {
         let specific_data = Some(
             dataformat::ParamSpecificData::tag_as_value(dataformat::Value::create(
                 &mut self.fbb,
@@ -972,7 +1057,7 @@ impl<'a> EcuDataBuilder<'a> {
         self.create_param(&ParameterParams {
             param_type: dataformat::ParamType::VALUE,
             short_name: Some(name),
-            semantic: None,
+            semantic,
             sdgs: None,
             physical_default_value: None,
             byte_position: None,

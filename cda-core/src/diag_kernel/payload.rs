@@ -18,20 +18,16 @@ use cda_interfaces::DiagServiceError;
 
 pub(in crate::diag_kernel) struct Payload<'a> {
     data: &'a [u8],
-    current_index: usize,
     slices: VecDeque<(usize, usize)>,
     last_read_byte_pos: usize,
-    bytes_to_skip: usize,
 }
 
 impl<'a> Payload<'a> {
     pub(in crate::diag_kernel) fn new(data: &'a [u8]) -> Self {
         Self {
             data,
-            current_index: 0,
             slices: VecDeque::new(),
             last_read_byte_pos: 0,
-            bytes_to_skip: 0,
         }
     }
     pub(in crate::diag_kernel) fn set_last_read_byte_pos(&mut self, pos: usize) {
@@ -42,14 +38,6 @@ impl<'a> Payload<'a> {
         }
     }
 
-    pub(in crate::diag_kernel) fn set_bytes_to_skip(&mut self, count: usize) {
-        self.bytes_to_skip = self.bytes_to_skip.saturating_add(count);
-    }
-
-    pub(in crate::diag_kernel) fn bytes_to_skip(&self) -> usize {
-        self.bytes_to_skip
-    }
-
     pub(in crate::diag_kernel) fn last_read_byte_pos(&self) -> usize {
         self.last_read_byte_pos
     }
@@ -58,7 +46,7 @@ impl<'a> Payload<'a> {
         if let Some(&(start, end)) = self.slices.back() {
             self.data.get(start..end)
         } else {
-            self.data.get(self.pos()..)
+            Some(self.data)
         }
         .ok_or(DiagServiceError::BadPayload(
             "Slice out of bounds".to_owned(),
@@ -66,23 +54,7 @@ impl<'a> Payload<'a> {
     }
 
     pub(in crate::diag_kernel) fn pos(&self) -> usize {
-        if let Some(&(start, _)) = self.slices.back() {
-            start
-        } else {
-            self.current_index
-        }
-    }
-
-    pub(in crate::diag_kernel) fn consume(&mut self) -> usize {
-        let advance_len = self.last_read_byte_pos.saturating_add(self.bytes_to_skip);
-        if self.pos().saturating_add(advance_len) > self.data.len() {
-            self.current_index = self.data.len(); // Move to the end if we exceed
-        } else {
-            self.current_index = self.current_index.saturating_add(advance_len);
-        }
-        self.last_read_byte_pos = 0;
-        self.bytes_to_skip = 0;
-        advance_len
+        self.slices.back().map_or(0, |&(start, _)| start)
     }
 
     pub(in crate::diag_kernel) fn len(&self) -> usize {
@@ -93,23 +65,8 @@ impl<'a> Payload<'a> {
         }
     }
 
-    pub(in crate::diag_kernel) fn exhausted(&self) -> bool {
-        if let Some(&(_, end)) = self.slices.back() {
-            self.current_index >= end
-        } else {
-            self.current_index >= self.data.len()
-        }
-    }
-
     pub(in crate::diag_kernel) fn first(&self) -> Option<&u8> {
         self.data.get(self.pos())
-    }
-
-    pub(in crate::diag_kernel) fn push_slice_to_abs_end(
-        &mut self,
-        start: usize,
-    ) -> Result<(), DiagServiceError> {
-        self.push_slice(start, self.len())
     }
 
     pub(in crate::diag_kernel) fn push_slice(
@@ -217,10 +174,6 @@ mod tests {
 
         assert!(payload.pop_slice().is_ok());
         assert!(payload.pop_slice().is_ok());
-
-        payload.set_last_read_byte_pos(20);
-        payload.consume();
-        assert!(payload.exhausted()); // should be exhausted now
     }
 
     #[test]

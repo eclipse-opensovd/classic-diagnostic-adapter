@@ -13,7 +13,7 @@
 
 use cda_database::datatypes;
 use cda_interfaces::{
-    DiagComm, DiagServiceError, EcuStateManager, HashMap, PayloadDecoder, ServicePayload,
+    DiagComm, DiagServiceError, EcuStateManager, HashMap, HashSet, PayloadDecoder, ServicePayload,
     datatypes::CLEAR_FAULT_MEM_POS_RESPONSE_SID,
     diagservices::{DiagServiceResponseType, FieldParseError},
     dlt_ctx, service_ids,
@@ -42,7 +42,8 @@ struct ParamContext<'a> {
     outer_context: Option<&'a MappedDiagServiceResponsePayload>,
     /// When `true`, a missing BYTE-POSITION means byte 0 relative to
     /// `base_offset` instead of "follows the previous param". Used when a
-    /// request param is decoded from a response slice (MATCHING-REQUEST-PARAM).
+    /// request param is decoded from a response slice (MATCHING-REQUEST-PARAM)
+    /// and for response params whose position was determined beforehand.
     relative_position: bool,
 }
 
@@ -131,7 +132,7 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
 
         let sid = util::try_extract_sid_from_payload(payload.data.as_slice())?;
 
-        let mut uds_payload = Payload::new(&payload.data);
+        let uds_payload = Payload::new(&payload.data);
         let response_first_byte = uds_payload.first().ok_or_else(|| {
             DiagServiceError::BadPayload("Payload too short to read first byte".to_owned())
         })?;
@@ -144,7 +145,6 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             .chain(mapped_service.neg_responses().into_iter().flatten())
             .collect();
 
-        let mut data = HashMap::default();
         if let Some((response, params)) = responses.iter().find_map(|r| {
             r.params().and_then(|params| {
                 let params: Vec<datatypes::Parameter> =
@@ -178,62 +178,82 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
                 }
             }
 
-            let raw_uds_payload = {
-                let base_offset = self.raw_payload_offset(&params);
-                uds_payload.data()?.get(base_offset as usize..).ok_or(
-                    DiagServiceError::BadPayload("Payload offset out of bounds".to_owned()),
-                )?
-            }
-            .to_vec();
+            let raw_only = response_type == datatypes::ResponseType::Positive && !map_to_json;
+            let static_offset = self.raw_payload_offset(&params);
+            // Without a mapping the payload is only decoded if the offset of
+            // the raw data depends on it.
+            let walk = match static_offset {
+                Some(_) if raw_only => None,
+                _ => {
+                    let walk = if raw_only {
+                        // The DATA params are decoded as well, so a payload too
+                        // short for them is rejected instead of returned.
+                        self.walk_response_params(
+                            &mapped_service,
+                            &params,
+                            &payload.data,
+                            params
+                                .iter()
+                                .rposition(|param| self.is_data_param(param))
+                                .map(|index| index.saturating_add(1)),
+                            |param| self.is_data_param(param),
+                            |param| self.is_data_param(param),
+                        )?
+                    } else {
+                        let is_mapped = |param: &datatypes::Parameter<'_>| {
+                            param.semantic().is_none_or(|semantic| {
+                                semantic == self.database_naming_convention.semantics.data
+                                    || semantic
+                                        == self.database_naming_convention.semantics.service_id_rq
+                            })
+                        };
+                        self.walk_response_params(
+                            &mapped_service,
+                            &params,
+                            &payload.data,
+                            None,
+                            is_mapped,
+                            is_mapped,
+                        )?
+                    };
+                    Some(walk)
+                }
+            };
+            let (data, mapping_errors, positions) = match walk {
+                Some(ResponseWalk {
+                    failure: Some(error),
+                    ..
+                }) => return Err(error),
+                Some(walk) => (walk.data, walk.mapping_errors, walk.positions),
+                None => (HashMap::default(), Vec::new(), Vec::new()),
+            };
+            let base_offset = static_offset.map_or_else(
+                || {
+                    params
+                        .iter()
+                        .zip(&positions)
+                        .filter(|(param, _)| self.is_data_param(param))
+                        .filter_map(|(_, position)| *position)
+                        .min()
+                        .unwrap_or(0)
+                },
+                |offset| offset as usize,
+            );
+            let raw_uds_payload = uds_payload
+                .data()?
+                .get(base_offset..)
+                .ok_or(DiagServiceError::BadPayload(
+                    "Payload offset out of bounds".to_owned(),
+                ))?
+                .to_vec();
 
-            if response_type == datatypes::ResponseType::Positive && !map_to_json {
+            if raw_only {
                 return Ok(DiagServiceResponseStruct {
                     service: diag_service.clone(),
                     data: raw_uds_payload,
                     mapped_data: None,
                     response_type: DiagServiceResponseType::Positive,
                 });
-            }
-            let mut mapping_errors = Vec::new();
-            // Params are decoded in database order. A param without
-            // BYTE-POSITION (ISO 22901-1 §7.4.8) starts where the preceding
-            // param ended. This covers both a leading param at byte 0 whose
-            // position was omitted and a param following a variable-length field.
-            // Positioned LENGTH-KEYs and TABLE-KEYs are decoded before the param
-            // referencing them.
-            for param in hoist_positioned_keys(&params) {
-                let semantic = param.semantic();
-                if semantic.is_some_and(|semantic| {
-                    semantic != self.database_naming_convention.semantics.data
-                        && semantic != self.database_naming_convention.semantics.service_id_rq
-                }) {
-                    continue;
-                }
-                let short_name = param.short_name().ok_or_else(|| {
-                    DiagServiceError::InvalidDatabase(
-                        "Unable to find short name for param".to_owned(),
-                    )
-                })?;
-
-                if param.has_byte_position() {
-                    uds_payload.set_last_read_byte_pos(param.byte_position() as usize);
-                }
-                match self.map_param_from_uds(
-                    &mapped_service,
-                    short_name,
-                    &mut uds_payload,
-                    &mut data,
-                    ParamContext::new(&param, 0),
-                ) {
-                    Ok(()) => {}
-                    Err(DiagServiceError::DataError(error)) => {
-                        mapping_errors.push(FieldParseError {
-                            path: format!("/{short_name}"),
-                            error,
-                        });
-                    }
-                    Err(e) => return Err(e),
-                }
             }
 
             let resp = create_diag_service_response(
@@ -388,26 +408,35 @@ fn hoist_positioned_keys<'a>(params: &[datatypes::Parameter<'a>]) -> Vec<datatyp
         if hoisted.get(index).copied().unwrap_or(false) {
             continue;
         }
-        if let Some((key_type, key_name)) = referenced_key(param) {
-            let later_key = params
-                .iter()
-                .enumerate()
-                .skip(index.saturating_add(1))
-                .find(|(_, p)| {
-                    p.has_byte_position()
-                        && p.param_type().is_ok_and(|t| key_type.matches(&t))
-                        && p.short_name() == Some(key_name.as_str())
-                });
-            if let Some((key_index, key)) = later_key
-                && let Some(flag) = hoisted.get_mut(key_index)
-            {
-                *flag = true;
-                ordered.push(key.clone());
-            }
+        if let Some((key_index, key)) = later_positioned_key(params, index)
+            && let Some(flag) = hoisted.get_mut(key_index)
+        {
+            *flag = true;
+            ordered.push(key.clone());
         }
         ordered.push(param.clone());
     }
     ordered
+}
+
+/// Result of decoding the parameters of a response in database order.
+struct ResponseWalk {
+    /// Byte position of each parameter, by index. `None` if not determined.
+    positions: Vec<Option<usize>>,
+    /// Decoded values of the output parameters.
+    data: MappedDiagServiceResponsePayload,
+    mapping_errors: Vec<FieldParseError>,
+    /// Why the walk stopped before it reached all required parameters.
+    failure: Option<DiagServiceError>,
+}
+
+/// A decoded response parameter.
+struct DecodedParam {
+    /// Position following the parameter, if it could be determined.
+    end: Option<usize>,
+    /// Reported if a following parameter without BYTE-POSITION is required:
+    /// why this parameter could not be decoded, or why its end is unknown.
+    error: Option<DiagServiceError>,
 }
 
 /// Param types that are referenced by another param of the same PDU.
@@ -452,17 +481,210 @@ impl<S: SecurityPlugin> EcuManager<S> {
     pub(in crate::diag_kernel) fn raw_payload_offset(
         &self,
         params: &[datatypes::Parameter],
-    ) -> u32 {
-        super::param_metadata::effective_byte_positions(params)
-            .into_iter()
-            .filter(|(param, _)| {
-                param.semantic().is_some_and(|semantic| {
-                    semantic == self.database_naming_convention.semantics.data
-                })
-            })
-            .filter_map(|(_, position)| position)
-            .min()
-            .unwrap_or(0)
+    ) -> Option<u32> {
+        let positions = super::param_metadata::effective_byte_positions(params);
+        let offset = super::param_metadata::resolved_data_offset(positions.iter().map(
+            |(param, position)| {
+                (
+                    param.semantic().is_some_and(|semantic| {
+                        semantic == self.database_naming_convention.semantics.data
+                    }),
+                    *position,
+                )
+            },
+        ));
+        match offset {
+            super::param_metadata::DataOffset::NoData => Some(0),
+            super::param_metadata::DataOffset::Known(position) => Some(position),
+            super::param_metadata::DataOffset::Unknown => None,
+        }
+    }
+
+    fn is_data_param(&self, param: &datatypes::Parameter<'_>) -> bool {
+        param
+            .semantic()
+            .is_some_and(|semantic| semantic == self.database_naming_convention.semantics.data)
+    }
+
+    /// Decodes response parameters in database order. A parameter without
+    /// BYTE-POSITION starts where the preceding one ends (ISO 22901-1
+    /// 7.3.5.4), so raw offsets and mapped values both derive from this pass.
+    ///
+    /// The walk ends in front of the parameter at `stop_at`, or if the position
+    /// of an `is_required` parameter is unknown. Parameters which are not
+    /// `is_output` are decoded as far as possible, because others may refer to
+    /// them or follow them, and their errors only matter in these cases.
+    ///
+    /// # Errors
+    /// Returns the error of an output parameter which cannot be decoded.
+    fn walk_response_params(
+        &self,
+        service: &datatypes::DiagService<'_>,
+        params: &[datatypes::Parameter<'_>],
+        bytes: &[u8],
+        stop_at: Option<usize>,
+        is_required: impl Fn(&datatypes::Parameter<'_>) -> bool,
+        is_output: impl Fn(&datatypes::Parameter<'_>) -> bool,
+    ) -> Result<ResponseWalk, DiagServiceError> {
+        let mut walk = ResponseWalk {
+            positions: vec![None; params.len()],
+            data: HashMap::default(),
+            mapping_errors: Vec::new(),
+            failure: None,
+        };
+        // Names which were only decoded because other parameters depend on them.
+        let mut hidden = Vec::new();
+        // Ends of keys which were decoded ahead of their declaration.
+        let mut hoisted: HashMap<usize, Option<usize>> = HashMap::default();
+        let mut next_position = Some(0usize);
+        let mut unknown_cause = None;
+
+        for (index, param) in params.iter().enumerate() {
+            if let Some(end) = hoisted.get(&index) {
+                next_position = *end;
+                continue;
+            }
+            let position = if param.has_byte_position() {
+                Some(param.byte_position() as usize)
+            } else {
+                next_position
+            };
+            if let Some(slot) = walk.positions.get_mut(index) {
+                *slot = position;
+            }
+            if stop_at == Some(index) {
+                if position.is_none() && is_required(param) {
+                    walk.failure = Some(unknown_cause.unwrap_or_else(|| unknown_position(param)));
+                }
+                break;
+            }
+            let Some(position) = position else {
+                if is_required(param) {
+                    walk.failure = Some(unknown_cause.unwrap_or_else(|| unknown_position(param)));
+                    break;
+                }
+                next_position = None;
+                continue;
+            };
+
+            // A positioned key may be declared after the parameter using it.
+            if let Some((key_index, key)) = later_positioned_key(params, index)
+                && !hoisted.contains_key(&key_index)
+            {
+                let key_position = key.byte_position() as usize;
+                let decoded = self.decode_response_param(
+                    service,
+                    key,
+                    key_position,
+                    is_output(key),
+                    bytes,
+                    &mut walk,
+                    &mut hidden,
+                )?;
+                if let Some(slot) = walk.positions.get_mut(key_index) {
+                    *slot = Some(key_position);
+                }
+                hoisted.insert(key_index, decoded.end);
+            }
+
+            let decoded = self.decode_response_param(
+                service,
+                param,
+                position,
+                is_output(param),
+                bytes,
+                &mut walk,
+                &mut hidden,
+            )?;
+            next_position = decoded.end;
+            unknown_cause = decoded.error;
+        }
+        for name in hidden {
+            walk.data.remove(&name);
+        }
+        Ok(walk)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Only splits up the loop of walk_response_params"
+    )]
+    fn decode_response_param(
+        &self,
+        service: &datatypes::DiagService<'_>,
+        param: &datatypes::Parameter<'_>,
+        position: usize,
+        is_output: bool,
+        bytes: &[u8],
+        walk: &mut ResponseWalk,
+        hidden: &mut Vec<String>,
+    ) -> Result<DecodedParam, DiagServiceError> {
+        let static_end = super::param_metadata::static_byte_length(param)
+            .and_then(|length| position.checked_add(length as usize));
+        let Some(name) = param.short_name() else {
+            if is_output {
+                return Err(DiagServiceError::InvalidDatabase(
+                    "Unable to find short name for param".to_owned(),
+                ));
+            }
+            return Ok(DecodedParam {
+                end: static_end,
+                error: None,
+            });
+        };
+        let known: Option<HashSet<String>> =
+            (!is_output).then(|| walk.data.keys().cloned().collect());
+
+        // A failed decoder can leave a restricted view behind, which must not
+        // affect other parameters.
+        let mut payload = Payload::new(bytes);
+        payload.set_last_read_byte_pos(position);
+        let context = if param.has_byte_position() {
+            ParamContext::new(param, 0)
+        } else {
+            ParamContext::new(param, position).with_relative_position()
+        };
+        let result = self.map_param_from_uds(service, name, &mut payload, &mut walk.data, context);
+        if let Some(known) = known {
+            hidden.extend(
+                walk.data
+                    .keys()
+                    .filter(|key| !known.contains(*key))
+                    .cloned(),
+            );
+        }
+
+        let end = match static_end {
+            Some(end) => Some(end),
+            None => match param.param_type()? {
+                datatypes::ParamType::Dynamic | datatypes::ParamType::TableEntry => None,
+                datatypes::ParamType::NrcConst | datatypes::ParamType::System => {
+                    unmapped_param_end(&mut payload, param, position)
+                }
+                _ => result.is_ok().then(|| payload.last_read_byte_pos()),
+            },
+        };
+        let error = match result {
+            Ok(()) => end.is_none().then(|| {
+                DiagServiceError::InvalidDatabase(format!(
+                    "The end of response parameter '{name}' cannot be determined, so a following \
+                     parameter without BYTE-POSITION cannot be located"
+                ))
+            }),
+            Err(DiagServiceError::DataError(error)) if is_output => {
+                let cause = end
+                    .is_none()
+                    .then(|| DiagServiceError::DataError(error.clone()));
+                walk.mapping_errors.push(FieldParseError {
+                    path: format!("/{name}"),
+                    error,
+                });
+                cause
+            }
+            Err(error) if is_output => return Err(error),
+            Err(error) => Some(error),
+        };
+        Ok(DecodedParam { end, error })
     }
 
     /// Looks up the first positive response and resolves its raw payload layout.
@@ -529,6 +751,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             }
             datatypes::ParamType::NrcConst => {
                 tracing::error!("NrcConst ParamType not implemented.");
+                skip_unmapped_param(uds_payload, param_ctx);
             }
             datatypes::ParamType::PhysConst => {
                 self.map_param_phys_const_from_uds(
@@ -541,6 +764,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             }
             datatypes::ParamType::System => {
                 tracing::error!("System ParamType not implemented.");
+                skip_unmapped_param(uds_payload, param_ctx);
             }
             datatypes::ParamType::TableKey => {
                 Self::map_table_key_from_uds(param_name, uds_payload, data, param_ctx)?;
@@ -650,6 +874,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 ))
             })?;
 
+        let response_end = param_ctx
+            .read_byte_pos(uds_payload)
+            .saturating_add(matching_req_param.byte_length() as usize);
         let pop = matching_req_param_byte_pos < param_ctx.parameter.byte_position();
         if pop {
             uds_payload.push_slice(param_ctx.abs_byte_pos(), uds_payload.len())?;
@@ -666,6 +893,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         if pop {
             uds_payload.pop_slice()?;
         }
+        uds_payload.set_last_read_byte_pos(response_end);
         Ok(())
     }
 
@@ -830,7 +1058,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         // Look up the TABLE-KEY's decoded value from data. It was already
         // decoded: it is declared before this param or, if declared after, it
-        // is positioned and hoisted by `hoist_positioned_keys`.
+        // is positioned and therefore decoded ahead of this param.
         let key_container = data.get(key_param_name).ok_or_else(|| {
             DiagServiceError::InvalidRequest(format!(
                 "TABLE-STRUCT references TABLE-KEY '{key_param_name}' but it was not decoded"
@@ -896,6 +1124,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
         // Get the row's structure DOP
         match selected_row.structure() {
             None => {
+                let struct_start = param_ctx.abs_byte_pos();
+                uds_payload.set_last_read_byte_pos(struct_start);
                 // No structure for this row - store an empty struct
                 data.insert(
                     param_name.to_owned(),
@@ -916,7 +1146,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
                             uds_payload,
                             data,
                         )?;
+                        let row_length = uds_payload.last_read_byte_pos();
                         uds_payload.pop_slice()?;
+                        uds_payload.set_last_read_byte_pos(struct_start.saturating_add(row_length));
 
                         // Wrap in row name, matching the encode convention:
                         // {<row_short_name>: {<struct_params>}}
@@ -944,11 +1176,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
         outer_context: &MappedDiagServiceResponsePayload,
     ) -> Result<HashMap<String, DiagDataTypeContainer>, DiagServiceError> {
         let mut data = HashMap::default();
-        let Some(params) = structure.params() else {
-            return Ok(data);
-        };
+        let start = uds_payload.last_read_byte_pos();
+        let mut end = start;
 
-        for param in params {
+        for param in structure.params().into_iter().flatten() {
             let param = datatypes::Parameter(param);
             let short_name = param.short_name().ok_or_else(|| {
                 DiagServiceError::InvalidDatabase("Unable to find short name for param".to_owned())
@@ -960,7 +1191,14 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 &mut data,
                 ParamContext::new(&param, 0).with_outer_context(Some(outer_context)),
             )?;
+            end = end.max(uds_payload.last_read_byte_pos());
         }
+        // BYTE-SIZE, otherwise the furthest parameter, determines the length.
+        uds_payload.set_last_read_byte_pos(
+            structure
+                .byte_size()
+                .map_or(end, |size| start.saturating_add(size as usize)),
+        );
         Ok(data)
     }
 
@@ -1033,6 +1271,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     data,
                     short_name,
                     &end_of_pdu_dop,
+                    param_ctx,
                 )?;
             }
 
@@ -1050,16 +1289,19 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 map_dtc_dop_from_uds(&short_name, uds_payload, data, &dtc_dop, param_ctx)?;
             }
             datatypes::DataOperationVariant::EnvDataDesc(env_data_desc_dop) => {
+                let start = param_ctx.abs_byte_pos();
                 let item = self.map_env_data_desc_item_from_uds(
                     mapped_service,
                     uds_payload,
                     param_ctx.outer_context.unwrap_or(&*data),
                     &env_data_desc_dop,
-                    param_ctx.abs_byte_pos(),
+                    start,
                 )?;
                 data.extend(item);
             }
             datatypes::DataOperationVariant::EnvData(env_data_dop) => {
+                let mut end = param_ctx.abs_byte_pos();
+                uds_payload.set_last_read_byte_pos(end);
                 if let Some(params) = env_data_dop.params() {
                     for param in params {
                         let param = datatypes::Parameter(param);
@@ -1076,8 +1318,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
                             ParamContext::new(&param, param_ctx.base_offset)
                                 .with_outer_context(param_ctx.outer_context),
                         )?;
+                        end = end.max(uds_payload.last_read_byte_pos());
                     }
                 }
+                uds_payload.set_last_read_byte_pos(end);
             }
             datatypes::DataOperationVariant::StaticField(static_field_dop) => {
                 self.map_static_field_dop_from_uds(
@@ -1294,6 +1538,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         uds_payload.push_slice(items_abs_start, uds_payload.len())?;
 
         let mut start = 0usize;
+        let mut truncated = false;
 
         for _ in 0..num_items {
             let (item_data, item_size) = match self.decode_dynamic_length_field_item(
@@ -1307,6 +1552,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 Err(DiagServiceError::NotEnoughData { .. }) => {
                     // ECU sent fewer bytes than the item count implied; treat as end of list.
                     tracing::warn!("Not enough data for next DynamicLengthField item, truncating");
+                    truncated = true;
                     break;
                 }
                 Err(e) => return Err(e),
@@ -1328,7 +1574,15 @@ impl<S: SecurityPlugin> EcuManager<S> {
             "DynamicLengthField decode complete"
         );
         uds_payload.pop_slice()?;
-        uds_payload.set_last_read_byte_pos(items_abs_start.saturating_add(start));
+        let count_end = num_items_byte_pos.saturating_add(num_items_data.len());
+        // A truncated item extends to the end of the payload, so nothing
+        // following the field may start inside it.
+        let end = if truncated {
+            uds_payload.len()
+        } else {
+            items_abs_start.saturating_add(start)
+        };
+        uds_payload.set_last_read_byte_pos(count_end.max(end));
         data.insert(
             short_name,
             DiagDataTypeContainer::RepeatingStruct(repeated_data),
@@ -1344,7 +1598,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
         repeated_dop: &datatypes::DopField,
         start: usize,
     ) -> Result<(HashMap<String, DiagDataTypeContainer>, usize), DiagServiceError> {
-        let bytes_to_skip_before = uds_payload.bytes_to_skip();
         uds_payload.push_slice(start, uds_payload.len())?;
         // Inner item params may omit BYTE-POSITION, falling back to last_read_byte_pos.
         // Reset it to 0 so stale state from count decode doesn't corrupt item decoding.
@@ -1363,20 +1616,14 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .basic_structure()
             .and_then(|d| d.specific_data_as_structure().map(datatypes::StructureDop))
         {
-            let struct_data = self.map_struct_from_uds(&s, mapped_service, uds_payload, data)?;
-            let item_size = s.byte_size().map_or_else(
-                || {
-                    let delta_bytes_to_skip = uds_payload
-                        .bytes_to_skip()
-                        .saturating_sub(bytes_to_skip_before);
-                    uds_payload
-                        .last_read_byte_pos()
-                        .saturating_add(delta_bytes_to_skip)
-                },
-                |s| s as usize,
-            );
+            // The view is restored before an error is returned, so the caller
+            // still sees the field's view when it stops at a truncated item.
+            let struct_data = self.map_struct_from_uds(&s, mapped_service, uds_payload, data);
+            let item_size = s
+                .byte_size()
+                .map_or_else(|| uds_payload.last_read_byte_pos(), |s| s as usize);
             uds_payload.pop_slice()?;
-            Ok((struct_data, item_size))
+            Ok((struct_data?, item_size))
         } else if let Some(env_data_desc_dop) = repeated_dop.env_data_desc() {
             let env_data_desc = env_data_desc_dop.specific_data_as_env_data_desc().ok_or(
                 DiagServiceError::InvalidDatabase(
@@ -1390,15 +1637,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 data,
                 &env_data_desc,
                 0,
-            )?;
-            let delta_bytes_to_skip = uds_payload
-                .bytes_to_skip()
-                .saturating_sub(bytes_to_skip_before);
-            let item_size = uds_payload
-                .last_read_byte_pos()
-                .saturating_add(delta_bytes_to_skip);
+            );
+            let item_size = uds_payload.last_read_byte_pos();
             uds_payload.pop_slice()?;
-            Ok((item_data, item_size))
+            Ok((item_data?, item_size))
         } else {
             uds_payload.pop_slice()?;
             Err(DiagServiceError::InvalidDatabase(
@@ -1416,9 +1658,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
         mux_dop: &datatypes::MuxDop,
         param_ctx: ParamContext<'_>,
     ) -> Result<(), DiagServiceError> {
-        uds_payload.push_slice(param_ctx.abs_byte_pos(), uds_payload.len())?;
+        let start = param_ctx.abs_byte_pos();
+        uds_payload.push_slice(start, uds_payload.len())?;
         self.map_mux_from_uds(mapped_service, uds_payload, data, short_name, mux_dop)?;
+        let mux_length = uds_payload.last_read_byte_pos();
         uds_payload.pop_slice()?;
+        uds_payload.set_last_read_byte_pos(start.saturating_add(mux_length));
         Ok(())
     }
 
@@ -1446,12 +1691,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
             extract_struct_dop_from_field(static_field_dop.field().map(datatypes::DopField))?;
         let mut nested_structs = Vec::new();
 
+        let field_start = param_ctx.abs_byte_pos();
         for i in 0..static_field_dop.fixed_number_of_items() {
-            let start = param_ctx
-                .abs_byte_pos()
+            let start = field_start
                 .saturating_add(i.saturating_mul(static_field_dop.item_byte_size()) as usize);
             let end = start.saturating_add(static_field_dop.item_byte_size() as usize);
             uds_payload.push_slice(start, end)?;
+            uds_payload.set_last_read_byte_pos(0);
 
             self.map_nested_struct_from_uds(
                 &basic_structure,
@@ -1463,6 +1709,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
             uds_payload.pop_slice()?;
         }
+        uds_payload.set_last_read_byte_pos(field_start.saturating_add(static_field_size));
 
         data.insert(
             short_name,
@@ -1547,6 +1794,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
             });
 
         let mut item_data = HashMap::default();
+        let mut end = base_offset;
+        uds_payload.set_last_read_byte_pos(base_offset);
         let Some(env_data) = matching_env_data else {
             tracing::warn!(
                 discriminator = format!("{discriminator:#X}"),
@@ -1568,8 +1817,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     &mut item_data,
                     ParamContext::new(&param, base_offset).with_outer_context(Some(outer_data)),
                 )?;
+                end = end.max(uds_payload.last_read_byte_pos());
             }
         }
+        uds_payload.set_last_read_byte_pos(end);
 
         Ok(item_data)
     }
@@ -1599,6 +1850,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
             }
         }
 
+        let mut end = structure_start;
+        uds_payload.set_last_read_byte_pos(structure_start);
         if let Some(params) = structure_dop.params() {
             for param in params.iter().map(datatypes::Parameter) {
                 self.map_param_from_uds(
@@ -1608,8 +1861,14 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     data,
                     ParamContext::new(&param, structure_start),
                 )?;
+                end = end.max(uds_payload.last_read_byte_pos());
             }
         }
+        uds_payload.set_last_read_byte_pos(
+            structure_dop
+                .byte_size()
+                .map_or(end, |size| structure_start.saturating_add(size as usize)),
+        );
         Ok(())
     }
 
@@ -1625,6 +1884,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         data: &mut MappedDiagServiceResponsePayload,
         short_name: String,
         end_of_pdu_dop: &datatypes::EndOfPdu,
+        param_ctx: ParamContext<'_>,
     ) -> Result<(), DiagServiceError> {
         // When a response is read the values of `max-number-of-items`
         // and `min-number-of-items` are deliberately ignored,
@@ -1632,49 +1892,42 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let struct_ =
             extract_struct_dop_from_field(end_of_pdu_dop.field().map(datatypes::DopField))?;
         let mut nested_structs = Vec::new();
-        if uds_payload.consume() == 0 {
-            return Ok(());
-        }
-        loop {
-            uds_payload.push_slice_to_abs_end(uds_payload.last_read_byte_pos())?;
-            if !uds_payload.exhausted() {
-                match self.map_nested_struct_from_uds(
-                    &struct_,
-                    mapped_service,
-                    uds_payload,
-                    &mut nested_structs,
-                    data,
-                ) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        match e {
-                            DiagServiceError::NotEnoughData { .. } => {
-                                // Not enough data left to parse another struct, exit loop
-                                // and ignore eventual leftover bytes
-                                tracing::warn!(
-                                    error = %e,
-                                    "Not enough data left to parse another struct, \
-                                     ignoring leftover bytes"
-                                );
-                                uds_payload.pop_slice()?;
-                                break;
-                            }
-                            _ => return Err(e),
-                        }
-                    }
-                }
-            }
-            let consumed = uds_payload.consume();
+        let mut offset = param_ctx.read_byte_pos(uds_payload);
+        while offset < uds_payload.len() {
+            uds_payload.push_slice(offset, uds_payload.len())?;
+            uds_payload.set_last_read_byte_pos(0);
+            let result = self.map_nested_struct_from_uds(
+                &struct_,
+                mapped_service,
+                uds_payload,
+                &mut nested_structs,
+                data,
+            );
+            let consumed = uds_payload.last_read_byte_pos();
             uds_payload.pop_slice()?;
-            if uds_payload.exhausted() {
-                break;
-            } else if consumed == 0 {
+            match result {
+                Ok(()) => {}
+                Err(e @ DiagServiceError::NotEnoughData { .. }) => {
+                    // Not enough data left to parse another struct, exit loop
+                    // and ignore eventual leftover bytes
+                    tracing::warn!(
+                        error = %e,
+                        "Not enough data left to parse another struct, ignoring leftover bytes"
+                    );
+                    offset = uds_payload.len();
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
+            if consumed == 0 {
                 return Err(DiagServiceError::BadPayload(
                     "EndOfPdu did not consume any bytes, breaking potential infinite loop"
                         .to_owned(),
                 ));
             }
+            offset = offset.saturating_add(consumed);
         }
+        uds_payload.set_last_read_byte_pos(offset);
 
         data.insert(
             short_name,
@@ -1699,11 +1952,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     "param {short_name} has no compu method"
                 )))?;
 
-        let byte_pos = if param_ctx.parameter.has_byte_position() {
-            param_ctx.abs_byte_pos()
-        } else {
-            uds_payload.last_read_byte_pos()
-        };
+        let byte_pos = param_ctx.read_byte_pos(uds_payload);
 
         data.insert(
             short_name,
@@ -1764,7 +2013,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     false,
                     &switch_key_data,
                 )?;
-                uds_payload.set_bytes_to_skip(switch_key_data.len());
+                let switch_key_end = switch_key_diag_type.coded_end(
+                    uds_payload.data()?,
+                    switch_key.byte_position() as usize,
+                    switch_key.bit_position().unwrap_or(0) as usize,
+                    switch_key_data.len(),
+                );
+                let mut mux_end = switch_key_end;
 
                 mux_data.insert(
                     "Selector".to_owned(),
@@ -1818,26 +2073,33 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     // to last_read_byte_pos; it must be 0 (start of case data)
                     // rather than stale from a previous context.
                     uds_payload.set_last_read_byte_pos(0);
-                    let case_data = match self.map_struct_from_uds(
+                    let (case_data, case_length) = match self.map_struct_from_uds(
                         &case_structure,
                         mapped_service,
                         uds_payload,
                         data,
                     ) {
-                        Ok(d) => d,
+                        Ok(d) => (d, Some(uds_payload.last_read_byte_pos())),
                         Err(DiagServiceError::NotEnoughData { .. }) => {
                             // ECU payload is too short to contain the case structure;
                             // treat as absent (no case data decoded).
                             tracing::warn!(
                                 "Not enough data to decode mux case structure, treating as empty"
                             );
-                            HashMap::default()
+                            (HashMap::default(), None)
                         }
                         Err(e) => return Err(e),
                     };
                     uds_payload.pop_slice()?;
+                    // A truncated case extends to the end of the payload, so
+                    // nothing following the MUX may start inside it.
+                    mux_end = mux_end.max(case_length.map_or_else(
+                        || uds_payload.len(),
+                        |length| byte_pos.saturating_add(length),
+                    ));
                     mux_data.insert(case_name, DiagDataTypeContainer::Struct(case_data));
                 }
+                uds_payload.set_last_read_byte_pos(mux_end);
 
                 data.insert(short_name, DiagDataTypeContainer::Struct(mux_data));
                 Ok(())
@@ -1846,6 +2108,73 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 "Mux switch key DoP is not a NormalDoP".to_owned(),
             )),
         }
+    }
+}
+
+fn unknown_position(param: &datatypes::Parameter<'_>) -> DiagServiceError {
+    DiagServiceError::InvalidDatabase(format!(
+        "Cannot determine the position of response parameter '{}'",
+        param.short_name().unwrap_or_default()
+    ))
+}
+
+/// The positioned key which the parameter at `index` refers to, if it is
+/// declared after that parameter.
+fn later_positioned_key<'a, 'p>(
+    params: &'p [datatypes::Parameter<'a>],
+    index: usize,
+) -> Option<(usize, &'p datatypes::Parameter<'a>)> {
+    let (key_type, key_name) = referenced_key(params.get(index)?)?;
+    params
+        .iter()
+        .enumerate()
+        .skip(index.saturating_add(1))
+        .find(|(_, key)| {
+            key.has_byte_position()
+                && key.param_type().is_ok_and(|kind| key_type.matches(&kind))
+                && key.short_name() == Some(key_name.as_str())
+        })
+}
+
+/// Determines where a SYSTEM or NRC-CONST parameter ends. Their values are not
+/// mapped, but following parameters depend on their length.
+fn unmapped_param_end(
+    payload: &mut Payload,
+    param: &datatypes::Parameter<'_>,
+    position: usize,
+) -> Option<usize> {
+    let coded_type: datatypes::DiagCodedType = if let Some(system) = param.specific_data_as_system()
+    {
+        system
+            .dop()
+            .and_then(|dop| dop.specific_data_as_normal_dop())
+            .map(datatypes::NormalDop)?
+            .diag_coded_type()
+            .ok()?
+    } else {
+        param
+            .specific_data_as_nrc_const()?
+            .diag_coded_type()?
+            .try_into()
+            .ok()?
+    };
+    operations::extract_diag_data_container(
+        param.short_name(),
+        position,
+        param.bit_position() as usize,
+        payload,
+        &coded_type,
+        None,
+        None,
+    )
+    .ok()?;
+    Some(payload.last_read_byte_pos())
+}
+
+fn skip_unmapped_param(uds_payload: &mut Payload, param_ctx: ParamContext<'_>) {
+    let position = param_ctx.read_byte_pos(uds_payload);
+    if unmapped_param_end(uds_payload, param_ctx.parameter, position).is_none() {
+        tracing::debug!("Length of the unmapped parameter is unknown");
     }
 }
 
@@ -1869,11 +2198,11 @@ fn map_param_reserved_from_uds(
         }),
     )?;
 
-    let (param_data, bit_len) = coded_type.decode(
-        uds_payload.data()?,
-        param_ctx.abs_byte_pos(),
-        param_ctx.parameter.bit_position() as usize,
-    )?;
+    let byte_pos = param_ctx.abs_byte_pos();
+    let bit_pos = param_ctx.parameter.bit_position() as usize;
+    let (param_data, bit_len) = coded_type.decode(uds_payload.data()?, byte_pos, bit_pos)?;
+    let end = coded_type.coded_end(uds_payload.data()?, byte_pos, bit_pos, param_data.len());
+    uds_payload.set_last_read_byte_pos(end);
 
     data.insert(
         param_name.to_owned(),
@@ -1970,10 +2299,6 @@ fn map_param_coded_const_from_uds(
             value.data
         )));
     }
-    if !param_ctx.relative_position {
-        uds_payload.set_last_read_byte_pos(byte_pos.saturating_add(value.data.len()));
-    }
-
     data.insert(
         param_name.to_owned(),
         DiagDataTypeContainer::RawContainer(value),
@@ -1997,11 +2322,11 @@ fn map_dtc_dop_from_uds(
 
     let coded_type: datatypes::DiagCodedType = dtc_dop.diag_coded_type()?;
 
-    let (dtc_value, _size) = coded_type.decode(
-        uds_payload.data()?,
-        param_ctx.abs_byte_pos(),
-        param_ctx.parameter.bit_position() as usize,
-    )?;
+    let byte_pos = param_ctx.abs_byte_pos();
+    let bit_pos = param_ctx.parameter.bit_position() as usize;
+    let (dtc_value, _size) = coded_type.decode(uds_payload.data()?, byte_pos, bit_pos)?;
+    let end = coded_type.coded_end(uds_payload.data()?, byte_pos, bit_pos, dtc_value.len());
+    uds_payload.set_last_read_byte_pos(end);
 
     let code: u32 = DiagDataValue::new(coded_type.base_datatype(), &dtc_value)?.try_into()?;
 
@@ -2026,7 +2351,7 @@ fn map_dtc_dop_from_uds(
             severity: record.and_then(|record| record.level()).unwrap_or_default(),
             bit_pos: param_ctx.parameter.bit_position(),
             bit_len: DTC_CODE_BIT_LEN,
-            byte_pos: u32::try_from(param_ctx.abs_byte_pos()).map_err(|_| {
+            byte_pos: u32::try_from(byte_pos).map_err(|_| {
                 DiagServiceError::InvalidDatabase("DTC byte position overflows u32".to_owned())
             })?,
         }),
@@ -2108,26 +2433,744 @@ fn physical_base_type(normal_dop: &datatypes::NormalDop) -> Option<datatypes::Da
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::diagservices::DiagServiceResponseType;
+    use cda_database::datatypes::{
+        CompuCategory, DataType, DiagCodedTypeVariant, ResponseType,
+        database_builder::{DataFormatDop, DataFormatParam, EcuDataBuilder},
+    };
+    use cda_interfaces::{
+        DiagCommType, Protocol,
+        diagservices::{DiagServiceResponse as _, DiagServiceResponseType},
+    };
     use cda_plugin_security::DefaultSecurityPluginData;
+    use flatbuffers::WIPOffset;
     use serde_json::json;
 
     use super::*;
-    use crate::diag_kernel::test_utils::ecu_manager_builder::{
-        EndOfPduStructureType, SID_PARM_NAME, create_ecu_manager_dlf_sibling_no_byte_pos,
-        create_ecu_manager_env_data_no_wildcard, create_ecu_manager_with_dtc,
-        create_ecu_manager_with_dynamic_length_field_service,
-        create_ecu_manager_with_dynamic_length_field_service_and_count_compu,
-        create_ecu_manager_with_end_pdu_service, create_ecu_manager_with_env_data_desc,
-        create_ecu_manager_with_env_data_desc_wildcard, create_ecu_manager_with_mux_service,
-        create_ecu_manager_with_mux_service_and_default_case,
-        create_ecu_manager_with_param_length_info_service,
-        create_ecu_manager_with_param_length_info_service_ordered,
-        create_ecu_manager_with_phys_const_normal_dop_service,
-        create_ecu_manager_with_phys_const_structure_dop_service,
-        create_ecu_manager_with_static_field_service, create_ecu_manager_with_struct_service,
-        create_ecu_manager_with_table_struct_service,
+    use crate::diag_kernel::test_utils::{
+        db_builder::finish_db,
+        ecu_manager_builder::{
+            EndOfPduStructureType, SID_PARM_NAME, create_ecu_manager_dlf_sibling_no_byte_pos,
+            create_ecu_manager_env_data_no_wildcard, create_ecu_manager_with_dtc,
+            create_ecu_manager_with_dynamic_length_field_service,
+            create_ecu_manager_with_dynamic_length_field_service_and_count_compu,
+            create_ecu_manager_with_end_pdu_service, create_ecu_manager_with_env_data_desc,
+            create_ecu_manager_with_env_data_desc_wildcard, create_ecu_manager_with_mux_service,
+            create_ecu_manager_with_mux_service_and_default_case,
+            create_ecu_manager_with_param_length_info_service,
+            create_ecu_manager_with_param_length_info_service_ordered,
+            create_ecu_manager_with_phys_const_normal_dop_service,
+            create_ecu_manager_with_phys_const_structure_dop_service,
+            create_ecu_manager_with_static_field_service, create_ecu_manager_with_struct_service,
+            create_ecu_manager_with_table_struct_service, new_ecu_manager,
+        },
+        mdd_type_builder::{create_sid_param, new_diag_comm, new_diag_service},
     };
+
+    #[tokio::test]
+    async fn variable_predecessor_resolves_raw_data_offset() {
+        for (later_positioned_data, first_data_is_positioned) in
+            [(false, false), (true, false), (false, true)]
+        {
+            let mut db = EcuDataBuilder::new();
+            let protocol_name = Protocol::default().to_string();
+            let protocol = db.create_protocol(&protocol_name, None, None, None);
+            let byte_type = db.create_diag_coded_type_standard_length(8, DataType::ByteField);
+            let variable_type = db.create_diag_coded_type(
+                None,
+                DataType::ByteField,
+                true,
+                DiagCodedTypeVariant::LeadingLengthInfo(8),
+            );
+            let compu = db.create_compu_method(CompuCategory::Identical, None, None);
+            let byte_dop = db.create_regular_normal_dop("byte", byte_type, compu);
+            let variable_dop = db.create_regular_normal_dop("variable", variable_type, compu);
+            let sid = create_sid_param!(db, "response_sid", 0x62u8);
+            let variable = if first_data_is_positioned {
+                db.create_value_param_with_semantic("variable", "DATA", variable_dop, 1)
+            } else {
+                db.create_value_param_with_semantic("variable", "PREAMBLE", variable_dop, 1)
+            };
+            let data =
+                db.create_value_param_no_byte_pos_with_semantic("data", byte_dop, Some("DATA"));
+            let mut params = vec![sid, variable, data];
+            if later_positioned_data {
+                params.push(db.create_value_param_with_semantic("later", "DATA", byte_dop, 5));
+            }
+            let response = db.create_response(ResponseType::Positive, Some(params), None);
+            let request_sid = create_sid_param!(db, "request_sid", 0x22u8);
+            let request = db.create_request(Some(vec![request_sid]), None);
+            let comm = new_diag_comm!(db, "TestRawOffset", protocol);
+            let service = new_diag_service!(db, comm, request, vec![response], vec![]);
+            let ecu = new_ecu_manager(finish_db!(db, protocol, vec![service]));
+            let diag_comm = DiagComm::new("TestRawOffset".to_owned(), DiagCommType::Data);
+            let payload = create_payload(vec![0x62, 2, 0xAA, 0xBB, 0xCC, 0xDD]);
+
+            for map_to_json in [false, true] {
+                let case = format!(
+                    "later_positioned_data={later_positioned_data}, \
+                     first_data_is_positioned={first_data_is_positioned}, \
+                     map_to_json={map_to_json}"
+                );
+                let result = ecu
+                    .convert_from_uds(&diag_comm, &payload, map_to_json, None)
+                    .await;
+                let expected = if first_data_is_positioned {
+                    vec![2, 0xAA, 0xBB, 0xCC, 0xDD]
+                } else {
+                    vec![0xCC, 0xDD]
+                };
+                let response = result.expect("valid response should be accepted");
+                assert_eq!(response.get_raw(), expected, "{case}");
+                if map_to_json {
+                    let mapped = response
+                        .serialize_to_json(cda_interfaces::BinaryEncoding::Hex)
+                        .unwrap();
+                    assert_eq!(mapped.data.get("data"), Some(&json!("0xCC")), "{case}");
+                    // Only a DATA param is part of the output.
+                    let variable = first_data_is_positioned.then(|| json!("0xAA 0xBB"));
+                    assert_eq!(mapped.data.get("variable"), variable.as_ref(), "{case}");
+                }
+
+                // A payload which ends before the last DATA param is rejected
+                // instead of returning the bytes which are there.
+                if !first_data_is_positioned {
+                    let truncated_len = if later_positioned_data { 5 } else { 4 };
+                    let truncated = create_payload(
+                        payload
+                            .data
+                            .get(..truncated_len)
+                            .expect("the full payload is longer")
+                            .to_vec(),
+                    );
+                    let err = ecu
+                        .convert_from_uds(&diag_comm, &truncated, map_to_json, None)
+                        .await
+                        .expect_err("truncated response should be rejected");
+                    assert!(
+                        matches!(err, DiagServiceError::NotEnoughData { .. }),
+                        "{case}: unexpected error {err:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_data_offset_resolves_length_key_before_or_after_field() {
+        for key_first in [true, false] {
+            let mut db = EcuDataBuilder::new();
+            let protocol_name = Protocol::default().to_string();
+            let protocol = db.create_protocol(&protocol_name, None, None, None);
+            let compu = db.create_compu_method(CompuCategory::Identical, None, None);
+            let byte_type = db.create_diag_coded_type_standard_length(8, DataType::ByteField);
+            let key_type = db.create_diag_coded_type_standard_length(8, DataType::UInt32);
+            let variable_type =
+                db.create_diag_coded_type_param_length_info("length", DataType::ByteField);
+            let byte_dop = db.create_regular_normal_dop("byte", byte_type, compu);
+            let key_dop = db.create_regular_normal_dop("key", key_type, compu);
+            let variable_dop = db.create_regular_normal_dop("variable", variable_type, compu);
+            let sid = create_sid_param!(db, "response_sid", 0x62u8);
+            let key = db.create_length_key_param("length", key_dop, 1, 0);
+            let variable = db.create_value_param("variable", variable_dop, 2, 0);
+            let data =
+                db.create_value_param_no_byte_pos_with_semantic("data", byte_dop, Some("DATA"));
+            let params = if key_first {
+                vec![sid, key, variable, data]
+            } else {
+                vec![sid, variable, data, key]
+            };
+            let response = db.create_response(ResponseType::Positive, Some(params), None);
+            let request_sid = create_sid_param!(db, "request_sid", 0x22u8);
+            let request = db.create_request(Some(vec![request_sid]), None);
+            let comm = new_diag_comm!(db, "TestLengthKeyOffset", protocol);
+            let service = new_diag_service!(db, comm, request, vec![response], vec![]);
+            let ecu = new_ecu_manager(finish_db!(db, protocol, vec![service]));
+            let diag_comm = DiagComm::new("TestLengthKeyOffset".to_owned(), DiagCommType::Data);
+
+            for map_to_json in [false, true] {
+                let case = format!("key_first={key_first}, map_to_json={map_to_json}");
+                for (bytes, length, variable) in [
+                    (vec![0x62, 0, 0xCC], 0, json!("")),
+                    (vec![0x62, 16, 0xAA, 0xBB, 0xCC], 16, json!("0xAA 0xBB")),
+                ] {
+                    let response = ecu
+                        .convert_from_uds(&diag_comm, &create_payload(bytes), map_to_json, None)
+                        .await
+                        .expect("length-key response should be accepted");
+                    assert_eq!(response.get_raw(), [0xCC], "{case}");
+                    if map_to_json {
+                        let mapped = response
+                            .serialize_to_json(cda_interfaces::BinaryEncoding::Hex)
+                            .unwrap();
+                        assert_eq!(mapped.data.get("data"), Some(&json!("0xCC")), "{case}");
+                        assert_eq!(mapped.data.get("length"), Some(&json!(length)), "{case}");
+                        assert_eq!(mapped.data.get("variable"), Some(&variable), "{case}");
+                    }
+                }
+                let err = ecu
+                    .convert_from_uds(
+                        &diag_comm,
+                        &create_payload(vec![0x62, 32, 0xAA]),
+                        map_to_json,
+                        None,
+                    )
+                    .await
+                    .expect_err("a length beyond the payload should be rejected");
+                assert!(
+                    matches!(err, DiagServiceError::NotEnoughData { .. }),
+                    "{case}: unexpected error {err:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_data_offset_skips_variable_field_terminator() {
+        let mut db = EcuDataBuilder::new();
+        let protocol_name = Protocol::default().to_string();
+        let protocol = db.create_protocol(&protocol_name, None, None, None);
+        let compu = db.create_compu_method(CompuCategory::Identical, None, None);
+        let byte_type = db.create_diag_coded_type_standard_length(8, DataType::ByteField);
+        let variable_type = db.create_diag_coded_type(
+            None,
+            DataType::ByteField,
+            true,
+            DiagCodedTypeVariant::MinMaxLength(datatypes::MinMaxLengthType {
+                min_length: 0,
+                max_length: Some(4),
+                termination: datatypes::Termination::Zero,
+            }),
+        );
+        let byte_dop = db.create_regular_normal_dop("byte", byte_type, compu);
+        let variable_dop = db.create_regular_normal_dop("variable", variable_type, compu);
+        let sid = create_sid_param!(db, "response_sid", 0x62u8);
+        let variable = db.create_value_param("variable", variable_dop, 1, 0);
+        let data = db.create_value_param_no_byte_pos_with_semantic("data", byte_dop, Some("DATA"));
+        let response = db.create_response(
+            ResponseType::Positive,
+            Some(vec![sid, variable, data]),
+            None,
+        );
+        let request_sid = create_sid_param!(db, "request_sid", 0x22u8);
+        let request = db.create_request(Some(vec![request_sid]), None);
+        let comm = new_diag_comm!(db, "TestTerminatedOffset", protocol);
+        let service = new_diag_service!(db, comm, request, vec![response], vec![]);
+        let ecu = new_ecu_manager(finish_db!(db, protocol, vec![service]));
+        let diag_comm = DiagComm::new("TestTerminatedOffset".to_owned(), DiagCommType::Data);
+
+        for map_to_json in [false, true] {
+            let response = ecu
+                .convert_from_uds(
+                    &diag_comm,
+                    &create_payload(vec![0x62, 0xAA, 0xBB, 0, 0xCC]),
+                    map_to_json,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.get_raw(), [0xCC]);
+            if map_to_json {
+                let mapped = response
+                    .serialize_to_json(cda_interfaces::BinaryEncoding::Hex)
+                    .unwrap();
+                assert_eq!(mapped.data.get("data"), Some(&json!("0xCC")));
+            }
+        }
+    }
+
+    /// Decodes a response made of the SID, the parameters returned by `build`
+    /// and an unpositioned one byte DATA parameter `data`, then expects both
+    /// the raw payload and the mapped `data` to be the trailing byte.
+    async fn assert_trailing_data_follows(
+        bytes: Vec<u8>,
+        build: impl for<'a> FnOnce(&mut EcuDataBuilder<'a>) -> Vec<WIPOffset<DataFormatParam<'a>>>,
+    ) {
+        let (ecu, diag_comm) = trailing_data_ecu(build);
+        let expected = *bytes.last().unwrap();
+
+        for map_to_json in [false, true] {
+            let response = ecu
+                .convert_from_uds(
+                    &diag_comm,
+                    &create_payload(bytes.clone()),
+                    map_to_json,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.get_raw(), [expected]);
+            if map_to_json {
+                let mapped = response
+                    .serialize_to_json(cda_interfaces::BinaryEncoding::Hex)
+                    .unwrap();
+                assert_eq!(
+                    mapped.data.get("data"),
+                    Some(&json!(format!("0x{expected:02X}")))
+                );
+            }
+        }
+    }
+
+    /// Like [`assert_trailing_data_follows`], but expects `bytes` to be
+    /// rejected because the trailing DATA param is not in the payload.
+    async fn assert_trailing_data_is_missing(
+        bytes: Vec<u8>,
+        build: impl for<'a> FnOnce(&mut EcuDataBuilder<'a>) -> Vec<WIPOffset<DataFormatParam<'a>>>,
+    ) {
+        let (ecu, diag_comm) = trailing_data_ecu(build);
+        for map_to_json in [false, true] {
+            let err = ecu
+                .convert_from_uds(
+                    &diag_comm,
+                    &create_payload(bytes.clone()),
+                    map_to_json,
+                    None,
+                )
+                .await
+                .expect_err("response without trailing data should be rejected");
+            assert!(
+                matches!(err, DiagServiceError::NotEnoughData { .. }),
+                "map_to_json={map_to_json}: unexpected error {err:?}"
+            );
+        }
+    }
+
+    fn trailing_data_ecu(
+        build: impl for<'a> FnOnce(&mut EcuDataBuilder<'a>) -> Vec<WIPOffset<DataFormatParam<'a>>>,
+    ) -> (
+        super::super::ecumanager::EcuManager<DefaultSecurityPluginData>,
+        DiagComm,
+    ) {
+        let mut db = EcuDataBuilder::new();
+        let protocol_name = Protocol::default().to_string();
+        let protocol = db.create_protocol(&protocol_name, None, None, None);
+        let sid = create_sid_param!(db, "response_sid", 0x62u8);
+        let mut params = vec![sid];
+        params.extend(build(&mut db));
+        let compu = db.create_compu_method(CompuCategory::Identical, None, None);
+        let byte_type = db.create_diag_coded_type_standard_length(8, DataType::ByteField);
+        let byte_dop = db.create_regular_normal_dop("trailing", byte_type, compu);
+        params.push(db.create_value_param_no_byte_pos_with_semantic(
+            "data",
+            byte_dop,
+            Some("DATA"),
+        ));
+        let response = db.create_response(ResponseType::Positive, Some(params), None);
+        let request_sid = create_sid_param!(db, "request_sid", 0x22u8);
+        let request = db.create_request(Some(vec![request_sid]), None);
+        let comm = new_diag_comm!(db, "TestTrailingData", protocol);
+        let service = new_diag_service!(db, comm, request, vec![response], vec![]);
+        let ecu = new_ecu_manager(finish_db!(db, protocol, vec![service]));
+        let diag_comm = DiagComm::new("TestTrailingData".to_owned(), DiagCommType::Data);
+        (ecu, diag_comm)
+    }
+
+    fn byte_dop<'a>(db: &mut EcuDataBuilder<'a>) -> WIPOffset<DataFormatDop<'a>> {
+        let compu = db.create_compu_method(CompuCategory::Identical, None, None);
+        let coded_type = db.create_diag_coded_type_standard_length(8, DataType::ByteField);
+        db.create_regular_normal_dop("byte", coded_type, compu)
+    }
+
+    fn terminated_dop<'a>(
+        db: &mut EcuDataBuilder<'a>,
+        data_type: DataType,
+        termination: datatypes::Termination,
+    ) -> WIPOffset<DataFormatDop<'a>> {
+        let compu = db.create_compu_method(CompuCategory::Identical, None, None);
+        let coded_type = db.create_diag_coded_type(
+            None,
+            data_type,
+            true,
+            DiagCodedTypeVariant::MinMaxLength(datatypes::MinMaxLengthType {
+                min_length: 0,
+                max_length: Some(8),
+                termination,
+            }),
+        );
+        db.create_regular_normal_dop("terminated", coded_type, compu)
+    }
+
+    #[tokio::test]
+    async fn unpositioned_data_follows_furthest_structure_child() {
+        assert_trailing_data_follows(vec![0x62, 0xAA, 0xBB, 0xCC], |db| {
+            let dop = byte_dop(db);
+            let second = db.create_value_param("second", dop, 1, 0);
+            let first = db.create_value_param("first", dop, 0, 0);
+            let structure = db.create_structure(Some(vec![second, first]), None, true);
+            let dop = db.create_structure_dop("structure", structure);
+            vec![db.create_value_param_with_semantic("structure", "PREAMBLE", dop, 1)]
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpositioned_data_follows_static_field() {
+        assert_trailing_data_follows(vec![0x62, 0xA0, 0xA1, 0xB0, 0xB1, 0xCC], |db| {
+            let dop = byte_dop(db);
+            let item = db.create_value_param("item", dop, 0, 0);
+            let structure = db.create_structure(Some(vec![item]), None, true);
+            let dop = db.create_static_field_dop(2, 2, structure);
+            vec![db.create_value_param_with_semantic("field", "PREAMBLE", dop, 1)]
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpositioned_data_follows_terminated_phys_const() {
+        for (termination, terminator) in [
+            (datatypes::Termination::Zero, 0u8),
+            (datatypes::Termination::HexFF, 0xFF),
+        ] {
+            assert_trailing_data_follows(vec![0x62, 0x41, terminator, 0xCC], |db| {
+                let dop = terminated_dop(db, DataType::AsciiString, termination);
+                vec![db.create_phys_const_param("constant", Some("A"), dop, 1, 0)]
+            })
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn unpositioned_data_follows_terminated_structure_child() {
+        assert_trailing_data_follows(vec![0x62, 0x41, 0, 0xCC], |db| {
+            let dop = terminated_dop(db, DataType::ByteField, datatypes::Termination::Zero);
+            let child = db.create_value_param("child", dop, 0, 0);
+            let structure = db.create_structure(Some(vec![child]), None, true);
+            let dop = db.create_structure_dop("structure", structure);
+            vec![db.create_value_param_with_semantic("structure", "PREAMBLE", dop, 1)]
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpositioned_params_keep_distinct_positions_without_param_ids() {
+        let mut db = EcuDataBuilder::new();
+        db.without_param_ids();
+        let protocol_name = Protocol::default().to_string();
+        let protocol = db.create_protocol(&protocol_name, None, None, None);
+        let compu = db.create_compu_method(CompuCategory::Identical, None, None);
+        let variable_type = db.create_diag_coded_type(
+            None,
+            DataType::ByteField,
+            true,
+            DiagCodedTypeVariant::LeadingLengthInfo(8),
+        );
+        let variable_dop = db.create_regular_normal_dop("variable", variable_type, compu);
+        let dop = byte_dop(&mut db);
+        let sid = create_sid_param!(db, "response_sid", 0x62u8);
+        let params = vec![
+            sid,
+            db.create_value_param_with_semantic("variable", "PREAMBLE", variable_dop, 1),
+            db.create_value_param_no_byte_pos_with_semantic("first", dop, Some("DATA")),
+            db.create_value_param_no_byte_pos_with_semantic("second", dop, Some("DATA")),
+        ];
+        let response = db.create_response(ResponseType::Positive, Some(params), None);
+        let request_sid = create_sid_param!(db, "request_sid", 0x22u8);
+        let request = db.create_request(Some(vec![request_sid]), None);
+        let comm = new_diag_comm!(db, "TestParamIds", protocol);
+        let service = new_diag_service!(db, comm, request, vec![response], vec![]);
+        let ecu = new_ecu_manager(finish_db!(db, protocol, vec![service]));
+        let diag_comm = DiagComm::new("TestParamIds".to_owned(), DiagCommType::Data);
+
+        let response = ecu
+            .convert_from_uds(
+                &diag_comm,
+                &create_payload(vec![0x62, 2, 0xAA, 0xBB, 0xCC, 0xDD]),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.get_raw(), [0xCC, 0xDD]);
+        let mapped = response
+            .serialize_to_json(cda_interfaces::BinaryEncoding::Hex)
+            .unwrap();
+        assert_eq!(mapped.data.get("first"), Some(&json!("0xCC")));
+        assert_eq!(mapped.data.get("second"), Some(&json!("0xDD")));
+    }
+
+    #[tokio::test]
+    async fn mapped_data_follows_positioned_terminated_field() {
+        assert_trailing_data_follows(vec![0x62, 0xAA, 0, 0xCC], |db| {
+            let dop = terminated_dop(db, DataType::ByteField, datatypes::Termination::Zero);
+            vec![db.create_value_param_with_semantic("positioned", "PREAMBLE", dop, 1)]
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn mapped_data_follows_params_without_data_semantic() {
+        assert_trailing_data_follows(vec![0x62, 0xAA, 0xCC], |db| {
+            let dop = byte_dop(db);
+            vec![db.create_value_param_with_semantic("preamble", "PREAMBLE", dop, 1)]
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpositioned_data_follows_system_param() {
+        assert_trailing_data_follows(vec![0x62, 0xAA, 0xCC], |db| {
+            let dop = byte_dop(db);
+            vec![db.create_system_param("system", dop, 1)]
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn env_data_selector_is_decoded_before_unpositioned_data() {
+        assert_trailing_data_follows(vec![0x62, 0x01, 0xAA, 0xCC], |db| {
+            let compu = db.create_compu_method(CompuCategory::Identical, None, None);
+            let coded_type = db.create_diag_coded_type_standard_length(8, DataType::UInt32);
+            let selector_dop = db.create_regular_normal_dop("selector", coded_type, compu);
+            let value_dop = byte_dop(db);
+            let value = db.create_value_param("env_value", value_dop, 0, 0);
+            let env_data = db.create_env_data_dop(&[1], &[value]);
+            let env_dop = db.create_env_data_desc_dop("env_desc", "selector", &[env_data]);
+            vec![
+                db.create_value_param_with_semantic("selector", "PREAMBLE", selector_dop, 1),
+                db.create_value_param_with_semantic("environment", "PREAMBLE", env_dop, 2),
+            ]
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpositioned_data_follows_mux_case() {
+        assert_trailing_data_follows(vec![0x62, 0x01, 0xAA, 0xCC], |db| {
+            let compu = db.create_compu_method(CompuCategory::Identical, None, None);
+            let coded_type = db.create_diag_coded_type_standard_length(8, DataType::UInt32);
+            let key_dop = db.create_regular_normal_dop("key", coded_type, compu);
+            let switch_key = db.create_switch_key(0, Some(0), Some(key_dop));
+            let dop = byte_dop(db);
+            let item = db.create_value_param("item", dop, 0, 0);
+            let structure = db.create_structure(Some(vec![item]), None, true);
+            let limit = datatypes::Limit {
+                value: "1".to_owned(),
+                interval_type: datatypes::IntervalType::Closed,
+            };
+            let case = db.create_case("case", Some(limit.clone()), Some(limit), Some(structure));
+            let dop = db.create_mux_dop("mux", 1, Some(switch_key), None, Some(vec![case]), true);
+            vec![db.create_value_param_with_semantic("mux", "PREAMBLE", dop, 1)]
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpositioned_data_follows_table_struct_row() {
+        assert_trailing_data_follows(vec![0x62, 0x05, 0xAA, 0xBB, 0xCC], |db| {
+            let compu = db.create_compu_method(CompuCategory::Identical, None, None);
+            let coded_type = db.create_diag_coded_type_standard_length(8, DataType::UInt32);
+            let key_dop = db.create_regular_normal_dop("key", coded_type, compu);
+            let dop = byte_dop(db);
+            let second = db.create_value_param("second", dop, 1, 0);
+            let first = db.create_value_param("first", dop, 0, 0);
+            let structure = db.create_structure(Some(vec![second, first]), None, true);
+            let row = db.create_structure_dop("row_struct", structure);
+            let key =
+                db.create_table_key_param("table_key", key_dop, &[("row", "5", Some(row))], 1);
+            let table_struct = db.create_table_struct_param("table_struct", key, 2);
+            vec![key, table_struct]
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn mapped_data_follows_reserved_param() {
+        assert_trailing_data_follows(vec![0x62, 0xEE, 0xCC], |db| {
+            vec![db.create_reserved_param("reserved", 1, 8)]
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn mapped_data_follows_dtc() {
+        assert_trailing_data_follows(vec![0x62, 0x12, 0x34, 0x56, 0xCC], |db| {
+            let coded_type = db.create_diag_coded_type_standard_length(24, DataType::UInt32);
+            let dop = db.create_dtc_dop(coded_type, None, None);
+            vec![db.create_value_param_with_semantic("dtc", "PREAMBLE", dop, 1)]
+        })
+        .await;
+    }
+
+    /// The case needs two bytes but only one is left. That byte belongs to the
+    /// case, so it must not be returned as the following DATA param.
+    #[tokio::test]
+    async fn truncated_mux_case_is_not_read_as_following_data() {
+        assert_trailing_data_is_missing(vec![0x62, 0x01, 0xCC], |db| {
+            let compu = db.create_compu_method(CompuCategory::Identical, None, None);
+            let coded_type = db.create_diag_coded_type_standard_length(8, DataType::UInt32);
+            let key_dop = db.create_regular_normal_dop("key", coded_type, compu);
+            let switch_key = db.create_switch_key(0, Some(0), Some(key_dop));
+            let item_type = db.create_diag_coded_type_standard_length(16, DataType::UInt32);
+            let item_dop = db.create_regular_normal_dop("item", item_type, compu);
+            let item = db.create_value_param("item", item_dop, 0, 0);
+            let structure = db.create_structure(Some(vec![item]), None, true);
+            let limit = datatypes::Limit {
+                value: "1".to_owned(),
+                interval_type: datatypes::IntervalType::Closed,
+            };
+            let case = db.create_case("case", Some(limit.clone()), Some(limit), Some(structure));
+            let dop = db.create_mux_dop("mux", 1, Some(switch_key), None, Some(vec![case]), true);
+            vec![db.create_value_param_with_semantic("mux", "PREAMBLE", dop, 1)]
+        })
+        .await;
+    }
+
+    /// Three items are announced, the third is cut off after one byte. That
+    /// byte belongs to the item, so it must not be returned as the following
+    /// DATA param.
+    #[tokio::test]
+    async fn truncated_dynamic_length_field_is_not_read_as_following_data() {
+        assert_trailing_data_is_missing(vec![0x62, 0x03, 0x11, 0x22, 0x33, 0x44, 0xCC], |db| {
+            let compu = db.create_compu_method(CompuCategory::Identical, None, None);
+            let count_type = db.create_diag_coded_type_standard_length(8, DataType::UInt32);
+            let count_dop = db.create_regular_normal_dop("count", count_type, compu);
+            let item_type = db.create_diag_coded_type_standard_length(16, DataType::UInt32);
+            let item_dop = db.create_regular_normal_dop("item", item_type, compu);
+            let item = db.create_value_param("item", item_dop, 0, 0);
+            let structure = db.create_structure(Some(vec![item]), Some(2), true);
+            let specific = db
+                .create_dynamic_length_specific_dop_data(1, 0, 0, count_dop, Some(structure))
+                .value_offset();
+            let dop = db.create_dop(
+                *cda_database::datatypes::database_builder::DopType::REGULAR,
+                Some("dlf"),
+                None,
+                *cda_database::datatypes::database_builder::SpecificDOPData::DynamicLengthField,
+                Some(specific),
+            );
+            vec![db.create_value_param_with_semantic("field", "PREAMBLE", dop, 1)]
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn missing_data_after_variable_field_is_rejected() {
+        assert_trailing_data_is_missing(vec![0x62, 2, 0xAA, 0xBB], |db| {
+            let compu = db.create_compu_method(CompuCategory::Identical, None, None);
+            let coded_type = db.create_diag_coded_type(
+                None,
+                DataType::ByteField,
+                true,
+                DiagCodedTypeVariant::LeadingLengthInfo(8),
+            );
+            let dop = db.create_regular_normal_dop("variable", coded_type, compu);
+            vec![db.create_value_param_with_semantic("variable", "PREAMBLE", dop, 1)]
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpositioned_data_follows_mux_case_without_params() {
+        assert_trailing_data_follows(vec![0x62, 0x01, 0xAA, 0xBB, 0xCC], |db| {
+            let compu = db.create_compu_method(CompuCategory::Identical, None, None);
+            let coded_type = db.create_diag_coded_type_standard_length(8, DataType::UInt32);
+            let key_dop = db.create_regular_normal_dop("key", coded_type, compu);
+            let switch_key = db.create_switch_key(0, Some(0), Some(key_dop));
+            let structure = db.create_structure(None, Some(2), true);
+            let limit = datatypes::Limit {
+                value: "1".to_owned(),
+                interval_type: datatypes::IntervalType::Closed,
+            };
+            let case = db.create_case("case", Some(limit.clone()), Some(limit), Some(structure));
+            let dop = db.create_mux_dop("mux", 1, Some(switch_key), None, Some(vec![case]), true);
+            vec![db.create_value_param_with_semantic("mux", "PREAMBLE", dop, 1)]
+        })
+        .await;
+    }
+
+    /// The failing parameter is not part of the output, so its error is
+    /// ignored and must not shift the parameters decoded afterwards.
+    #[tokio::test]
+    async fn failed_unmapped_mux_does_not_move_following_data() {
+        let mut db = EcuDataBuilder::new();
+        let protocol_name = Protocol::default().to_string();
+        let protocol = db.create_protocol(&protocol_name, None, None, None);
+        let compu = db.create_compu_method(CompuCategory::Identical, None, None);
+        let coded_type = db.create_diag_coded_type_standard_length(8, DataType::UInt32);
+        let key_dop = db.create_regular_normal_dop("key", coded_type, compu);
+        let switch_key = db.create_switch_key(0, Some(0), Some(key_dop));
+        let mux_dop = db.create_mux_dop("mux", 1, Some(switch_key), None, Some(vec![]), true);
+        let dop = byte_dop(&mut db);
+        let sid = create_sid_param!(db, "response_sid", 0x62u8);
+        let params = vec![
+            sid,
+            db.create_value_param_with_semantic("mux", "PREAMBLE", mux_dop, 1),
+            db.create_value_param_with_semantic("data", "DATA", dop, 3),
+        ];
+        let response = db.create_response(ResponseType::Positive, Some(params), None);
+        let request_sid = create_sid_param!(db, "request_sid", 0x22u8);
+        let request = db.create_request(Some(vec![request_sid]), None);
+        let comm = new_diag_comm!(db, "TestFailedMux", protocol);
+        let service = new_diag_service!(db, comm, request, vec![response], vec![]);
+        let ecu = new_ecu_manager(finish_db!(db, protocol, vec![service]));
+        let diag_comm = DiagComm::new("TestFailedMux".to_owned(), DiagCommType::Data);
+
+        let response = ecu
+            .convert_from_uds(
+                &diag_comm,
+                &create_payload(vec![0x62, 0x07, 0x00, 0xAA, 0xBB]),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        let mapped = response
+            .serialize_to_json(cda_interfaces::BinaryEncoding::Hex)
+            .unwrap();
+        assert_eq!(mapped.data.get("data"), Some(&json!("0xAA")));
+    }
+
+    /// The MDD converter omits a BYTE-POSITION of 0, so a complex parameter
+    /// without position inside a structure starts at the structure.
+    #[tokio::test]
+    async fn mux_without_byte_position_in_structure_starts_at_the_structure() {
+        let mut db = EcuDataBuilder::new();
+        let protocol_name = Protocol::default().to_string();
+        let protocol = db.create_protocol(&protocol_name, None, None, None);
+        let compu = db.create_compu_method(CompuCategory::Identical, None, None);
+        let u8_type = db.create_diag_coded_type_standard_length(8, DataType::UInt32);
+        let u16_type = db.create_diag_coded_type_standard_length(16, DataType::UInt32);
+        let u8_dop = db.create_regular_normal_dop("u8", u8_type, compu);
+        let u16_dop = db.create_regular_normal_dop("u16", u16_type, compu);
+        let value = db.create_value_param("value", u16_dop, 0, 0);
+        let case = db.create_structure(Some(vec![value]), None, true);
+        let default_case = db.create_default_case("default", Some(case));
+        let switch_key = db.create_switch_key(0, Some(0), Some(u8_dop));
+        let mux_dop = db.create_mux_dop("mux", 1, Some(switch_key), Some(default_case), None, true);
+        let number = db.create_value_param_no_byte_pos("number", u8_dop);
+        let content = db.create_value_param_no_byte_pos("content", mux_dop);
+        let record = db.create_structure(Some(vec![number, content]), None, true);
+        let records_dop = db.create_end_of_pdu_field_dop(0, None, Some(record));
+        let sid = create_sid_param!(db, "response_sid", 0x62u8);
+        let records = db.create_value_param_with_semantic("records", "DATA", records_dop, 1);
+        let response = db.create_response(ResponseType::Positive, Some(vec![sid, records]), None);
+        let request_sid = create_sid_param!(db, "request_sid", 0x22u8);
+        let request = db.create_request(Some(vec![request_sid]), None);
+        let comm = new_diag_comm!(db, "TestRecords", protocol);
+        let service = new_diag_service!(db, comm, request, vec![response], vec![]);
+        let ecu = new_ecu_manager(finish_db!(db, protocol, vec![service]));
+        let diag_comm = DiagComm::new("TestRecords".to_owned(), DiagCommType::Data);
+
+        let response = ecu
+            .convert_from_uds(
+                &diag_comm,
+                &create_payload(vec![0x62, 0xFF, 0x20, 0x21]),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        let mapped = response
+            .serialize_to_json(cda_interfaces::BinaryEncoding::Hex)
+            .unwrap();
+        assert_eq!(
+            mapped.data.get("records"),
+            Some(&json!([{
+                "number": 255,
+                "content": {"Selector": 255, "default": {"value": 0x2021}},
+            }]))
+        );
+    }
 
     fn create_payload(data: Vec<u8>) -> cda_interfaces::ServicePayload {
         cda_interfaces::ServicePayload {
@@ -2533,7 +3576,7 @@ mod tests {
         let response = result.unwrap();
 
         assert_eq!(response.response_type, DiagServiceResponseType::Positive);
-        assert_eq!(response.data, request_payload);
+        assert_eq!(response.get_raw(), request_payload);
         assert!(response.mapped_data.is_some());
 
         let mapped = response.mapped_data.unwrap();
@@ -2561,7 +3604,7 @@ mod tests {
         assert!(result.is_ok());
         let response = result.unwrap();
 
-        assert_eq!(response.data, request_payload);
+        assert_eq!(response.get_raw(), request_payload);
         assert!(response.mapped_data.is_none());
         assert_eq!(response.response_type, DiagServiceResponseType::Positive);
     }
@@ -2579,7 +3622,7 @@ mod tests {
 
         assert!(result.is_ok());
         let mapped = result.unwrap();
-        assert_eq!(mapped.data, response_data);
+        assert_eq!(mapped.get_raw(), response_data);
         assert!(mapped.mapped_data.is_some());
 
         let mapped_data = mapped.mapped_data.unwrap();
@@ -2600,7 +3643,7 @@ mod tests {
 
         assert!(result.is_ok());
         let mapped = result.unwrap();
-        assert_eq!(mapped.data, response_data);
+        assert_eq!(mapped.get_raw(), response_data);
         assert!(mapped.mapped_data.is_some());
 
         let mapped_data = mapped.mapped_data.unwrap();
@@ -2714,7 +3757,7 @@ mod tests {
         let response = result.expect("Expected successful conversion from UDS");
 
         assert_eq!(response.response_type, DiagServiceResponseType::Positive);
-        assert_eq!(response.data, request_payload);
+        assert_eq!(response.get_raw(), request_payload);
         assert!(response.mapped_data.is_some());
 
         let mapped = response.mapped_data.unwrap();

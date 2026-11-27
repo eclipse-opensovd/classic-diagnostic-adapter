@@ -60,7 +60,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 let params: Vec<_> = params.iter().map(datatypes::Parameter).collect();
                 // The raw response starts at the first DATA parameter, see
                 // `raw_payload_offset`.
-                let offset = self.raw_payload_offset(&params);
+                let offset = self.raw_payload_offset(&params)?;
                 effective_byte_positions(&params)
                     .into_iter()
                     .filter_map(|(p, pos)| pos.map(|pos| (p, pos)))

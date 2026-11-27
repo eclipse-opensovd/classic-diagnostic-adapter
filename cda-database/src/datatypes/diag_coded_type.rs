@@ -251,6 +251,51 @@ impl DiagCodedType {
         &self.type_
     }
 
+    /// Position following a value of `data_len` decoded bytes which starts at
+    /// `byte_pos`. This is where a subsequent parameter without BYTE-POSITION
+    /// starts (ISO 22901-1:2008 7.3.5.4).
+    #[must_use]
+    pub fn coded_end(
+        &self,
+        uds_payload: &[u8],
+        byte_pos: usize,
+        bit_pos: usize,
+        data_len: usize,
+    ) -> usize {
+        let data_end = byte_pos.saturating_add(data_len);
+        match &self.type_ {
+            DiagCodedTypeVariant::LeadingLengthInfo(bits) => {
+                data_end.saturating_add(bits.div_ceil(8) as usize)
+            }
+            DiagCodedTypeVariant::StandardLength(slt) => {
+                byte_pos.saturating_add(bit_pos.saturating_add(slt.bit_length as usize).div_ceil(8))
+            }
+            // The termination value is not part of the data, but the next
+            // parameter follows it. It is omitted at MAX-LENGTH.
+            DiagCodedTypeVariant::MinMaxLength(mmlt) => {
+                let terminator = match mmlt.termination {
+                    Termination::Zero => 0,
+                    Termination::HexFF => 0xFF,
+                    Termination::EndOfPdu => return data_end,
+                };
+                if mmlt.max_length.is_some_and(|max| data_len >= max as usize) {
+                    return data_end;
+                }
+                let width = if self.base_datatype == DataType::Unicode2String {
+                    2
+                } else {
+                    1
+                };
+                let end = data_end.saturating_add(width);
+                match uds_payload.get(data_end..end) {
+                    Some(slice) if slice.iter().all(|byte| *byte == terminator) => end,
+                    _ => data_end,
+                }
+            }
+            DiagCodedTypeVariant::ParamLengthInfo(_) => data_end,
+        }
+    }
+
     /// Decodes data from a UDS payload according to the coded type.
     ///
     /// # Arguments
