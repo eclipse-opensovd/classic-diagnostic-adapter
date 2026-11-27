@@ -31,7 +31,7 @@ use crate::{
         endpoints::APPS_SOVD2UDS_DATA_NETWORKSTRUCTURE,
         http::{
             QueryParams, extract_field_from_json, response_to_json, response_to_t,
-            send_authenticated_cda_request, send_cda_request,
+            send_authenticated_cda_request, send_cda_request, vehicle_url,
         },
         locks::{self, create_lock, lock_operation},
         test_env::{TestEnv, Transport, skip_unless},
@@ -1254,65 +1254,48 @@ async fn test_ecu_sdg_retrieval() {
     .await
     .unwrap();
 
+    let base = vehicle_url(&test_env.config, ecu_endpoint);
     let d = data
         .get("data")
         .unwrap()
         .as_str()
         .expect("should contain data");
-    assert_eq!(
-        d,
-        "http://localhost:20002/vehicle/v15/components/flxc1000/data"
-    );
+    assert_eq!(d, format!("{base}/data"));
 
     let operations = data
         .get("operations")
         .unwrap()
         .as_str()
         .expect("should contain operations");
-    assert_eq!(
-        operations,
-        "http://localhost:20002/vehicle/v15/components/flxc1000/operations"
-    );
+    assert_eq!(operations, format!("{base}/operations"));
 
     let configurations = data
         .get("configurations")
         .unwrap()
         .as_str()
         .expect("should contain configurations");
-    assert_eq!(
-        configurations,
-        "http://localhost:20002/vehicle/v15/components/flxc1000/configurations"
-    );
+    assert_eq!(configurations, format!("{base}/configurations"));
 
     let modes = data
         .get("modes")
         .unwrap()
         .as_str()
         .expect("should contain modes");
-    assert_eq!(
-        modes,
-        "http://localhost:20002/vehicle/v15/components/flxc1000/modes"
-    );
+    assert_eq!(modes, format!("{base}/modes"));
 
     let locks = data
         .get("locks")
         .unwrap()
         .as_str()
         .expect("should contain locks");
-    assert_eq!(
-        locks,
-        "http://localhost:20002/vehicle/v15/components/flxc1000/locks"
-    );
+    assert_eq!(locks, format!("{base}/locks"));
 
     let faults = data
         .get("faults")
         .unwrap()
         .as_str()
         .expect("should contain faults");
-    assert_eq!(
-        faults,
-        "http://localhost:20002/vehicle/v15/components/flxc1000/faults"
-    );
+    assert_eq!(faults, format!("{base}/faults"));
 
     let sdgs = data
         .get("sdgs")
