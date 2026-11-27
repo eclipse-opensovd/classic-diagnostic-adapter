@@ -20,8 +20,8 @@ use doip_definitions::header::ProtocolVersion;
 use tokio::sync::RwLock;
 
 use crate::{
-    DiscoveredGateway, bind_vir_socket, config::VirSourcePort, error::DoipGatewaySetupError,
-    vir_vam,
+    DiscoveredGateway, DoipTransportConfig, bind_vir_socket, discovery_target,
+    error::DoipGatewaySetupError, vir_vam,
 };
 
 /// Gateways to connect to directly, and gateways that need a VIR search.
@@ -49,6 +49,7 @@ pub(crate) fn plan_reconnect(
     known: &[KnownGateway],
     search: &[u16],
     db_gateways: &HashMap<u16, Vec<String>>,
+    ipv6: bool,
 ) -> ReconnectPlan {
     let mut plan = ReconnectPlan::default();
     for gateway in known {
@@ -66,7 +67,15 @@ pub(crate) fn plan_reconnect(
             );
             continue;
         };
-        let usable_address = address.parse::<std::net::Ipv4Addr>().ok();
+        let usable_address = address.parse::<std::net::IpAddr>().ok().filter(|ip| {
+            ip.is_ipv6() == ipv6
+                && match ip {
+                    std::net::IpAddr::V6(ip) => {
+                        crate::address::validate_ipv6_endpoint(*ip, "persisted gateway").is_ok()
+                    }
+                    std::net::IpAddr::V4(_) => true,
+                }
+        });
         let protocol_version = gateway
             .doip_protocol_version
             .and_then(|version| ProtocolVersion::try_from(&version).ok());
@@ -105,10 +114,8 @@ pub(crate) fn plan_reconnect(
 /// Only if `vir_source_port` is the `DoIP` port (legacy behavior) the socket shares
 /// that port with the VAM listener.
 pub(crate) async fn fallback_identification<T, F>(
-    tester_ip: &str,
-    vir_source_port: VirSourcePort,
-    netmask: u32,
-    gateway_port: u16,
+    transport_config: &DoipTransportConfig,
+    netmask: Option<u32>,
     ecus: &Arc<HashMap<String, RwLock<T>>>,
     wanted: &HashSet<u16>,
     shutdown: futures::future::Shared<F>,
@@ -117,7 +124,9 @@ where
     T: EcuAddresses,
     F: Future<Output = ()> + Send + 'static,
 {
-    let (mut socket, _) = bind_vir_socket(tester_ip, vir_source_port, gateway_port)
+    let target = discovery_target(transport_config)
+        .map_err(|error| DiagServiceError::ResourceError(error.to_string()))?;
+    let (mut socket, _) = bind_vir_socket(transport_config)
         .await
         .map_err(|error| match error {
             DoipGatewaySetupError::InvalidAddress(message) => {
@@ -126,8 +135,7 @@ where
             other => DiagServiceError::ResourceError(other.to_string()),
         })?;
     let gateways =
-        vir_vam::get_vehicle_identification(&mut socket, netmask, gateway_port, ecus, shutdown)
-            .await?;
+        vir_vam::get_vehicle_identification(&mut socket, netmask, target, ecus, shutdown).await?;
     Ok(gateways
         .into_iter()
         .filter(|gateway| wanted.contains(&gateway.logical_address))
@@ -172,6 +180,7 @@ mod tests {
             ],
             &[0x5000],
             &db_gateways(&[0x1000, 0x2000, 0x3000, 0x4000, 0x5000]),
+            false,
         );
 
         let unicast: Vec<_> = plan
@@ -195,8 +204,30 @@ mod tests {
     fn plan_reconnect_rejects_renamed_gateway() {
         let mut gateway = known(0x1000, Some("10.2.1.10"), Some(3));
         gateway.name = "OTHER".to_owned();
-        let plan = plan_reconnect(&[gateway], &[], &db_gateways(&[0x1000]));
+        let plan = plan_reconnect(&[gateway], &[], &db_gateways(&[0x1000]), false);
         assert!(plan.unicast.is_empty());
         assert!(plan.vir_for.contains(&0x1000));
+    }
+    #[test]
+    fn persisted_ipv6_addresses_are_reused_only_in_the_matching_family() {
+        for address in ["fe80::2", "fd00::2", "2001:db8::2", "::1"] {
+            let gateways = [known(0x1000, Some(address), Some(3))];
+            let plan = plan_reconnect(&gateways, &[], &db_gateways(&[0x1000]), true);
+            assert_eq!(plan.unicast.len(), 1);
+            assert_eq!(plan.unicast.first().expect("gateway").ip, address);
+            let plan = plan_reconnect(&gateways, &[], &db_gateways(&[0x1000]), false);
+            assert!(plan.unicast.is_empty());
+            assert!(plan.vir_for.contains(&0x1000));
+        }
+        for address in ["192.0.2.1", "::", "ff02::1", "invalid"] {
+            let plan = plan_reconnect(
+                &[known(0x1000, Some(address), Some(3))],
+                &[],
+                &db_gateways(&[0x1000]),
+                true,
+            );
+            assert!(plan.unicast.is_empty());
+            assert!(plan.vir_for.contains(&0x1000));
+        }
     }
 }

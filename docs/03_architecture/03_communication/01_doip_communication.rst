@@ -19,6 +19,52 @@ The communication parameters depend on the logical link used for the communicati
 filtered by configuration and actual ECU detection/availability.
 
 
+IPv4 and IPv6 configuration
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+One DoIP transport uses the address family of ``doip.tester_address``. Existing
+IPv4 configurations retain broadcast discovery. IPv6 uses multicast discovery;
+simultaneous IPv4 and IPv6 discovery is not provided by one transport.
+
+For example, after assigning ``fd00:134::1`` to the intended local interface::
+
+    [doip]
+    tester_address = "fd00:134::1"
+    ipv6_multicast_group = "ff15::1515:1515"
+
+The multicast group defaults to ``ff15::1515:1515`` and must match the vehicle
+network. ``tester_subnet`` is used only for IPv4. The existing gateway and TLS
+ports, discovery modes and communication initialization settings apply to both
+families. Multicast discovery does not imply discovery across routers; multicast
+scope and network routing determine reachability.
+
+IPv6 diagnostic endpoints support link-local, unique local and global unicast
+addresses. Loopback (``::1``) is supported for local testing. Unspecified,
+multicast and IPv4-mapped IPv6 endpoint addresses are rejected. Specify a plain
+IPv6 literal in ``tester_address``, without brackets, a port or a zone suffix.
+
+CDA resolves the configured tester address to a local interface when communication
+is enabled. That address must identify exactly one interface with a nonzero index.
+The resolved index is used for multicast transmission, group membership and
+link-local source and destination scope. VLAN configurations resolve to the
+logical interface carrying the tester address. There is no interface-index TOML
+setting, and CDA does not assign addresses or configure VLANs. Missing or ambiguous
+local addresses produce a configuration error identifying ``tester_address``.
+Interface resolution is repeated after disabling and re-enabling communication.
+
+Initial discovery and fallback discovery share the IPv6 socket configuration.
+Spontaneous multicast announcements are received on an IPv6 wildcard listener
+joined to the configured group. Diagnostic TCP connections bind to the tester
+address. The same endpoint handling applies to the TCP connection underlying TLS.
+An interface index is not a strict operating-system device binding.
+
+Persisted topology retains plain IP addresses without a machine-specific interface
+index. IPv6 addresses are eligible for direct reconnect when the active transport
+uses IPv6. Link-local scope is reconstructed from the current tester configuration.
+An incompatible address family or invalid saved address falls back to discovery
+when ``doip.discovery = "Full"``; ``VamOnly`` reports it unreachable instead.
+
+
 Protocol Versions
 ^^^^^^^^^^^^^^^^^
 

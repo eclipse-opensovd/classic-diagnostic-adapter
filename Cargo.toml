@@ -111,6 +111,7 @@ ouroboros = "0.18.5"
 toml = "0.9.8"
 cargo_toml = "0.22.3"
 libc = "0.2.177"
+if-addrs = { version = "0.15.0", features = ["link-local"] }
 crc32fast = "1.4"
 foldhash = "0.2.0"
 kameo = { version = "0.21", default-features = false, features = ["macros"] }

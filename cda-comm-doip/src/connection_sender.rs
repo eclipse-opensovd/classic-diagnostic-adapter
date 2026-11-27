@@ -294,6 +294,8 @@ mod tests {
                 protocol_version: ProtocolVersion::Iso13400_2010,
                 transport: DoipTransportConfig {
                     tester_ip: "127.0.0.1".to_owned(),
+                    ipv6_interface_index: None,
+                    ipv6_multicast_group: crate::DoipConfig::default().ipv6_multicast_group,
                     port: 13400,
                     vir_source_port: crate::config::VirSourcePort::default(),
                     tls_port: 0,

@@ -130,6 +130,16 @@ impl DoIPUdpSocket {
         })
     }
 
+    pub(crate) fn join_multicast_v6(
+        &self,
+        multicast_group: std::net::Ipv6Addr,
+        interface_index: u32,
+    ) -> Result<(), std::io::Error> {
+        self.io
+            .get_ref()
+            .join_multicast_v6(&multicast_group, interface_index)
+    }
+
     pub(crate) async fn send(
         &mut self,
         payload: DoipPayload,
