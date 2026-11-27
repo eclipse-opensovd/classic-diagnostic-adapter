@@ -714,13 +714,6 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
         diag_type.type_(),
         DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType { min_length: 0, .. })
     );
-    // The leading length field is not part of the decoded data, but must be
-    // skipped as well. A leading length of zero is valid and yields no data.
-    let leading_length_bytes = match diag_type.type_() {
-        DiagCodedTypeVariant::LeadingLengthInfo(bits) => Some(bits.div_ceil(8) as usize),
-        _ => None,
-    };
-
     // An optional parameter whose start is at or beyond the payload is absent.
     let (data, bit_len) = if is_optional && param_byte_pos >= uds_payload.len() {
         (vec![], 0)
@@ -728,7 +721,12 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
         diag_type.decode(uds_payload, param_byte_pos, param_bit_pos)?
     };
 
-    if data.is_empty() && !is_optional && leading_length_bytes.is_none() {
+    // A leading length of zero is valid and yields no data.
+    let has_leading_length = matches!(
+        diag_type.type_(),
+        DiagCodedTypeVariant::LeadingLengthInfo(_)
+    );
+    if data.is_empty() && !is_optional && !has_leading_length {
         tracing::debug!(
             "Not enough data for parameter {:?} in extract_diag_data_container, expected at least \
              1 byte, payload length {}",
@@ -742,11 +740,8 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
     }
 
     let data_type = diag_type.base_datatype();
-    payload.set_last_read_byte_pos(
-        param_byte_pos
-            .saturating_add(leading_length_bytes.unwrap_or(0))
-            .saturating_add(data.len()),
-    );
+    let end = diag_type.coded_end(uds_payload, param_byte_pos, param_bit_pos, data.len());
+    payload.set_last_read_byte_pos(end);
 
     Ok(DiagDataTypeContainer::RawContainer(
         DiagDataTypeContainerRaw {

@@ -1036,7 +1036,8 @@ mod tests {
 
         DiagServiceResponseStruct {
             service: service_comm,
-            data: vec![0x62, 0x01],
+            payload: vec![0x62, 0x01],
+            raw_offset: 0,
             mapped_data: Some(MappedResponseData {
                 data: data_map,
                 errors: vec![],

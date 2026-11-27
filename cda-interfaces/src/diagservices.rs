@@ -72,6 +72,9 @@ pub trait DiagServiceResponse: Sized + Send + Sync + 'static + Clone {
     fn service_name(&self) -> String;
     fn response_type(&self) -> DiagServiceResponseType;
     fn get_raw(&self) -> &[u8];
+    /// The complete payload of the response, including the bytes preceding
+    /// the data returned by [`get_raw`](Self::get_raw).
+    fn get_payload(&self) -> &[u8];
     /// Convert the response into a JSON representation.
     /// Binary data (e.g. `ByteField` parameters) is represented as string
     /// using the given `binary_encoding`.
@@ -137,6 +140,7 @@ pub mod mock {
             fn is_empty(&self) -> bool;
             fn service_name(&self) -> String;
             fn get_raw(&self) -> &[u8];
+            fn get_payload(&self) -> &[u8];
             fn into_json(
                 self,
                 binary_encoding: crate::BinaryEncoding,

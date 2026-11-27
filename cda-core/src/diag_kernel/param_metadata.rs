@@ -35,14 +35,52 @@ pub(crate) struct RawResponseLayout {
 }
 
 /// Returns a parameter's fixed encoded size when its coded length is known.
-fn static_byte_length(param: &datatypes::Parameter<'_>) -> Option<u32> {
+pub(crate) fn static_byte_length(param: &datatypes::Parameter<'_>) -> Option<u32> {
     if let Some(matching) = param.specific_data_as_matching_request_param() {
         return Some(matching.byte_length());
+    }
+    if let Some(reserved) = param.specific_data_as_reserved() {
+        return param
+            .bit_position()
+            .checked_add(reserved.bit_length())
+            .map(|bits| bits.div_ceil(8));
+    }
+    if let Some(structure) = param
+        .specific_data_as_value()
+        .and_then(|value| value.dop())
+        .and_then(|dop| dop.specific_data_as_structure())
+    {
+        return structure.byte_size();
+    }
+
+    if let Some(field) = param
+        .specific_data_as_value()
+        .and_then(|value| value.dop())
+        .and_then(|dop| dop.specific_data_as_static_field())
+    {
+        return field
+            .fixed_number_of_items()
+            .checked_mul(field.item_byte_size());
     }
 
     let coded_type: datatypes::DiagCodedType =
         if let Some(coded_const) = param.specific_data_as_coded_const() {
             coded_const.diag_coded_type()?.try_into().ok()?
+        } else if let Some(nrc_const) = param.specific_data_as_nrc_const() {
+            nrc_const.diag_coded_type()?.try_into().ok()?
+        } else if let Some(system) = param.specific_data_as_system() {
+            system
+                .dop()
+                .and_then(|dop| dop.specific_data_as_normal_dop())
+                .map(datatypes::NormalDop)?
+                .diag_coded_type()
+                .ok()?
+        } else if let Some(dtc) = param
+            .specific_data_as_value()
+            .and_then(|value| value.dop())
+            .and_then(|dop| dop.specific_data_as_dtcdop())
+        {
+            datatypes::DtcDop(dtc).diag_coded_type().ok()?
         } else {
             param
                 .specific_data_as_value()
@@ -84,6 +122,42 @@ pub(crate) fn effective_byte_positions<'a>(
         .collect()
 }
 
+/// Offset of the first DATA parameter as far as the database defines it.
+pub(crate) enum DataOffset {
+    NoData,
+    Known(u32),
+    Unknown,
+}
+
+/// Finds the earliest DATA position without guessing where variable fields end.
+pub(crate) fn resolved_data_offset(
+    positions: impl IntoIterator<Item = (bool, Option<u32>)>,
+) -> DataOffset {
+    // An unpositioned parameter cannot start before its predecessor starts.
+    let mut previous_lower_bound = 0;
+    let mut known_minimum: Option<u32> = None;
+    let mut unknown_lower_bound: Option<u32> = None;
+    for (is_data, position) in positions {
+        if let Some(position) = position {
+            previous_lower_bound = position;
+            if is_data {
+                known_minimum = Some(known_minimum.map_or(position, |min| min.min(position)));
+            }
+        } else if is_data {
+            unknown_lower_bound = Some(
+                unknown_lower_bound
+                    .map_or(previous_lower_bound, |min| min.min(previous_lower_bound)),
+            );
+        }
+    }
+    match (known_minimum, unknown_lower_bound) {
+        (None, None) => DataOffset::NoData,
+        (None, Some(_)) => DataOffset::Unknown,
+        (Some(known), Some(lower_bound)) if lower_bound < known => DataOffset::Unknown,
+        (Some(known), _) => DataOffset::Known(known),
+    }
+}
+
 /// Calculates the raw payload offset and fixed size for a positive response.
 /// Returns `None` if there is no DATA parameter or its offset is unresolved.
 pub(crate) fn raw_response_layout(
@@ -112,11 +186,11 @@ fn raw_response_layout_from_parameters(
     let Some(data_index) = layout.iter().position(|(is_data, _, _)| *is_data) else {
         return Ok(None);
     };
-    let Some(data_offset) = layout
-        .iter()
-        .filter_map(|(is_data, position, _)| is_data.then_some(*position).flatten())
-        .min()
-    else {
+    let DataOffset::Known(data_offset) = resolved_data_offset(
+        layout
+            .iter()
+            .map(|(is_data, position, _)| (*is_data, *position)),
+    ) else {
         return Ok(None);
     };
 
@@ -632,6 +706,25 @@ mod tests {
         assert_eq!(
             raw_response_layout_from_parameters(&[(false, Some(0), None), (true, None, Some(1))]),
             Ok(None)
+        );
+        assert_eq!(
+            raw_response_layout_from_parameters(&[
+                (false, Some(0), None),
+                (true, None, Some(1)),
+                (true, Some(5), Some(1)),
+            ]),
+            Ok(None)
+        );
+        assert_eq!(
+            raw_response_layout_from_parameters(&[
+                (false, Some(0), Some(1)),
+                (true, Some(2), None),
+                (true, None, Some(1)),
+            ]),
+            Ok(Some(RawResponseLayout {
+                data_offset: 2,
+                fixed_data_size: None,
+            }))
         );
     }
 

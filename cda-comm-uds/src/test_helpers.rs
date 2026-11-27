@@ -120,19 +120,24 @@ impl cda_interfaces::Shutdown for TestGateway {
 #[derive(Clone, Debug)]
 pub(crate) struct TestResponse {
     service: DiagComm,
-    data: Vec<u8>,
+    payload: Vec<u8>,
+    /// Start of the raw data in `payload`. Like `DiagServiceResponseStruct`,
+    /// it is not 0 for authentication responses, so tests notice when
+    /// `get_raw` is used instead of `get_payload`.
+    raw_offset: usize,
 }
 
 impl DiagServiceResponse for TestResponse {
     fn empty_positive(service: DiagComm) -> Self {
         Self {
             service,
-            data: Vec::new(),
+            payload: Vec::new(),
+            raw_offset: 0,
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.data.is_empty()
+        self.payload.is_empty()
     }
 
     fn service_name(&self) -> String {
@@ -140,7 +145,7 @@ impl DiagServiceResponse for TestResponse {
     }
 
     fn response_type(&self) -> DiagServiceResponseType {
-        if self.data.first() == Some(&service_ids::NEGATIVE_RESPONSE) {
+        if self.payload.first() == Some(&service_ids::NEGATIVE_RESPONSE) {
             DiagServiceResponseType::Negative
         } else {
             DiagServiceResponseType::Positive
@@ -148,7 +153,11 @@ impl DiagServiceResponse for TestResponse {
     }
 
     fn get_raw(&self) -> &[u8] {
-        &self.data
+        self.payload.get(self.raw_offset..).unwrap_or_default()
+    }
+
+    fn get_payload(&self) -> &[u8] {
+        &self.payload
     }
 
     fn into_json(
@@ -666,9 +675,19 @@ impl PayloadDecoder for TestEcuDb {
         _map_to_json: bool,
         _functional_group_name: Option<&str>,
     ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send {
+        // Like the real decoder, the raw data of a positive authentication
+        // response starts behind SID and sub-function.
+        let raw_offset = if payload.data.first()
+            == Some(&(service_ids::AUTHENTICATION | cda_interfaces::UDS_ID_RESPONSE_BITMASK))
+        {
+            payload.data.len().min(2)
+        } else {
+            0
+        };
         std::future::ready(Ok(TestResponse {
             service: diag_service.clone(),
-            data: payload.data.clone(),
+            payload: payload.data.clone(),
+            raw_offset,
         }))
     }
 
@@ -753,9 +772,9 @@ impl EcuSecurity for TestEcuDb {
     fn authentication_return_value(
         &self,
         _sub_function: AuthenticationSubFunction,
-        raw_response: &[u8],
+        response_payload: &[u8],
     ) -> Result<Option<u64>, DiagServiceError> {
-        Ok(raw_response.get(2).copied().map(u64::from))
+        Ok(response_payload.get(2).copied().map(u64::from))
     }
 }
 

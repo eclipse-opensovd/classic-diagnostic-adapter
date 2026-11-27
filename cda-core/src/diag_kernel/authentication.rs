@@ -17,10 +17,10 @@ use cda_database::datatypes;
 use cda_interfaces::{DiagServiceError, authentication::AuthenticationSubFunction, service_ids};
 use cda_plugin_security::SecurityPlugin;
 
-use super::{ecumanager::EcuManager, param_metadata::effective_byte_positions};
+use super::ecumanager::EcuManager;
 
 /// Byte position of the first parameter following the response SID and sub-function.
-const FIRST_DATA_BYTE: u32 = 2;
+const FIRST_DATA_BYTE: usize = 2;
 
 impl<S: SecurityPlugin> EcuManager<S> {
     /// Finds the SID 0x29 service whose request contains `sub_function` as coded
@@ -47,33 +47,34 @@ impl<S: SecurityPlugin> EcuManager<S> {
     pub(in crate::diag_kernel) fn decode_authentication_return_value(
         &self,
         sub_function: AuthenticationSubFunction,
-        raw_response: &[u8],
+        response_payload: &[u8],
     ) -> Result<Option<u64>, DiagServiceError> {
         let service = self.find_authentication_service(sub_function)?;
 
-        let Some((param, byte_pos, offset)) = service
+        // Positions are taken from the payload, so a parameter without
+        // BYTE-POSITION behind a variable-length one is found as well.
+        let mut found: Option<(datatypes::Parameter<'_>, usize)> = None;
+        for params in service
             .pos_responses()
             .into_iter()
             .flatten()
             .filter_map(|r| r.params())
-            .filter_map(|params| {
-                let params: Vec<_> = params.iter().map(datatypes::Parameter).collect();
-                // The raw response starts at the first DATA parameter, see
-                // `raw_payload_offset`.
-                let offset = self.raw_payload_offset(&params);
-                effective_byte_positions(&params)
-                    .into_iter()
-                    .filter_map(|(p, pos)| pos.map(|pos| (p, pos)))
-                    .filter(|(p, pos)| {
-                        *pos >= FIRST_DATA_BYTE
-                            && *pos >= offset
-                            && p.specific_data_as_value().is_some()
-                    })
-                    .min_by_key(|(_, pos)| *pos)
-                    .map(|(p, pos)| (p, pos, offset))
-            })
-            .min_by_key(|(_, pos, _)| *pos)
-        else {
+        {
+            let params: Vec<_> = params.iter().map(datatypes::Parameter).collect();
+            let positions = self.response_param_positions(&service, &params, response_payload)?;
+            let candidate = params
+                .into_iter()
+                .zip(positions)
+                .filter_map(|(p, pos)| pos.map(|pos| (p, pos)))
+                .filter(|(p, pos)| *pos >= FIRST_DATA_BYTE && p.specific_data_as_value().is_some())
+                .min_by_key(|(_, pos)| *pos);
+            if let Some(candidate) = candidate
+                && found.as_ref().is_none_or(|(_, pos)| candidate.1 < *pos)
+            {
+                found = Some(candidate);
+            }
+        }
+        let Some((param, position)) = found else {
             return Ok(None);
         };
 
@@ -89,11 +90,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 ))
             })?;
         let coded_type = dop.diag_coded_type()?;
-        let (bytes, _) = coded_type.decode(
-            raw_response,
-            byte_pos.saturating_sub(offset) as usize,
-            param.bit_position() as usize,
-        )?;
+        let (bytes, _) =
+            coded_type.decode(response_payload, position, param.bit_position() as usize)?;
 
         if bytes.len() > std::mem::size_of::<u64>() {
             return Err(DiagServiceError::InvalidDatabase(format!(
@@ -111,12 +109,16 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
 #[cfg(test)]
 mod tests {
-    use cda_database::datatypes::{self, DataType, ResponseType, database_builder::EcuDataBuilder};
+    use cda_database::datatypes::{
+        self, DataType, DiagCodedTypeVariant, ResponseType,
+        database_builder::{DataFormatDop, DataFormatParam, EcuDataBuilder},
+    };
     use cda_interfaces::{
         DiagServiceError, EcuSecurity, PayloadDecoder, PayloadEncoder, Protocol, ServicePayload,
         authentication::AuthenticationSubFunction, diagservices::DiagServiceResponse, service_ids,
     };
     use cda_plugin_security::DefaultSecurityPluginData;
+    use flatbuffers::WIPOffset;
 
     use crate::diag_kernel::{
         ecumanager::EcuManager,
@@ -309,10 +311,122 @@ mod tests {
         );
     }
 
-    /// The raw response returned by the decoder starts at the first DATA
-    /// parameter, the return parameter must be read relative to it.
+    /// Response `69 07 ..`, built by `build` behind SID and sub-function.
+    fn ecu_with_response(
+        build: impl for<'a> FnOnce(
+            &mut EcuDataBuilder<'a>,
+            WIPOffset<DataFormatDop<'a>>,
+            WIPOffset<DataFormatDop<'a>>,
+        ) -> Vec<WIPOffset<DataFormatParam<'a>>>,
+    ) -> EcuManager<DefaultSecurityPluginData> {
+        let default_protocol = Protocol::default();
+        let mut b = EcuDataBuilder::new();
+        let protocol = b.create_protocol(default_protocol.str(), None, None, None);
+        let sid = service_ids::AUTHENTICATION;
+        let compu = b.create_compu_method(datatypes::CompuCategory::Identical, None, None);
+        let u8_type = b.create_diag_coded_type_standard_length(8, DataType::UInt32);
+        let byte_dop = b.create_regular_normal_dop("byte", u8_type, compu);
+        let variable_type = b.create_diag_coded_type(
+            None,
+            DataType::ByteField,
+            true,
+            DiagCodedTypeVariant::LeadingLengthInfo(8),
+        );
+        let variable_dop = b.create_regular_normal_dop("variable", variable_type, compu);
+        let request_sid = create_sid_param!(b, "sid", sid);
+        let sub_function =
+            b.create_coded_const_param("sub_function", "7", 1, 0, 8, DataType::UInt32);
+        let request = b.create_request(Some(vec![request_sid, sub_function]), None);
+        let response_sid =
+            create_sid_param!(b, "sid_pr", sid | cda_interfaces::UDS_ID_RESPONSE_BITMASK);
+        let sub_function =
+            b.create_coded_const_param("sub_function_pr", "7", 1, 0, 8, DataType::UInt32);
+        let mut params = vec![response_sid, sub_function];
+        params.extend(build(&mut b, byte_dop, variable_dop));
+        let response = b.create_response(ResponseType::Positive, Some(params), None);
+        let diag_comm = new_diag_comm!(b, VERIFY_NAME, protocol);
+        let service = new_diag_service!(b, diag_comm, request, vec![response], vec![]);
+        new_ecu_manager(finish_db!(b, protocol, vec![service]))
+    }
+
+    async fn return_value_of_decoded_response(
+        ecu: &EcuManager<DefaultSecurityPluginData>,
+        sub_function: AuthenticationSubFunction,
+        data: Vec<u8>,
+    ) -> Option<u64> {
+        let dc = ecu.lookup_authentication_service(sub_function).unwrap();
+        let payload = ServicePayload {
+            data: data.clone(),
+            source_address: 0,
+            target_address: 0,
+            new_session: None,
+            new_security: None,
+        };
+        let response = ecu
+            .convert_from_uds(&dc, &payload, true, None)
+            .await
+            .unwrap();
+        assert_eq!(response.get_payload(), data);
+        ecu.authentication_return_value(sub_function, response.get_payload())
+            .unwrap()
+    }
+
     #[tokio::test]
-    async fn return_value_is_read_from_decoded_raw_response() {
+    async fn return_value_preceding_runtime_data_offset_is_read() {
+        let ecu = ecu_with_response(|b, byte_dop, variable_dop| {
+            vec![
+                b.create_value_param("authenticationReturnParameter", byte_dop, 2, 0),
+                b.create_value_param("variable", variable_dop, 3, 0),
+                b.create_value_param_no_byte_pos_with_semantic("info", byte_dop, Some("DATA")),
+            ]
+        });
+        let value = return_value_of_decoded_response(
+            &ecu,
+            AuthenticationSubFunction::VerifyProofOfOwnershipBidirectional,
+            vec![0x69, 0x07, 0x12, 0x01, 0xAA, 0xCC],
+        )
+        .await;
+        assert_eq!(value, Some(0x12));
+    }
+
+    /// The return parameter has no BYTE-POSITION and follows a terminated
+    /// constant, so its position is only known from the payload.
+    #[tokio::test]
+    async fn return_value_after_variable_length_param_is_read() {
+        let ecu = ecu_with_response(|b, byte_dop, _| {
+            let compu = b.create_compu_method(datatypes::CompuCategory::Identical, None, None);
+            let terminated_type = b.create_diag_coded_type(
+                None,
+                DataType::AsciiString,
+                true,
+                DiagCodedTypeVariant::MinMaxLength(datatypes::MinMaxLengthType {
+                    min_length: 0,
+                    max_length: Some(8),
+                    termination: datatypes::Termination::Zero,
+                }),
+            );
+            let terminated_dop = b.create_regular_normal_dop("terminated", terminated_type, compu);
+            vec![
+                b.create_phys_const_param("constant", Some("AB"), terminated_dop, 2, 0),
+                b.create_value_param_no_byte_pos("authenticationReturnParameter", byte_dop),
+            ]
+        });
+        for (payload, expected) in [
+            (vec![0x69, 0x07, 0x41, 0x42, 0x00, 0x12], 0x12),
+            (vec![0x69, 0x07, 0x00, 0x34], 0x34),
+        ] {
+            let value = return_value_of_decoded_response(
+                &ecu,
+                AuthenticationSubFunction::VerifyProofOfOwnershipBidirectional,
+                payload,
+            )
+            .await;
+            assert_eq!(value, Some(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn return_value_is_read_from_decoded_response() {
         let ecu = ecu_manager();
         let dc = ecu
             .lookup_authentication_service(AuthenticationSubFunction::ProofOfOwnership)
@@ -336,7 +450,7 @@ mod tests {
         let value = ecu
             .authentication_return_value(
                 AuthenticationSubFunction::ProofOfOwnership,
-                response.get_raw(),
+                response.get_payload(),
             )
             .unwrap();
         assert_eq!(value, Some(0x12));

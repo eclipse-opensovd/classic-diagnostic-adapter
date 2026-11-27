@@ -2426,8 +2426,8 @@ pub(crate) fn create_ecu_manager_with_table_struct_service(
 // Layout (request & positive response):
 //   byte 0     : SID       (coded const, 8 bit)
 //   byte 1     : len_key   (LENGTH-KEY param, u8)
-//   byte 2     : var_data  (PARAM-LENGTH-INFO, `len_key` bytes)
-//   byte 2 + N : suffix    (value param, u16 - BYTE-POSITION omitted)
+//   byte 2     : var_data  (PARAM-LENGTH-INFO, `len_key` bits)
+//   byte 2 + len_key / 8 : suffix (value param, u16 - BYTE-POSITION omitted)
 pub(crate) fn create_ecu_manager_with_trailing_param_after_param_length_info_service() -> (
     crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
     cda_interfaces::DiagComm,
