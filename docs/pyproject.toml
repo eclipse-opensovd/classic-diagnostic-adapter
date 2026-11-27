@@ -15,10 +15,10 @@ version = "1.0.0"
 requires-python = ">=3.13"
 dependencies = [
   "sphinx>=8.2,<9",
-  "sphinx-needs==8.1.1",
+  "sphinx-needs==9.2.0",
   "sphinxcontrib-plantuml==0.31.0",
   "sphinx-codelinks==1.2.0",
-  "myst-parser==5.0.0",
+  "myst-parser==5.2.0",
   "furo>=2025.9.25",
 ]
 
