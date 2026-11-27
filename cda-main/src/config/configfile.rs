@@ -441,6 +441,15 @@ impl Configuration {
                 // ECU may get its CAN addressing from the MDD com-params,
                 // which the config layer cannot see.
                 TransportType::Can => {}
+                TransportType::KLine => {
+                    return Err(ConfigSanityError::InvalidValue {
+                        field: "can.transport_overrides".to_owned(),
+                        reason: format!(
+                            "Pins ECU '{}' to K-Line, but no K-Line transport is configured",
+                            transport_override.ecu_name
+                        ),
+                    });
+                }
                 TransportType::DoIP => {
                     if !self.doip.enabled {
                         return Err(ConfigSanityError::InvalidValue {
@@ -800,6 +809,25 @@ address = "127.0.0.1"
             |config| config.locks.priority_policy_timeout_ms = 0,
             "locks.priority_policy_timeout_ms",
         );
+    }
+
+    #[test]
+    fn kline_pin_without_a_kline_transport_is_rejected() {
+        let config = Configuration {
+            can: Some(CanConfig {
+                transport_overrides: vec![TransportOverride {
+                    ecu_name: "ECU_K".to_owned(),
+                    transport: TransportType::KLine,
+                }],
+                ..CanConfig::default()
+            }),
+            ..Configuration::default()
+        };
+        assert!(matches!(
+            config.validate_transport_overrides(),
+            Err(ConfigSanityError::InvalidValue { field, .. })
+                if field == "can.transport_overrides"
+        ));
     }
 
     #[test]

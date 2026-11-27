@@ -251,6 +251,46 @@
 # nanos = 0
 # secs = 30
 
+# Baud rate of the K-Line link
+[com_params.kline.baud_rate]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_Baudrate"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 10400
+
+# Functional request target address byte for broadcast requests
+[com_params.kline.functional_target_address]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_FuncReqTargetAddr"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 0x33
+
+# Physical request target address byte (tester -> ECU)
+[com_params.kline.physical_target_address]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_PhysReqTargetAddr"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 0x10
+
+# Source address byte of the tester
+[com_params.kline.tester_source_address]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterSourceAddress"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 0xF1
+
 # Time period the tester accepts for repeated NRC 0x21 (busy repeat request) and retries,
 # while waiting for a positive response in uS
 [com_params.uds.rc_21_completion_timeout]

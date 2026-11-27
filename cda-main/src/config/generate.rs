@@ -140,6 +140,10 @@ value = 2015
     config.com_params.can.functional_id.value = Some(0x7DF);
     config.com_params.can.physical_request_id.value = Some(0x7E0);
     config.com_params.can.physical_response_id.value = Some(0x7E8);
+    config.com_params.kline.physical_target_address.value = Some(0x10);
+    config.com_params.kline.functional_target_address.value = Some(0x33);
+    config.com_params.kline.tester_source_address.value = Some(0xF1);
+    config.com_params.kline.baud_rate.value = Some(10400);
 
     config.ecu.insert(
         "FLXC1000".to_owned(),

@@ -28,6 +28,8 @@ pub struct ComParams {
     /// DoIP-specific communication parameters.
     pub doip: DoipComParams,
     pub can: CanComParams,
+    /// K-Line-specific communication parameters.
+    pub kline: KLineComParams,
 }
 
 pub type ComParamName = String;
@@ -351,6 +353,22 @@ pub struct CanComParams {
     pub unique_resp_id_table_name: String,
 }
 
+/// Defines the Communication parameters which are used in K-Line communication
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
+pub struct KLineComParams {
+    /// Physical request target address byte (tester -> ECU)
+    pub physical_target_address: ComParamConfig<Option<u32>>,
+
+    /// Functional request target address byte for broadcast requests
+    pub functional_target_address: ComParamConfig<Option<u32>>,
+
+    /// Source address byte of the tester
+    pub tester_source_address: ComParamConfig<Option<u32>>,
+
+    /// Baud rate of the K-Line link
+    pub baud_rate: ComParamConfig<Option<u32>>,
+}
+
 /// Strategy for retrying after specific negative response codes.
 #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema, PartialEq)]
 pub enum RetryPolicy {
@@ -630,6 +648,33 @@ impl Default for CanComParams {
                 precedence: ComParamPrecedence::Database,
             },
             unique_resp_id_table_name: "CP_UniqueRespIdTable".to_owned(),
+        }
+    }
+}
+
+impl Default for KLineComParams {
+    fn default() -> Self {
+        Self {
+            physical_target_address: ComParamConfig {
+                name: "CP_PhysReqTargetAddr".to_owned(),
+                value: None,
+                precedence: ComParamPrecedence::Database,
+            },
+            functional_target_address: ComParamConfig {
+                name: "CP_FuncReqTargetAddr".to_owned(),
+                value: None,
+                precedence: ComParamPrecedence::Database,
+            },
+            tester_source_address: ComParamConfig {
+                name: "CP_TesterSourceAddress".to_owned(),
+                value: None,
+                precedence: ComParamPrecedence::Database,
+            },
+            baud_rate: ComParamConfig {
+                name: "CP_Baudrate".to_owned(),
+                value: None,
+                precedence: ComParamPrecedence::Database,
+            },
         }
     }
 }

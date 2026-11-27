@@ -90,3 +90,22 @@ pub trait CanComParamProvider: Send + Sync + 'static {
     #[must_use]
     fn can_functional_id(&self) -> Option<crate::CanId>;
 }
+
+/// Provider for K-Line (ISO 14230 / ISO 9141-2) communication parameters from MDD.
+pub trait KLineComParamProvider: Send + Sync + 'static {
+    /// Physical target address byte of this ECU.
+    #[must_use]
+    fn kline_physical_address(&self) -> Option<u8>;
+
+    /// Functional target address byte for broadcast requests.
+    #[must_use]
+    fn kline_functional_address(&self) -> Option<u8>;
+
+    /// Source address byte of the tester.
+    #[must_use]
+    fn kline_tester_address(&self) -> Option<u8>;
+
+    /// Link baud rate.
+    #[must_use]
+    fn kline_baud_rate(&self) -> Option<u32>;
+}

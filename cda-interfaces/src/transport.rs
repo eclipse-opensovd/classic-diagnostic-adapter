@@ -29,4 +29,7 @@ pub enum TransportType {
     /// CAN bus with ISO-TP
     #[serde(alias = "CAN", alias = "Can")]
     Can,
+    /// K-Line serial bus (KWP2000 over ISO 14230 / ISO 9141-2)
+    #[serde(alias = "KLine", alias = "KLINE", alias = "K-Line", alias = "k-line")]
+    KLine,
 }
