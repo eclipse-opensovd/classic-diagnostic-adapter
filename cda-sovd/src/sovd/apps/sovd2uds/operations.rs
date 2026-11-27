@@ -49,8 +49,6 @@ pub(crate) mod doip_connect_ecu {
     };
 
     pub(crate) const PATH: &str = "/vehicle/v15/apps/sovd2uds/operations/doip-connect-ecu";
-    pub(crate) const EXECUTIONS_ROUTE: &str =
-        "/vehicle/v15/apps/sovd2uds/operations/doip-connect-ecu/executions";
 
     // Requires the vehicle lock instead of an ECU lock: the ECU is usually offline
     // when this is called, so there is no ECU lock to hold. But changing the set of
@@ -446,16 +444,21 @@ pub(crate) mod runtimefilesupdate {
         L: LockStateProvider,
     >(
         state: RuntimeUpdateRouteState<P, L>,
-    ) -> axum::Router {
-        axum::Router::new()
-            .route(
-                EXECUTIONS_ROUTE,
+    ) -> crate::Routes {
+        crate::Routes::new(aide::axum::ApiRouter::new())
+            .operation(
+                PATH,
+                true,
                 axum::routing::get(get::<P, L>).post(post::<P, L>),
             )
-            .route(EXECUTIONS_ID_ROUTE, axum::routing::get(id::get::<P, L>))
-            .layer(axum::middleware::from_fn(
-                cda_plugin_security::security_plugin_middleware::<S>,
-            ))
+            .map_router(|router| {
+                router.route(EXECUTIONS_ID_ROUTE, axum::routing::get(id::get::<P, L>))
+            })
+            .map_router(|router| {
+                router.layer(axum::middleware::from_fn(
+                    cda_plugin_security::security_plugin_middleware::<S>,
+                ))
+            })
             .with_state(state)
     }
 

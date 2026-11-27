@@ -668,13 +668,6 @@ const RUNTIMEFILES_NEXTUPDATE_ROUTE: &str =
     "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate";
 const RUNTIMEFILES_BACKUP_ROUTE: &str = "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-backup";
 
-/// The categories served by [`routes`], to be listed by the bulk-data collection.
-pub(crate) const CATEGORY_PATHS: [&str; 3] = [
-    RUNTIMEFILES_CURRENT_ROUTE,
-    RUNTIMEFILES_NEXTUPDATE_ROUTE,
-    RUNTIMEFILES_BACKUP_ROUTE,
-];
-
 pub fn routes<
     S: cda_plugin_security::SecurityPluginLoader,
     P: RuntimeFilesUpdatePlugin,
@@ -682,29 +675,33 @@ pub fn routes<
 >(
     state: RuntimeUpdateRouteState<P, L>,
     upload_limit: usize,
-) -> axum::Router {
-    axum::Router::new()
-        .route(
+) -> crate::Routes {
+    crate::Routes::new(aide::axum::ApiRouter::new())
+        .bulk_data(
             RUNTIMEFILES_CURRENT_ROUTE,
             axum::routing::get(current::get::<P, L>),
         )
-        .route(
+        .bulk_data(
             RUNTIMEFILES_NEXTUPDATE_ROUTE,
             axum::routing::get(nextupdate::get::<P, L>)
                 .post(nextupdate::post::<P, L>)
                 .layer(axum::extract::DefaultBodyLimit::max(upload_limit))
                 .delete(nextupdate::delete::<P, L>),
         )
-        .route(
-            "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/{id}",
-            axum::routing::delete(nextupdate::id::delete::<P, L>),
-        )
-        .route(
+        .map_router(|router| {
+            router.route(
+                "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/{id}",
+                axum::routing::delete(nextupdate::id::delete::<P, L>),
+            )
+        })
+        .bulk_data(
             RUNTIMEFILES_BACKUP_ROUTE,
             axum::routing::get(backup::get::<P, L>).delete(backup::delete::<P, L>),
         )
-        .layer(axum::middleware::from_fn(
-            cda_plugin_security::security_plugin_middleware::<S>,
-        ))
+        .map_router(|router| {
+            router.layer(axum::middleware::from_fn(
+                cda_plugin_security::security_plugin_middleware::<S>,
+            ))
+        })
         .with_state(state)
 }

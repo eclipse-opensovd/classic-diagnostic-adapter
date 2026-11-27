@@ -29,9 +29,10 @@ use cda_interfaces::{
     diagservices::{DiagServiceResponse, DiagServiceResponseType},
 };
 use http::StatusCode;
+use sovd_interfaces::common::modes as mode_ids;
 
 use crate::{
-    create_schema,
+    Routes, create_schema,
     sovd::{
         ExecutionLock, FgServiceExecution, WebserverState,
         error::{ApiError, ErrorWrapper, VendorErrorCode, nrc_to_api_error_response},
@@ -57,7 +58,7 @@ pub(crate) struct WebserverFgState<T: UdsEcu + Clone> {
 pub(crate) async fn create_functional_group_routes<T: UdsEcu + SchemaProvider + Clone>(
     state: WebserverState<T>,
     functional_group_config: FunctionalDescriptionConfig,
-) -> Router {
+) -> Routes {
     let functions_router = Router::new().api_route(
         "/",
         routing::get_with(functions_description, docs_functions),
@@ -70,13 +71,13 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + SchemaProvider + 
         .iter()
         .any(|ecu| ecu.eq_ignore_ascii_case(&functional_group_config.description_database))
     {
-        return create_error_fallback_route(
+        return Routes::new(create_error_fallback_route(
             functions_router,
             format!(
                 "Functional Description Database '{}' is missing from loaded databases.",
                 functional_group_config.description_database
             ),
-        );
+        ));
     }
 
     let groups = match state
@@ -86,12 +87,12 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + SchemaProvider + 
     {
         Ok(groups) => groups,
         Err(e) => {
-            return create_error_fallback_route(
+            return Routes::new(create_error_fallback_route(
                 functions_router,
                 format!(
                     "Failed to get functional groups from functional description database: {e}"
                 ),
-            );
+            ));
         }
     };
 
@@ -108,22 +109,22 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + SchemaProvider + 
 
     if filtered_groups.is_empty() {
         if let Some(filter) = functional_group_config.enabled_functional_groups {
-            return create_error_fallback_route(
+            return Routes::new(create_error_fallback_route(
                 functions_router,
                 format!(
                     "No functional groups found in functional description database with given \
                      filter: [{filter:?}]",
                 ),
-            );
+            ));
         }
-        return create_error_fallback_route(
+        return Routes::new(create_error_fallback_route(
             functions_router,
             "No functional groups found in the functional description database".to_owned(),
-        );
+        ));
     }
 
     let groups_resource = filtered_groups.clone();
-    let mut functional_groups_router: Router = functions_router.api_route(
+    let mut functional_groups_router = Routes::new(functions_router.api_route(
         "/functionalgroups",
         routing::get_with(
             |WithRejection(Query(query), _): WithRejection<
@@ -134,7 +135,7 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + SchemaProvider + 
             },
             docs_functionalgroups,
         ),
-    );
+    ));
     for group in filtered_groups {
         let fg_state = WebserverFgState {
             uds: state.uds.clone(),
@@ -143,7 +144,7 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + SchemaProvider + 
             fg_executions: Arc::new(StdRwLock::new(HashMap::default())),
             communication_access: Arc::clone(&state.communication_access),
         };
-        functional_groups_router = functional_groups_router.nest_api_service(
+        functional_groups_router = functional_groups_router.nest(
             &format!("/functionalgroups/{group}"),
             create_functional_group_route(fg_state),
         );
@@ -153,8 +154,8 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + SchemaProvider + 
 
 fn create_functional_group_route<T: UdsEcu + SchemaProvider + Clone>(
     fg_state: WebserverFgState<T>,
-) -> Router {
-    Router::new()
+) -> Routes {
+    let router = Router::new()
         .api_route(
             "/",
             routing::get_with(functional_group_description, docs_functional_group),
@@ -208,24 +209,28 @@ fn create_functional_group_route<T: UdsEcu + SchemaProvider + Clone>(
                 operations::diag_service::docs_delete,
             ),
         )
-        .api_route("/modes", routing::get_with(modes::get, modes::docs_get))
-        .api_route(
-            &format!("/modes/{}", sovd_interfaces::common::modes::COMM_CONTROL_ID),
+        .api_route("/modes", routing::get_with(modes::get, modes::docs_get));
+    Routes::new(router)
+        .mode(
+            &format!("/modes/{}", mode_ids::COMM_CONTROL_ID),
+            mode_ids::COMM_CONTROL_NAME,
             routing::get_with(modes::commctrl::get, modes::commctrl::docs_get)
                 .put_with(modes::commctrl::put, modes::commctrl::docs_put),
         )
-        .api_route(
-            &format!("/modes/{}", sovd_interfaces::common::modes::DTC_SETTING_ID),
+        .mode(
+            &format!("/modes/{}", mode_ids::DTC_SETTING_ID),
+            mode_ids::DTC_SETTING_NAME,
             routing::get_with(modes::dtcsetting::get, modes::dtcsetting::docs_get)
                 .put_with(modes::dtcsetting::put, modes::dtcsetting::docs_put),
         )
-        .api_route(
-            &format!("/modes/{}", sovd_interfaces::common::modes::SESSION_ID),
+        .mode(
+            &format!("/modes/{}", mode_ids::SESSION_ID),
+            mode_ids::SESSION_NAME,
             routing::get_with(modes::session::get, modes::session::docs_get)
                 .put_with(modes::session::put, modes::session::docs_put),
         )
         .with_state(fg_state)
-        .with_path_items(crate::openapi::defunct_lock_path)
+        .map_router(|router| router.with_path_items(crate::openapi::defunct_lock_path))
 }
 
 fn create_error_fallback_route(router: Router, reason: String) -> Router {

@@ -11,17 +11,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::sync::Arc;
+
 use aide::UseApi;
 use axum::{
+    Extension,
     extract::{OriginalUri, Query},
     response::Response,
 };
 use axum_extra::extract::WithRejection;
 use opensovd_axum_extra::ExtractHost;
 
-use crate::sovd::{error::ApiError, resource_response};
+use crate::{
+    dynamic_router::ResourceCatalog,
+    sovd::{error::ApiError, resource_response},
+};
 
 pub(crate) async fn get(
+    Extension(catalog): Extension<Arc<ResourceCatalog>>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::IncludeSchemaQuery>,
         ApiError,
@@ -29,10 +36,11 @@ pub(crate) async fn get(
     UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
     OriginalUri(uri): OriginalUri,
 ) -> Response {
+    let categories = catalog.bulk_data(uri.path());
     resource_response(
         &host,
         &uri,
-        vec![("mdd-embedded-files", None)],
+        categories.iter().map(|id| (id.as_str(), None)).collect(),
         query.include_schema,
     )
 }

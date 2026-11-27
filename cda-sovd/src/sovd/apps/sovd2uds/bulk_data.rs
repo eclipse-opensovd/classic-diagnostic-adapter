@@ -11,6 +11,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::sync::Arc;
+
 use aide::UseApi;
 use axum::{
     Extension,
@@ -21,7 +23,7 @@ use axum_extra::extract::WithRejection;
 use opensovd_axum_extra::ExtractHost;
 
 use crate::{
-    dynamic_router::BulkDataCategories,
+    dynamic_router::ResourceCatalog,
     sovd::{error::ApiError, resource_response},
 };
 
@@ -34,17 +36,17 @@ pub(crate) mod runtimefiles;
 /// Lists the categories registered in [`BULK_DATA_PATH`](super::BULK_DATA_PATH).
 ///
 /// The `runtimefiles-*` categories only exist with a runtime update plugin, so they are
-/// registered together with its routes.
+/// listed together with its routes.
 pub(crate) async fn get(
     UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
-    Extension(resources): Extension<BulkDataCategories>,
+    Extension(catalog): Extension<Arc<ResourceCatalog>>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::IncludeSchemaQuery>,
         ApiError,
     >,
     OriginalUri(uri): OriginalUri,
 ) -> Response {
-    let categories = resources.list(super::BULK_DATA_PATH).await;
+    let categories = catalog.bulk_data(super::BULK_DATA_PATH);
     resource_response(
         &host,
         &uri,

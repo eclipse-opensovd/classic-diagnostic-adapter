@@ -1375,14 +1375,40 @@ async fn test_dtc_deletion_user_memory() {
 ///
 /// The recorder stores each request as hex without separators, starting at the SID
 /// (`WebserverRoutes.kt:117`), so the sub-function is characters 2..4.
-/// Other services (e.g. `TesterPresent`) are ignored.
+/// Other services (e.g. `TesterPresent`) are ignored. Consecutive identical requests are
+/// collapsed because the ECU can ask the client to retry a request when it is busy.
 fn read_dtc_info_subfunctions(requests: &[String]) -> Vec<String> {
-    requests
+    let mut dtc_requests: Vec<_> = requests
         .iter()
         .map(|r| r.to_ascii_uppercase())
         .filter(|r| r.starts_with("19"))
+        .collect();
+    dtc_requests.dedup();
+    dtc_requests
+        .iter()
         .filter_map(|r| r.get(2..4).map(str::to_owned))
         .collect()
+}
+
+#[test]
+fn read_dtc_info_subfunctions_collapses_identical_retries() {
+    let requests = [
+        "1902ff",
+        "1902FF",
+        "190401E240FF",
+        "3E00",
+        "190401E240FF",
+        "190601E240FF",
+        "190601E241FF",
+        "1917FF",
+        "1902FF",
+    ]
+    .map(str::to_owned);
+
+    assert_eq!(
+        read_dtc_info_subfunctions(&requests),
+        ["02", "04", "06", "06", "17", "02"]
+    );
 }
 
 /// Test that reading DTCs by fault ID with a `UserFaultMemory` scope works correctly.

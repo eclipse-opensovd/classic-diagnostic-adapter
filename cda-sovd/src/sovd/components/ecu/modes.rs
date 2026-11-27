@@ -10,12 +10,12 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use aide::{UseApi, transform::TransformOperation};
 use axum::{
-    Json,
-    extract::{Query, State},
+    Extension, Json,
+    extract::{OriginalUri, Query, State},
     http::StatusCode,
     response::{IntoResponse as _, Response},
 };
@@ -29,14 +29,15 @@ use schemars::Schema;
 use serde::Serialize;
 use sovd_interfaces::{
     common::modes::{
-        AUTHENTICATION_ID, AUTHENTICATION_NAME, COMM_CONTROL_ID, COMM_CONTROL_NAME, DTC_SETTING_ID,
-        DTC_SETTING_NAME, SECURITY_ID, SECURITY_NAME, SESSION_ID, SESSION_NAME,
+        AUTHENTICATION_ID, AUTHENTICATION_NAME, COMM_CONTROL_ID, COMM_CONTROL_NAME, SECURITY_ID,
+        SECURITY_NAME, SESSION_ID, SESSION_NAME,
     },
     components::ecu::modes as sovd_modes,
 };
 
 use crate::{
     Locks,
+    dynamic_router::ResourceCatalog,
     sovd::{
         WebserverEcuState,
         binary_encoding::BinaryEncodingParam,
@@ -47,6 +48,8 @@ use crate::{
 };
 
 pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+    Extension(catalog): Extension<Arc<ResourceCatalog>>,
+    OriginalUri(uri): OriginalUri,
     UseApi(cda_plugin_security::Secured(security_plugin), _): UseApi<
         cda_plugin_security::Secured,
         (),
@@ -71,35 +74,17 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
     } else {
         None
     };
-    let mut items = vec![
-        sovd_modes::get::ResponseItem {
-            id: SESSION_ID.to_owned(),
-            name: Some(SESSION_NAME.to_owned()),
+    let has_authentication = uds.has_authentication_services(&ecu_name).await;
+    let items = catalog
+        .modes(uri.path())
+        .into_iter()
+        .filter(|(id, _)| id != AUTHENTICATION_ID || has_authentication)
+        .map(|(id, name)| sovd_modes::get::ResponseItem {
+            id,
+            name: Some(name),
             translation_id: None,
-        },
-        sovd_modes::get::ResponseItem {
-            id: SECURITY_ID.to_owned(),
-            name: Some(SECURITY_NAME.to_owned()),
-            translation_id: None,
-        },
-        sovd_modes::get::ResponseItem {
-            id: COMM_CONTROL_ID.to_owned(),
-            name: Some(COMM_CONTROL_NAME.to_owned()),
-            translation_id: None,
-        },
-        sovd_modes::get::ResponseItem {
-            id: DTC_SETTING_ID.to_owned(),
-            name: Some(DTC_SETTING_NAME.to_owned()),
-            translation_id: None,
-        },
-    ];
-    if uds.has_authentication_services(&ecu_name).await {
-        items.push(sovd_modes::get::ResponseItem {
-            id: AUTHENTICATION_ID.to_owned(),
-            name: Some(AUTHENTICATION_NAME.to_owned()),
-            translation_id: None,
-        });
-    }
+        })
+        .collect();
     (
         StatusCode::OK,
         Json(sovd_modes::get::Response { items, schema }),
