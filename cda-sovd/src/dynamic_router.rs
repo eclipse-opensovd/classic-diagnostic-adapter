@@ -19,12 +19,15 @@ use std::sync::{
 use aide::{
     axum::ApiRouter,
     openapi::{OpenApi, Paths},
+    transform::TransformOpenApi,
 };
 use axum::middleware;
 use indexmap::IndexMap;
 use tokio::sync::RwLock;
 
 use crate::{create_trace_layer, sovd};
+
+mod openapi_document;
 
 type RouteFinalizer = Arc<dyn Fn(axum::Router) -> axum::Router + Send + Sync>;
 
@@ -230,24 +233,6 @@ struct RouteGroup {
     paths_json: Vec<Box<[u8]>>,
 }
 
-impl RouteGroup {
-    fn paths(&self) -> Option<Paths> {
-        self.paths_json.iter().fold(None, |acc, json| {
-            match serde_json::from_slice::<Paths>(json) {
-                Ok(paths) => {
-                    let mut acc: Paths = acc.unwrap_or_default();
-                    acc.paths.extend(paths.paths);
-                    Some(acc)
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to deserialize OpenAPI paths");
-                    acc
-                }
-            }
-        })
-    }
-}
-
 impl From<ApiRoutes> for RouteGroup {
     fn from(routes: ApiRoutes) -> Self {
         let mut api = OpenApi::default();
@@ -380,27 +365,23 @@ impl DynamicRouter {
         router.clone()
     }
 
-    /// Builds the `OpenAPI` specification from the current route groups.
+    /// Builds the serialized `OpenAPI` document (`openapi.json`) from the current route
+    /// groups.
     ///
-    /// The specification is generated on demand instead of being kept in memory,
-    /// as it is only needed when `openapi.json` is requested.
-    pub async fn get_openapi(&self) -> Arc<OpenApi> {
+    /// `transform` sets the document-level information (info, servers, ...). Paths and
+    /// schemas are copied from the stored documentation of the route groups as raw JSON, so
+    /// the document never exists in memory as a whole. Later-added groups win per path.
+    ///
+    /// # Errors
+    /// Returns an error if the document-level information cannot be serialized.
+    pub async fn openapi_json(
+        &self,
+        transform: impl FnOnce(TransformOpenApi<'_>) -> TransformOpenApi<'_>,
+    ) -> Result<Vec<u8>, serde_json::Error> {
+        let mut header = OpenApi::default();
+        let _ = transform(TransformOpenApi::new(&mut header));
         let groups = self.route_groups.read().await;
-        // Latest-added group wins per path: iterating latest-first and only inserting
-        // paths not yet claimed lets later groups' docs override earlier ones.
-        let api = groups
-            .values()
-            .rev()
-            .fold(OpenApi::default(), |mut api, group| {
-                if let Some(paths) = group.paths() {
-                    let api_paths = api.paths.get_or_insert_with(Default::default);
-                    for (path, item) in paths.paths {
-                        api_paths.paths.entry(path).or_insert(item);
-                    }
-                }
-                api
-            });
-        Arc::new(api)
+        openapi_document::build(&header, groups.values().rev())
     }
 
     /// Registers a route group and recomposes the router.
@@ -547,6 +528,11 @@ mod tests {
             .uri(path)
             .body(axum::body::Body::empty())
             .unwrap()
+    }
+
+    /// Builds the document like `openapi.json` and parses it, for assertions.
+    async fn openapi(dr: &DynamicRouter) -> OpenApi {
+        serde_json::from_slice(&dr.openapi_json(|api| api).await.unwrap()).unwrap()
     }
 
     fn get_path_description(api: &OpenApi, path: &str) -> Option<String> {
@@ -792,7 +778,7 @@ mod tests {
         dr.add_routes(group_a).await;
         dr.add_routes(group_b).await;
 
-        let api = dr.get_openapi().await;
+        let api = openapi(&dr).await;
         assert_eq!(
             get_path_description(&api, "/foo").as_deref(),
             Some("from group b")
@@ -829,7 +815,7 @@ mod tests {
         dr.add_routes(group_a).await;
         dr.add_routes(group_b).await;
 
-        let api = dr.get_openapi().await;
+        let api = openapi(&dr).await;
         assert_eq!(get_path_description(&api, "/foo").as_deref(), Some("b foo"));
         assert_eq!(get_path_description(&api, "/bar").as_deref(), Some("a bar"));
     }
@@ -886,7 +872,7 @@ mod tests {
                     .nest_api_service("/components/b", ecu_routes()),
             )
             .await;
-            serde_json::to_value(&*dr.get_openapi().await).unwrap()
+            serde_json::to_value(openapi(&dr).await).unwrap()
         };
 
         let dr = DynamicRouter::new();
@@ -895,7 +881,7 @@ mod tests {
         let router = docs.nest(router, "/components/b", ecu_routes());
         dr.add_routes(ApiRoutes::new(router, docs)).await;
 
-        let actual = serde_json::to_value(&*dr.get_openapi().await).unwrap();
+        let actual = serde_json::to_value(openapi(&dr).await).unwrap();
         assert!(
             actual.to_string().contains("#/components/schemas/Item2"),
             "expected numbered schema names in {actual}"
@@ -914,6 +900,34 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::OK, "{path}");
             assert_eq!(body_to_string(resp.into_body()).await, body, "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn openapi_json_applies_document_transform() {
+        let dr = DynamicRouter::new();
+        dr.add_routes(ApiRouter::new().api_route(
+            "/foo",
+            routing::get_with(|| async { "foo" }, |op| op.description("foo")),
+        ))
+        .await;
+
+        let doc: serde_json::Value = serde_json::from_slice(
+            &dr.openapi_json(|api| api.title("CDA").version("1.0"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            doc.pointer("/info/title")
+                .and_then(serde_json::Value::as_str),
+            Some("CDA")
+        );
+        assert_eq!(
+            doc.pointer("/paths/~1foo/get/description")
+                .and_then(serde_json::Value::as_str),
+            Some("foo")
+        );
     }
 
     #[tokio::test]
@@ -938,14 +952,14 @@ mod tests {
         dr.add_routes(group_a).await;
         let handle_b = dr.add_routes(group_b).await;
 
-        let api = dr.get_openapi().await;
+        let api = openapi(&dr).await;
         assert_eq!(
             get_path_description(&api, "/foo").as_deref(),
             Some("from b")
         );
 
         dr.remove_routes(&handle_b).await;
-        let api = dr.get_openapi().await;
+        let api = openapi(&dr).await;
         assert_eq!(
             get_path_description(&api, "/foo").as_deref(),
             Some("from a")

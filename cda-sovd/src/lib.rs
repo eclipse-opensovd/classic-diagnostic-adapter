@@ -15,8 +15,8 @@ use std::{sync::Arc, time::Duration};
 
 use aide::{axum::routing, swagger::Swagger};
 use axum::{
-    Json,
     http::{self, Request},
+    response::IntoResponse as _,
 };
 use cda_comm_doip::DoipGatewaySetupError;
 use cda_interfaces::{
@@ -419,13 +419,24 @@ pub async fn add_openapi_routes(dynamic_router: &DynamicRouter) {
                 routing::get(move |ExtractHost(host): ExtractHost| {
                     let dr = dr.clone();
                     async move {
-                        let mut api = (*dr.get_openapi().await).clone();
                         let server_url = format!("http://{host}");
-                        let _ = openapi::api_docs(
-                            aide::transform::TransformOpenApi::new(&mut api),
-                            server_url,
-                        );
-                        Json(api)
+                        match dr
+                            .openapi_json(|api| openapi::api_docs(api, server_url))
+                            .await
+                        {
+                            Ok(json) => (
+                                [(
+                                    http::header::CONTENT_TYPE,
+                                    http::HeaderValue::from_static("application/json"),
+                                )],
+                                json,
+                            )
+                                .into_response(),
+                            Err(e) => {
+                                tracing::error!(error = %e, "Failed to build openapi.json");
+                                http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                            }
+                        }
                     }
                 })
                 .into();
