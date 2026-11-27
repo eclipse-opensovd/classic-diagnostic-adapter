@@ -15,16 +15,16 @@ module(
     bazel_compatibility = [">=8.6.0"],
 )
 
-bazel_dep(name = "rules_rust", version = "0.68.1")
+bazel_dep(name = "rules_rust", version = "0.71.3")
 single_version_override(
     module_name = "rules_rust",
-    version = "0.68.1",
+    version = "0.71.3",
 )
 
 bazel_dep(name = "mbedtls-rs", version = "0.1.0")
 git_override(
     module_name = "mbedtls-rs",
-    commit = "1dac0d8c6a80feb3864e86aac80b35cf34b10f87",
+    commit = "3282d12f41fa4046d943ef8820c8a93c84b36f93",
     remote = "https://github.com/eclipse-opensovd/mbedtls-rs.git",
 )
 
@@ -51,6 +51,7 @@ cda_crate_universe = use_extension(
 cda_crate_universe.from_cargo(
     name = "cda_crates",
     cargo_lockfile = "//:Cargo.lock",
+    lockfile = "//:cargo-bazel-lock.json",
     manifests = ["//:Cargo.toml"],
     skip_cargo_lockfile_overwrite = True,
 )
@@ -73,6 +74,7 @@ can_crate_universe.spec(
     package = "sd-notify",
     version = "=0.5.0",
 )
+
 # CAN must share CDA's Tokio crate so sockets can register with its runtime.
 can_crate_universe.annotation(
     crate = "tokio",
@@ -80,5 +82,7 @@ can_crate_universe.annotation(
 )
 can_crate_universe.from_specs(
     name = "can_crates",
+    cargo_lockfile = "//:can-Cargo.lock",
+    lockfile = "//:can-cargo-bazel-lock.json",
 )
 use_repo(can_crate_universe, "can_crates")

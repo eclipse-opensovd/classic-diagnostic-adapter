@@ -259,6 +259,14 @@ plugin signatures and generated vendor-override code.
 and the Sphinx configuration (`docs/conf.py`), so that a consuming workspace can
 build the CDA requirements for its own documentation.
 
+Both crate universes (cda_crates and can_crates) ship generated Bazel lockfiles so consuming workspaces
+can use CDA with `rules_rust` versions that require lockfiles for dependencies.
+The root workspace and external-consumer example use `rules_rust` 0.71.3.
+After changing Cargo dependencies or crate-universe configuration, regenerate
+the Bazel lockfiles with `make bazel-update-lockfile` and commit the updated
+`cargo-bazel-lock.json`, `can-cargo-bazel-lock.json`, and `can-Cargo.lock`.
+Bazel module lockfiles (`MODULE.bazel.lock`) are generated locally and ignored by Git.
+
 `bazel/vendor-consumer-test` is a separate Bzlmod workspace that builds a
 custom CDA main with custom security, communication, runtime-update plugins,
 custom routes, and a vendor override. It validates the supported external
