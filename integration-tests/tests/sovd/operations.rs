@@ -29,7 +29,10 @@ struct AsyncPostBody {
 }
 
 use crate::{
-    sovd::{COMPONENTS_FLXC1000_BASE, ECU_FLXC1000, FUNCTIONS_FUNCTIONALGROUPS_DOIP_BASE},
+    sovd::{
+        COMPONENTS_FLXC1000_BASE, ECU_FLXC1000, FUNCTIONS_FUNCTIONALGROUPS_DOIP_BASE,
+        ecu::switch_session,
+    },
     util::{
         http::{
             QueryParams, extract_field_from_json, response_to_json, response_to_t,
@@ -184,6 +187,17 @@ async fn test_sync_operation() {
     let test_env = TestEnv::builder().await.unwrap();
 
     let _lock = Lock::acquire(&test_env, locks::COMPONENTS_FLXC1000_LOCKS, LOCK_EXPIRATION).await;
+
+    // SelfTest requires the extended diagnostic session.
+    switch_session(
+        "extended",
+        &test_env,
+        COMPONENTS_FLXC1000_BASE,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
 
     send_authenticated_cda_request(
         &test_env,
@@ -393,6 +407,17 @@ async fn test_sync_operation_sends_correct_uds_frame() {
     let test_env = TestEnv::builder().await.unwrap();
 
     let _lock = Lock::acquire(&test_env, locks::COMPONENTS_FLXC1000_LOCKS, LOCK_EXPIRATION).await;
+
+    // SelfTest requires the extended diagnostic session.
+    switch_session(
+        "extended",
+        &test_env,
+        COMPONENTS_FLXC1000_BASE,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
 
     let recorder = test_env
         .record(ECU_FLXC1000)
@@ -1069,5 +1094,97 @@ async fn test_get_operation_info_before_variant_detection() {
     assert!(
         !op.proximity_proof_required,
         "selftest should not require proximity proof"
+    );
+}
+
+#[tokio::test]
+async fn test_selftest_requires_extended_session() {
+    const SELFTEST_START_REQUEST: &str = "31011001";
+
+    let test_env = TestEnv::builder().await.unwrap();
+
+    let _lock = Lock::acquire(&test_env, locks::COMPONENTS_FLXC1000_LOCKS, LOCK_EXPIRATION).await;
+
+    // Explicitly enter Default so the initial state is deterministic.
+    switch_session(
+        "default",
+        &test_env,
+        COMPONENTS_FLXC1000_BASE,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // Record what the simulator receives while the request is rejected.
+    let recorder = test_env
+        .record(ECU_FLXC1000)
+        .await
+        .expect("failed to start recording");
+
+    // The SelfTest POST must be rejected in Default.
+    let default_response = send_authenticated_cda_request(
+        &test_env,
+        COMPONENTS_FLXC1000_OPERATIONS_SELFTEST_EXECUTIONS,
+        StatusCode::BAD_REQUEST,
+        Method::POST,
+        Some("{}"),
+        None,
+    )
+    .await;
+
+    let recordings = recorder.stop().await.expect("failed to stop recording");
+    let selftest_forwarded = recordings
+        .iter()
+        .any(|request| request == SELFTEST_START_REQUEST);
+    let default_body = match default_response {
+        Ok(response) => response_to_json(&response).expect("failed to parse rejection body"),
+        Err(error) => panic!(
+            "Default session: expected HTTP 400; {error:?}; SelfTest forwarded: \
+             {selftest_forwarded}; recordings: {recordings:?}"
+        ),
+    };
+
+    assert!(
+        default_body.to_string().contains("Session mismatch") && !selftest_forwarded,
+        "Default session: expected a session mismatch and no SelfTest request at the simulator; \
+         response: {default_body}; SelfTest forwarded: {selftest_forwarded}; recordings: \
+         {recordings:?}"
+    );
+
+    // Enter Extended and try the same operation again.
+    switch_session(
+        "extended",
+        &test_env,
+        COMPONENTS_FLXC1000_BASE,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let recorder = test_env
+        .record(ECU_FLXC1000)
+        .await
+        .expect("failed to start recording");
+
+    send_authenticated_cda_request(
+        &test_env,
+        COMPONENTS_FLXC1000_OPERATIONS_SELFTEST_EXECUTIONS,
+        StatusCode::OK,
+        Method::POST,
+        Some("{}"),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let recordings = recorder.stop().await.expect("failed to stop recording");
+
+    assert!(
+        recordings
+            .iter()
+            .any(|request| request == SELFTEST_START_REQUEST),
+        "SelfTest should reach the simulator in Extended: {recordings:?}"
     );
 }

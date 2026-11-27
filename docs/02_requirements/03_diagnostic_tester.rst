@@ -227,11 +227,13 @@ Communication Initialization Mode
       the first-ever startup, or any time after the persisted topology has been cleared, see
       :need:`req~dt-ecu-list-persistence`). Whenever a persisted topology exists, the CDA must instead
       attempt a direct (unicast) DoIP connection to each persisted gateway's known network address,
-      skipping the broadcast VIR step; if a gateway cannot be reached at its persisted address, the CDA
-      must fall back to broadcast-based discovery for that specific gateway, as defined in
-      :need:`req~doip-vehicle-identification`, before marking its ECUs as Offline. This mode requires ECU
-      list persistence to be enabled; it is equivalent to **Always** if persistence is disabled, since no
-      persisted topology can ever exist in that configuration.
+      skipping the broadcast VIR step; for the gateways that cannot be reached at their persisted address
+      or have no usable persisted address, the CDA must fall back to one broadcast-based discovery, as
+      defined in :need:`req~doip-vehicle-identification`, before marking the ECUs of gateways still not
+      found as Offline. This is one VIR for all of these gateways, not one per gateway, since a VIR is a
+      broadcast that every gateway answers. This mode requires ECU list persistence to be enabled; it is
+      equivalent to **Always** if persistence is disabled, since no persisted topology can ever exist in
+      that configuration.
     - **OnDemand** -- DoIP gateway initialization and ECU discovery are postponed until one of the
       following triggers occurs:
 
@@ -239,20 +241,18 @@ Communication Initialization Mode
         communication based on specific conditions (e.g., security unlock, session establishment). This
         triggers a full initialization of all gateways/ECUs at once, applying the same
         persisted-vs-broadcast behavior as **WhenNotPersisted** described above.
-      - **First diagnostic request to a specific ECU** (on-demand initialization) -- if a persisted
-        topology exists, this establishes a connection only to that ECU's gateway (direct reconnect, with
-        broadcast fallback for that gateway alone, as in **WhenNotPersisted**); other persisted gateways
-        remain unconnected until their own first request. If no persisted topology exists, no gateway
-        network address is yet known, so this necessarily triggers a full, vehicle-wide VIR broadcast
-        discovering and connecting all gateways at once, since VIR-based discovery is inherently
-        broadcast-based and cannot be scoped to a single ECU.
+      - **First diagnostic request** (on-demand initialization) -- triggers a full initialization of all
+        gateways/ECUs at once, applying the same persisted-vs-broadcast behavior as **WhenNotPersisted**
+        described above.
+
+      Until one of these triggers occurs, no gateway is connected and no VIR is sent.
 
     - **Disabled** -- DoIP gateway initialization and ECU discovery are postponed like in **OnDemand**
       mode, but neither the first-diagnostic-request nor the plugin-API trigger apply. Communication only
       starts once a detection run is explicitly initiated -- typically via the ``networkreset`` operation
       with ``trigger_detection=true`` (see :need:`req~plugin-vehicle-topology-reset-clear-persisted`), but
       a plugin or other custom code may equally initiate a detection run directly. Once triggered, this
-      always initializes all gateways/ECUs at once (there is no per-ECU auto-trigger in this mode),
+      always initializes all gateways/ECUs at once (there is no first-request trigger in this mode),
       applying the same persisted-vs-broadcast behavior as **WhenNotPersisted**.
 
     The broadcast steps of all modes apply only if the DoIP discovery mode allows a VIR (see
@@ -279,7 +279,7 @@ Communication Initialization Mode
     API immediately, without generating any vehicle network traffic, until a detection run is explicitly
     initiated (typically via ``networkreset``, but potentially by a plugin or other custom code) -- as
     opposed to **OnDemand** mode, where the first diagnostic request to any ECU implicitly authorizes
-    (at least that ECU's) communication.
+    communication with the whole vehicle.
 
     Distinguishing **Always** from **WhenNotPersisted** avoids leaving the choice between "always
     rebroadcast, but keep tracking state/``last_seen`` across restarts" and "skip rebroadcasting whenever
@@ -292,11 +292,10 @@ Communication Initialization Mode
     offering their own **Always**/**WhenNotPersisted** choice: these modes exist specifically to avoid
     vehicle network traffic until explicitly authorized, so unconditionally rebroadcasting even when a
     persisted topology is already available would be counter to their purpose. Within **OnDemand**, the two
-    triggers intentionally differ in scope: the plugin-API trigger is a deliberate, whole-vehicle "start
-    communication now" signal and must activate every gateway, matching what a plugin expects after an
-    explicit authorization event; the first-diagnostic-request trigger, by contrast, is an implicit,
-    incidental signal tied to one specific ECU, so it should only establish what is strictly needed to
-    serve that request when a persisted topology makes this possible.
+    triggers differ only in what causes them: the plugin-API trigger is a deliberate "start communication
+    now" signal, the first diagnostic request an implicit one. Both start the whole vehicle: once
+    communication is demanded there is no further reason to stay quiet, and a VIR needed for one gateway is
+    a broadcast that every gateway answers anyway, so a start per gateway would only send more VIRs.
 
 
 Post-Update Deferred Communication
@@ -483,7 +482,7 @@ ECU States
     Explicit state management provides clients with visibility into ECU availability and allows
     appropriate error handling based on the current state. The AssumedOnline state allows the CDA to
     immediately report ECUs as reachable based on prior knowledge (e.g. in
-    :need:`req~dt-deferred-initialization`'s **OnDemand** mode, before its per-ECU trigger has fired) while
+    :need:`req~dt-deferred-initialization`'s **OnDemand** mode, before one of its triggers has fired) while
     still internally tracking that this assumption has not yet been confirmed in the current session. The
     ``last_seen`` timestamp gives clients visibility into how stale that assumption might be, which is
     especially relevant while an ECU remains in the AssumedOnline state.

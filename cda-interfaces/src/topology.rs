@@ -653,7 +653,7 @@ mod tests {
         assert_eq!(runtime.unreachable(), vec![0x2000]);
 
         runtime.begin_discovery();
-        assert!(runtime.unreachable().is_empty());
+        assert_eq!(runtime.unreachable(), [] as [u16; 0]);
     }
 
     /// [[ test~doip-vam-handling-mode, Spontaneous VAMs are handled per `vam_handling_mode`, test ]]
@@ -756,7 +756,7 @@ mod tests {
         let first = runtime.begin_discovery();
         runtime.record_connected(known(0x1000));
         let second = runtime.begin_discovery();
-        assert!(runtime.connected().is_empty());
+        assert_eq!(runtime.connected(), [] as [KnownGateway; 0]);
 
         runtime.finish_discovery(first, true);
         assert!(

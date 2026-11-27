@@ -1360,7 +1360,7 @@ mod tests {
         let (empty, empty_len) = diag_type
             .decode_with_runtime_byte_length(&[0x10, 0x20], 1, 0)
             .unwrap();
-        assert!(empty.is_empty());
+        assert_eq!(empty, [] as [u8; 0]);
         assert_eq!(empty_len, 0);
 
         let mut uds_payload = Vec::new();
@@ -1441,7 +1441,7 @@ mod tests {
         // If condensed is set to true, bits are only added to the result if the mask bit is 1.
         // As the mask is all zeros and the length of the result is equal to the count of
         // '1's in the mask, the result should be empty.
-        assert!(data.is_empty());
+        assert_eq!(data, [] as [u8; 0]);
         assert_eq!(bit_len, 0);
     }
 
@@ -2908,7 +2908,7 @@ mod tests {
         )
         .unwrap();
         let (data, bit_len) = diag_type.decode(&payload, 2, 0).unwrap();
-        assert!(data.is_empty());
+        assert_eq!(data, [] as [u8; 0]);
         assert_eq!(bit_len, 0);
 
         // special case, we have no data at the end of the PDU

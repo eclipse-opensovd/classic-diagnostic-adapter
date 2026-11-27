@@ -52,6 +52,17 @@ jobs:
         with:
           toolchain: ${{ needs.versions.outputs.nightly }}
           components: clippy,rustfmt
+      - name: Install stable Rust toolchain (cargo-deny)
+        run: rustup toolchain install "${{ needs.versions.outputs.stable }}" --profile minimal
+      - name: Cache cargo-deny
+        id: cargo-deny-cache
+        uses: actions/cache@v5.1.0
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-${{ runner.os }}-${{ runner.arch }}-${{ needs.versions.outputs.cargo_deny }}
+      - name: Install cargo-deny
+        if: steps.cargo-deny-cache.outputs.cache-hit != 'true'
+        run: cargo +${{ needs.versions.outputs.stable }} install --locked --version "${{ needs.versions.outputs.cargo_deny }}" cargo-deny
       - name: Install Go (required for gitleaks)
         uses: actions/setup-go@v6.5.0
         with:

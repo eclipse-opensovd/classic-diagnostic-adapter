@@ -12,7 +12,6 @@
 common --registry=https://bcr.bazel.build
 
 build --incompatible_strict_action_env
-build --lockfile_mode=error
 
 build:can --define=can=true
 build:macos-clt --repo_env=DEVELOPER_DIR=/Library/Developer/CommandLineTools

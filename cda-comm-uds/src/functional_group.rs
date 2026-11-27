@@ -988,7 +988,7 @@ mod tests {
     async fn denied_functional_send_emits_no_frame_and_fails_every_ecu() {
         let manager = manager_with(
             TestEcuDb::new().with_request_send_policy(Arc::new(|_| {
-                Err(DiagServiceError::RequestNotAllowed("denied".to_owned()))
+                Err(DiagServiceError::request_not_allowed("denied"))
             })),
             Arc::new(cda_interfaces::request_authorization::NoRequestLockProvider),
         );
@@ -1003,7 +1003,7 @@ mod tests {
         assert!(
             results
                 .values()
-                .all(|result| matches!(result, Err(DiagServiceError::RequestNotAllowed(_))))
+                .all(|result| matches!(result, Err(DiagServiceError::RequestNotAllowed { .. })))
         );
     }
 }

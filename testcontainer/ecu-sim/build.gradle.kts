@@ -44,6 +44,8 @@ dependencies {
     implementation(libs.logback.classic)
     implementation(libs.auth0.jwt)
     implementation(libs.google.guava)
+
+    testImplementation(kotlin("test"))
 }
 
 tasks.withType(ShadowJar::class).configureEach {

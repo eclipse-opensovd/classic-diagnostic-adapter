@@ -1039,7 +1039,10 @@ mod tests {
         let not_fitted = gateways.get(1).unwrap();
         assert_eq!(not_fitted.logical_address, 0x2000);
         assert_eq!(not_fitted.network_address, None);
-        assert!(not_fitted.ecus.is_empty());
+        assert_eq!(
+            not_fitted.ecus,
+            [] as [cda_interfaces::topology::PersistedEcu; 0]
+        );
 
         // Without a full VIR discovery, a missing gateway is not known to be absent.
         stored_only.ecus.clear();

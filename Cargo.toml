@@ -11,6 +11,7 @@
 
 [workspace.package]
 edition = "2024"
+rust-version = "1.88.0"
 license = "Apache-2.0"
 homepage = "https://github.com/eclipse-opensovd/classic-diagnostic-adapter"
 
@@ -150,7 +151,7 @@ openssl = "0.10"
 socket2 = "0.6.1"
 tokio-openssl = { version = "0.6.5" }
 tower = { version = "0.5", default-features = false }
-tower-http = "0.6"
+tower-http = "0.7"
 
 # ---- web/api crates ----
 axum = { version = "0.8", default-features = false }
@@ -165,7 +166,7 @@ rustversion = "1.0.22"  # macros for conditional compilation
 linkme = "0.3"
 proc-macro2 = "1"
 quote = "1"
-syn = { version = "2", features = ["full", "visit"] }
+syn = { version = "3", features = ["full", "visit"] }
 
 [workspace.lints.clippy]
 # enable pedantic
@@ -186,7 +187,11 @@ allow_attributes_without_reason = "deny"
 mod_module_files = "deny"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(nightly)'] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(nightly)',
+  # required for custom rustc flag "heap_profiling": https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html#check-cfg-in-lintsrust-table
+  'cfg(heap_profiling)'
+] }
 
 [profile.release.package."*"]
 opt-level = 3
