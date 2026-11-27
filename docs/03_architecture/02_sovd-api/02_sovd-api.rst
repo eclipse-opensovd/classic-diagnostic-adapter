@@ -868,6 +868,11 @@ Authentication -- SID 29\ :sub:`16`
     The endpoints are available under ``/components/{ecu-name}/modes/authentication``. They are not provided
     for functional groups, since authentication procedures are ECU specific. ``GET /modes`` lists the mode
     ``authentication`` if the diagnostic database of the ECU contains at least one SID 29\ :sub:`16` service.
+    Otherwise ``GET`` and ``PUT /modes/authentication`` return ``404 Not Found``, and the path is omitted
+    from the ECU's part of ``openapi.json``. Since the routes are registered before variant detection, both
+    checks are evaluated per request against the detected variant. Building ``openapi.json`` never activates the
+    communication or starts variant detection; ECUs whose variant is not yet detected are documented without the
+    optional modes (``authentication``, ``commctrl``, ``dtcsetting``).
 
     The CDA follows the client-driven approach of ISO 17978-3 §8.3.3: every ``PUT`` is translated into exactly
     one UDS Authentication request. The client orchestrates multi-step procedures and provides all certificates,
@@ -1062,6 +1067,10 @@ Communication Control -- SID 28\ :sub:`16`
     Matching 28\ :sub:`16` service entries must be present in the diagnostic description. Parameters can be provided
     through an additional ``parameters`` attribute.
 
+    ``GET /modes`` lists ``commctrl`` only if the diagnostic description of the detected variant (including its
+    parent refs) contains at least one 28\ :sub:`16` service. Otherwise ``GET`` and ``PUT /modes/commctrl`` return
+    ``404 Not Found``, and the path is omitted from the ECU's part of ``openapi.json``.
+
     .. note::
        Other values are not supported.
 
@@ -1082,6 +1091,10 @@ DTC Setting -- SID 85\ :sub:`16`
 
     Matching 85\ :sub:`16` service entries must be present in the diagnostic description. Parameters can be provided
     through an additional ``parameters`` attribute.
+
+    ``GET /modes`` lists ``dtcsetting`` only if the diagnostic description of the detected variant (including its
+    parent refs) contains at least one 85\ :sub:`16` service. Otherwise ``GET`` and ``PUT /modes/dtcsetting``
+    return ``404 Not Found``, and the path is omitted from the ECU's part of ``openapi.json``.
 
     .. note::
        Other specific extensions to the values are not supported.

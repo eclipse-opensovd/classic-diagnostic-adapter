@@ -21,6 +21,7 @@ use aide::{
     openapi::{OpenApi, Paths},
 };
 use axum::middleware;
+use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use tokio::sync::RwLock;
 
@@ -114,6 +115,43 @@ impl BulkDataCategories {
 /// Insertion order determines override precedence in the fallback chain.
 type RouteGroups = Arc<RwLock<IndexMap<u64, RouteGroup>>>;
 
+/// Post-processes the `OpenAPI` paths of a route group whenever `openapi.json` is built.
+///
+/// Used to hide paths whose availability is only known at runtime, e.g. after variant
+/// detection of an ECU.
+pub type OpenApiPathsFilter = Arc<dyn Fn(Paths) -> BoxFuture<'static, Paths> + Send + Sync>;
+
+/// Routes to register with a [`DynamicRouter`], optionally with an [`OpenApiPathsFilter`].
+pub struct ApiRoutes {
+    router: ApiRouter,
+    paths_filter: Option<OpenApiPathsFilter>,
+}
+
+impl ApiRoutes {
+    /// Creates route group input without a paths filter.
+    #[must_use]
+    pub fn new(router: ApiRouter) -> Self {
+        Self {
+            router,
+            paths_filter: None,
+        }
+    }
+
+    /// Sets a filter that is applied to the `OpenAPI` paths of this group on every
+    /// `openapi.json` request.
+    #[must_use]
+    pub fn with_openapi_paths_filter(mut self, filter: OpenApiPathsFilter) -> Self {
+        self.paths_filter = Some(filter);
+        self
+    }
+}
+
+impl From<ApiRouter> for ApiRoutes {
+    fn from(router: ApiRouter) -> Self {
+        Self::new(router)
+    }
+}
+
 /// A route group split into its request-handling router and its `OpenAPI` paths.
 ///
 /// The [`ApiRouter`] is split once on registration, so recompositions only clone the
@@ -123,6 +161,7 @@ type RouteGroups = Arc<RwLock<IndexMap<u64, RouteGroup>>>;
 struct RouteGroup {
     router: axum::Router,
     paths_json: Option<Box<[u8]>>,
+    paths_filter: Option<OpenApiPathsFilter>,
 }
 
 impl RouteGroup {
@@ -134,8 +173,12 @@ impl RouteGroup {
     }
 }
 
-impl From<ApiRouter> for RouteGroup {
-    fn from(routes: ApiRouter) -> Self {
+impl From<ApiRoutes> for RouteGroup {
+    fn from(routes: ApiRoutes) -> Self {
+        let ApiRoutes {
+            router: routes,
+            paths_filter,
+        } = routes;
         let mut api = OpenApi::default();
         let router = routes.finish_api(&mut api);
         let paths_json = api.paths.and_then(|paths| {
@@ -144,7 +187,11 @@ impl From<ApiRouter> for RouteGroup {
                 .ok()
                 .map(Vec::into_boxed_slice)
         });
-        Self { router, paths_json }
+        Self {
+            router,
+            paths_json,
+            paths_filter,
+        }
     }
 }
 
@@ -279,21 +326,28 @@ impl DynamicRouter {
     /// The specification is generated on demand instead of being kept in memory,
     /// as it is only needed when `openapi.json` is requested.
     pub async fn get_openapi(&self) -> Arc<OpenApi> {
-        let groups = self.route_groups.read().await;
+        // Collected latest-first, so the lock is not held while the filters run.
+        let group_paths: Vec<_> = {
+            let groups = self.route_groups.read().await;
+            groups
+                .values()
+                .rev()
+                .filter_map(|group| Some((group.paths()?, group.paths_filter.clone())))
+                .collect()
+        };
         // Latest-added group wins per path: iterating latest-first and only inserting
         // paths not yet claimed lets later groups' docs override earlier ones.
-        let api = groups
-            .values()
-            .rev()
-            .fold(OpenApi::default(), |mut api, group| {
-                if let Some(paths) = group.paths() {
-                    let api_paths = api.paths.get_or_insert_with(Default::default);
-                    for (path, item) in paths.paths {
-                        api_paths.paths.entry(path).or_insert(item);
-                    }
-                }
-                api
-            });
+        let mut api = OpenApi::default();
+        for (paths, filter) in group_paths {
+            let paths = match filter {
+                Some(filter) => filter(paths).await,
+                None => paths,
+            };
+            let api_paths = api.paths.get_or_insert_with(Default::default);
+            for (path, item) in paths.paths {
+                api_paths.paths.entry(path).or_insert(item);
+            }
+        }
         Arc::new(api)
     }
 
@@ -307,11 +361,11 @@ impl DynamicRouter {
     ///
     /// Retain the returned handle if you will need to hot-swap these routes at runtime
     /// (e.g., replacing vehicle routes after an MDD database reload).
-    pub async fn add_routes(&self, routes: ApiRouter) -> RouteHandle {
+    pub async fn add_routes(&self, routes: impl Into<ApiRoutes>) -> RouteHandle {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         {
             let mut groups = self.route_groups.write().await;
-            groups.insert(id, routes.into());
+            groups.insert(id, RouteGroup::from(routes.into()));
         }
         self.recompose().await;
         RouteHandle { id }
@@ -330,13 +384,13 @@ impl DynamicRouter {
     pub async fn replace_routes(
         &self,
         handle: &RouteHandle,
-        routes: ApiRouter,
+        routes: impl Into<ApiRoutes>,
     ) -> Result<(), RouteGroupNotFound> {
         {
             let mut groups = self.route_groups.write().await;
             match groups.entry(handle.id) {
                 indexmap::map::Entry::Occupied(mut entry) => {
-                    let _ = entry.insert(routes.into());
+                    let _ = entry.insert(RouteGroup::from(routes.into()));
                 }
                 indexmap::map::Entry::Vacant(_) => {
                     return Err(RouteGroupNotFound { id: handle.id });
@@ -726,6 +780,39 @@ mod tests {
         let api = dr.get_openapi().await;
         assert_eq!(get_path_description(&api, "/foo").as_deref(), Some("b foo"));
         assert_eq!(get_path_description(&api, "/bar").as_deref(), Some("a bar"));
+    }
+
+    #[tokio::test]
+    async fn openapi_applies_paths_filter() {
+        let dr = DynamicRouter::new();
+
+        let group = ApiRouter::new()
+            .api_route(
+                "/keep",
+                routing::get_with(|| async { "keep".into_response() }, |op| op),
+            )
+            .api_route(
+                "/hide",
+                routing::get_with(|| async { "hide".into_response() }, |op| op),
+            );
+        let filter: OpenApiPathsFilter = Arc::new(|mut paths: Paths| {
+            Box::pin(async move {
+                paths.paths.shift_remove("/hide");
+                paths
+            })
+        });
+        dr.add_routes(ApiRoutes::new(group).with_openapi_paths_filter(filter))
+            .await;
+
+        let api = dr.get_openapi().await;
+        let paths = &api.paths.as_ref().unwrap().paths;
+        assert!(paths.contains_key("/keep"));
+        assert!(!paths.contains_key("/hide"));
+
+        // The route itself stays registered, the filter only affects the documentation.
+        let router = dr.get_router().await;
+        let resp = router.oneshot(request("GET", "/hide")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

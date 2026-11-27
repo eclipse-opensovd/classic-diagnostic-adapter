@@ -256,8 +256,21 @@ pub trait UdsAuthentication: UdsTransport {
     ) -> Result<AuthenticationState, DiagServiceError>;
 
     /// Returns true if the diagnostic description of the ECU contains at least
-    /// one Authentication service.
-    async fn has_authentication_services(&self, ecu_name: &str) -> bool;
+    /// one Authentication service. Returns false until variant detection has
+    /// concluded; `mode` controls whether communication is activated for that.
+    async fn has_authentication_services(&self, ecu_name: &str, mode: VariantLookupMode) -> bool;
+}
+
+/// How a lookup that depends on the detected variant treats an ECU whose variant
+/// has not been detected yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VariantLookupMode {
+    /// Requests communication activation, and thereby variant detection, if
+    /// communication is not enabled. Use for diagnostic requests.
+    RequestActivation,
+    /// Only evaluates the current state and never activates communication. Use for
+    /// requests that must not have side effects on the vehicle, e.g. API documentation.
+    Passive,
 }
 
 /// UDS tester present interface for keeping ECU sessions alive.
@@ -503,6 +516,15 @@ pub trait UdsQuery: UdsTransport {
         ecu_name: &str,
         service: u8,
     ) -> Result<String, DiagServiceError>;
+    /// Returns true if the diagnostic description of the ECU contains at least one
+    /// service with the given service id. Returns false until variant detection has
+    /// concluded; `mode` controls whether communication is activated for that.
+    async fn has_services_for_sid(
+        &self,
+        ecu_name: &str,
+        service_id: u8,
+        mode: VariantLookupMode,
+    ) -> bool;
     /// Lookup the service id on the ECU and restrict the result to the function class.
     /// After the successful lookup, the found service will be executed with the given payload.
     /// # Errors
@@ -783,7 +805,7 @@ pub mod mock {
 
     use async_trait::async_trait;
 
-    use super::{FlashTransferStartParams, ResetOutcome};
+    use super::{FlashTransferStartParams, ResetOutcome, VariantLookupMode};
     use crate::{
         Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuState, HashMap, SecurityAccess,
         SendKeyParameterInfo, TesterPresentType, UdsAuthentication, UdsDataTransfer, UdsDtc,
@@ -914,7 +936,11 @@ pub mod mock {
                 &self,
                 ecu_name: &str,
             ) -> Result<AuthenticationState, DiagServiceError>;
-            async fn has_authentication_services(&self, ecu_name: &str) -> bool;
+            async fn has_authentication_services(
+                &self,
+                ecu_name: &str,
+                mode: VariantLookupMode,
+            ) -> bool;
         }
 
         #[async_trait]
@@ -1061,6 +1087,12 @@ pub mod mock {
                 ecu_name: &str,
                 service: u8,
             ) -> Result<String, DiagServiceError>;
+            async fn has_services_for_sid(
+                &self,
+                ecu_name: &str,
+                service_id: u8,
+                mode: VariantLookupMode,
+            ) -> bool;
             async fn ecu_exec_service_from_function_class(
                 &self,
                 ecu_name: &str,

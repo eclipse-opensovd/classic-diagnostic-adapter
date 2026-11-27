@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use cda_interfaces::{
     Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState,
     HashMap, HashMapExtensions, HashSet, HashSetExtensions, PayloadDecoder, ServicePayload,
-    UdsVariant, VariantState,
+    UdsVariant, VariantLookupMode, VariantState,
     communication_control::{
         ActivationCause, CommunicationLifecycle, CommunicationState, CommunicationVariantDetection,
         DetectionPhase, VariantDetectionMode, error::CommControlError,
@@ -408,6 +408,34 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             return Ok(None);
         }
         Ok(Some(gathered))
+    }
+
+    /// Returns the ECU database handle if variant detection has concluded for
+    /// `ecu_name`, depending on `mode`.
+    ///
+    /// With [`VariantLookupMode::RequestActivation`] this is
+    /// [`Self::uds_ecu_variant_detection_concluded`]. With
+    /// [`VariantLookupMode::Passive`] only the current variant state is checked and
+    /// communication is never activated.
+    pub(crate) async fn uds_ecu_variant_lookup(
+        &self,
+        ecu_name: &str,
+        mode: VariantLookupMode,
+    ) -> Result<&RwLock<T>, DiagServiceError> {
+        match mode {
+            VariantLookupMode::RequestActivation => {
+                self.uds_ecu_variant_detection_concluded(ecu_name).await
+            }
+            VariantLookupMode::Passive => {
+                let ecu = self.uds_ecu_db(ecu_name)?;
+                if ecu.read().await.ecu_status().variant_state == VariantState::NotTested {
+                    Err(self
+                        .build_communication_not_ready_err("Variant detection has not concluded"))
+                } else {
+                    Ok(ecu)
+                }
+            }
+        }
     }
 
     /// Ensures variant detection has concluded for `ecu_name` before serving
@@ -1171,7 +1199,7 @@ mod tests {
 
     use cda_interfaces::{
         Connectivity, DiagServiceError, EcuState, HashMap, ServicePayload, TransportResponse,
-        UdsVariant, VariantDetection, VariantState,
+        UdsVariant, VariantDetection, VariantLookupMode, VariantState,
         communication_control::{
             ActivationCause, CommunicationAccess, CommunicationError, CommunicationGuard,
             CommunicationState, VariantDetectionMode,
@@ -1452,6 +1480,69 @@ mod tests {
             variant_state,
             variant_index: None,
         }
+    }
+
+    /// Disabled communication that counts activation requests.
+    #[derive(Default)]
+    struct DisabledAccess {
+        activations: AtomicUsize,
+    }
+
+    impl CommunicationAccess for DisabledAccess {
+        fn state(&self) -> CommunicationState {
+            CommunicationState::Disabled
+        }
+
+        fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+            Err(CommunicationError::Disabled)
+        }
+
+        fn request_activate(&self, _cause: ActivationCause) -> CommunicationState {
+            self.activations.fetch_add(1, Ordering::SeqCst);
+            CommunicationState::Disabled
+        }
+
+        fn variant_detection(&self) -> VariantDetectionMode {
+            VariantDetectionMode::Always
+        }
+    }
+
+    /// Runs a variant lookup for an untested ECU with disabled communication and
+    /// returns whether it succeeded and how often activation was requested.
+    async fn untested_variant_lookup(mode: VariantLookupMode) -> (bool, usize) {
+        let access = Arc::new(DisabledAccess::default());
+        let gateway = probe_reply_gateway(vec![], Arc::new(AtomicUsize::new(0)));
+        let ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_owned(),
+            RwLock::new(TestEcuDb::new().with_status(offline(VariantState::NotTested))),
+        )]));
+        let manager = UdsManager::new_for_raw_payload_tests(
+            gateway,
+            ecus,
+            FaultConfig::default(),
+            Arc::clone(&access) as Arc<dyn CommunicationAccess>,
+        );
+        let found = manager
+            .uds_ecu_variant_lookup("TestECU", mode)
+            .await
+            .is_ok();
+        (found, access.activations.load(Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    async fn passive_variant_lookup_does_not_activate_communication() {
+        assert_eq!(
+            untested_variant_lookup(VariantLookupMode::Passive).await,
+            (false, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn activating_variant_lookup_requests_activation() {
+        assert_eq!(
+            untested_variant_lookup(VariantLookupMode::RequestActivation).await,
+            (false, 1)
+        );
     }
 
     #[tokio::test]

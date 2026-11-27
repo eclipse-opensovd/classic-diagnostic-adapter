@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, ResetOutcome, UdsAuthentication,
-    UdsTransport,
+    UdsTransport, VariantLookupMode,
     authentication::{
         AuthenticationState, AuthenticationStatus, AuthenticationSubFunction,
         return_value_completes_authentication,
@@ -246,8 +246,8 @@ impl<S: EcuGateway, T: EcuManager> UdsAuthentication for UdsManager<S, T> {
             .authentication_state())
     }
 
-    async fn has_authentication_services(&self, ecu_name: &str) -> bool {
-        let Ok(ecu) = self.uds_ecu_variant_detection_concluded(ecu_name).await else {
+    async fn has_authentication_services(&self, ecu_name: &str, mode: VariantLookupMode) -> bool {
+        let Ok(ecu) = self.uds_ecu_variant_lookup(ecu_name, mode).await else {
             return false;
         };
         let ecu = ecu.read().await;
