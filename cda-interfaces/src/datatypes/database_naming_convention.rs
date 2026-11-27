@@ -113,6 +113,40 @@ pub struct DatabaseNamingConvention {
     pub action_affixes: DiagCommActionAffixes,
     /// Database semantics to identify the type of service
     pub semantics: Semantics,
+
+    /// Mappings for `/data` and `/configurations`.
+    #[serde(default)]
+    pub component_resource_mapping: ComponentResourceMapping,
+}
+
+/// Selects which identifier is used to match component resource mappings.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentResourceMappingKeyType {
+    Semantic,
+    FunctionalClass,
+}
+
+/// Defines independent category mappings for `/data` and `/configurations`.
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ComponentResourceMapping {
+    /// Identifier type used by both mappings.
+    pub key_type: ComponentResourceMappingKeyType,
+    /// Maps service identifiers to categories for `/data`.
+    pub data: HashMap<String, String>,
+    /// Maps service identifiers to categories for `/configurations`.
+    pub configurations: HashMap<String, String>,
+}
+
+impl Default for ComponentResourceMapping {
+    fn default() -> Self {
+        Self {
+            key_type: ComponentResourceMappingKeyType::FunctionalClass,
+            data: HashMap::default(),
+            configurations: HashMap::default(),
+        }
+    }
 }
 
 /// Maps a single ODX functional class name to a `/data` category.
@@ -298,6 +332,38 @@ impl DatabaseNamingConvention {
             })
     }
 
+    /// Returns the mapped category for an identifier.
+    /// Semantic matching is exact and case-insensitive.
+    /// Functional-class matching supports exact names and trailing `*` prefixes.
+    #[must_use]
+    pub fn component_resource_category(
+        &self,
+        identifier: &str,
+        mapping: &HashMap<String, String>,
+    ) -> Option<String> {
+        match self.component_resource_mapping.key_type {
+            ComponentResourceMappingKeyType::Semantic => mapping
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(identifier))
+                .map(|(_, category)| category.clone()),
+
+            ComponentResourceMappingKeyType::FunctionalClass => {
+                let identifier = identifier.to_ascii_lowercase();
+
+                mapping
+                    .iter()
+                    .filter(|(key, _)| {
+                        let key = key.to_ascii_lowercase();
+
+                        key.strip_suffix('*')
+                            .map_or(identifier == key, |prefix| identifier.starts_with(prefix))
+                    })
+                    .max_by_key(|(key, _)| key.trim_end_matches('*').len())
+                    .map(|(_, category)| category.clone())
+            }
+        }
+    }
+
     /// Trims a diagnostic service long name using the configured affixes and naming position.
     /// The first matching affix is removed and the result is returned.
     /// Affixes must be lowercase for correct matching.
@@ -426,6 +492,10 @@ impl Default for DatabaseNamingConvention {
             configuration_functional_classes: vec!["varcoding".to_owned()],
             category_mapping: Vec::new(),
             default_category: default_category(),
+
+            // Component resource mapping configuration
+            component_resource_mapping: ComponentResourceMapping::default(),
+
             short_name_affixes: vec![
                 "_read".to_owned(),
                 "_write".to_owned(),
@@ -848,6 +918,120 @@ mod tests {
         assert!(conv.is_configuration_functional_class("varcoding"));
         assert!(conv.is_configuration_functional_class("CALIBRATION"));
         assert!(!conv.is_configuration_functional_class("sensors"));
+    }
+
+    #[test]
+    fn test_component_resource_category_semantic_case_insensitive() {
+        let conv = DatabaseNamingConvention {
+            component_resource_mapping: ComponentResourceMapping {
+                key_type: ComponentResourceMappingKeyType::Semantic,
+                data: [
+                    ("IDENTIFICATION".to_owned(), "identData".to_owned()),
+                    ("STOREDDATA".to_owned(), "storedData".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+                configurations: HashMap::default(),
+            },
+            ..make_convention(false)
+        };
+
+        let mapping = &conv.component_resource_mapping.data;
+
+        assert_eq!(
+            conv.component_resource_category("identification", mapping),
+            Some("identData".to_owned())
+        );
+        assert_eq!(
+            conv.component_resource_category("STOREDDATA", mapping),
+            Some("storedData".to_owned())
+        );
+        assert_eq!(conv.component_resource_category("unknown", mapping), None);
+    }
+
+    #[test]
+    fn test_component_resource_category_functional_class_wildcard() {
+        let conv = DatabaseNamingConvention {
+            component_resource_mapping: ComponentResourceMapping {
+                key_type: ComponentResourceMappingKeyType::FunctionalClass,
+                data: [
+                    ("SENSORS".to_owned(), "identData".to_owned()),
+                    ("VARCODE*".to_owned(), "storedData".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+                configurations: HashMap::default(),
+            },
+            ..make_convention(false)
+        };
+
+        let mapping = &conv.component_resource_mapping.data;
+
+        assert_eq!(
+            conv.component_resource_category("sensors", mapping),
+            Some("identData".to_owned())
+        );
+        assert_eq!(
+            conv.component_resource_category("VARCODE_ENGINE", mapping),
+            Some("storedData".to_owned())
+        );
+        assert_eq!(conv.component_resource_category("unknown", mapping), None);
+    }
+
+    #[test]
+    fn test_component_resource_category_prefers_longest_wildcard_prefix() {
+        let conv = DatabaseNamingConvention {
+            component_resource_mapping: ComponentResourceMapping {
+                key_type: ComponentResourceMappingKeyType::FunctionalClass,
+                data: [
+                    ("VARCODE*".to_owned(), "storedData".to_owned()),
+                    ("VARCODE_ENGINE*".to_owned(), "identData".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+                configurations: HashMap::default(),
+            },
+            ..make_convention(false)
+        };
+
+        assert_eq!(
+            conv.component_resource_category(
+                "VARCODE_ENGINE_V2",
+                &conv.component_resource_mapping.data
+            ),
+            Some("identData".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_component_resource_category_keeps_data_and_configurations_separate() {
+        let conv = DatabaseNamingConvention {
+            component_resource_mapping: ComponentResourceMapping {
+                key_type: ComponentResourceMappingKeyType::Semantic,
+                data: [("IDENTIFICATION".to_owned(), "identData".to_owned())]
+                    .into_iter()
+                    .collect(),
+                configurations: [("IDENTIFICATION".to_owned(), "storedData".to_owned())]
+                    .into_iter()
+                    .collect(),
+            },
+            ..make_convention(false)
+        };
+
+        assert_eq!(
+            conv.component_resource_category(
+                "IDENTIFICATION",
+                &conv.component_resource_mapping.data
+            ),
+            Some("identData".to_owned())
+        );
+        assert_eq!(
+            conv.component_resource_category(
+                "IDENTIFICATION",
+                &conv.component_resource_mapping.configurations
+            ),
+            Some("storedData".to_owned())
+        );
     }
 
     #[test]
