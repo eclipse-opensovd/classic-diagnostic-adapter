@@ -699,7 +699,7 @@ mod tests {
 
         let all_ecus = vec!["gw".to_owned(), "ecu_a".to_owned(), "ecu_b".to_owned()];
         let connected = handler.connected.lock().unwrap().clone();
-        assert!(!connected.is_empty());
+        assert_ne!(connected, [] as [std::vec::Vec<std::string::String>; 0]);
         assert!(connected.iter().all(|names| *names == all_ecus));
         let mut requests = Vec::new();
         while let Ok(request) = detection_rx.try_recv() {
@@ -717,7 +717,7 @@ mod tests {
         })
         .await;
 
-        assert!(!requests.is_empty());
+        assert_ne!(requests, [] as [std::vec::Vec<std::string::String>; 0]);
         assert!(
             requests
                 .iter()
@@ -733,6 +733,6 @@ mod tests {
         })
         .await;
 
-        assert!(requests.is_empty());
+        assert_eq!(requests, [] as [std::vec::Vec<std::string::String>; 0]);
     }
 }

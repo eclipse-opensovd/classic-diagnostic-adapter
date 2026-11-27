@@ -18,7 +18,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # CDA Rust Development
 
-Rust Cargo workspace (edition 2024, MSRV 1.88).
+Rust Cargo workspace (edition 2024, MSRV 1.88.0). The MSRV is declared once as `rust-version`
+(full version) in the root `Cargo.toml` and inherited by every crate via
+`rust-version.workspace = true`. The `Makefile` derives `STABLE` from it, the integration tests
+pass it to the CDA image, and the `check-rust-version` pre-commit hook verifies the copies that
+cannot read it (`MODULE.bazel` files, the Dockerfile default). Change the version only there.
 
 ## Commands
 
@@ -63,6 +67,8 @@ Logging level: `RUST_LOG=debug` (default `info`).
   Document public items with `///`.
 - New dependencies must go through `[workspace.dependencies]` and pass `cargo deny`
   (allowed: Apache-2.0, BSD-3-Clause, ISC, MIT, Unicode-3.0, Zlib).
+- Dependency versions must support the MSRV. Never pass `--ignore-rust-version` or use
+  `cargo update --precise` to force a version that requires a newer Rust.
 
 ## Before finishing a change
 

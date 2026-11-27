@@ -255,6 +255,9 @@ than package-internal targets. The public API includes `//:cda_lib`,
 the supporting `//:core`, `//:database`, `//:sovd`, and `//:storage` targets.
 The `//:dep_*` targets expose the exact third-party Rust crates used by public
 plugin signatures and generated vendor-override code.
+`//:requirements_docs` exposes the requirement sources (`docs/02_requirements`)
+and the Sphinx configuration (`docs/conf.py`), so that a consuming workspace can
+build the CDA requirements for its own documentation.
 
 `bazel/vendor-consumer-test` is a separate Bzlmod workspace that builds a
 custom CDA main with custom security, communication, runtime-update plugins,

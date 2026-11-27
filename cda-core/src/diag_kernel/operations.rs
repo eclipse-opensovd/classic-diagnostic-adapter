@@ -2513,7 +2513,7 @@ mod tests {
         let crate::DiagDataTypeContainer::RawContainer(raw) = res else {
             panic!("Expected raw container");
         };
-        assert!(raw.data.is_empty());
+        assert_eq!(raw.data, [] as [u8; 0]);
         assert_eq!(payload.last_read_byte_pos(), data.len());
     }
 

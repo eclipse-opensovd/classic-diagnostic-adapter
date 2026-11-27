@@ -196,6 +196,7 @@ fn cda_image_tag() -> &'static str {
 /// checks, see `CHECK_RUSTFLAGS` in `testcontainer/cda/Dockerfile`.
 fn cda_build_options() -> BuildImageOptions {
     let options = BuildImageOptions::new()
+        .with_build_arg("RUST_VERSION", env!("CARGO_PKG_RUST_VERSION"))
         .with_build_arg("SOURCE_DATE_EPOCH", "0")
         .with_build_arg("SOURCE_GIT_SHA", "unknown")
         .with_build_arg("CDA_FEATURES", "can-socketcand");
@@ -596,6 +597,38 @@ fn follow_logs_since(container_id: String, service: Service, owner: ContainerOwn
             }
         }
     });
+}
+
+/// The logs of `container_id` since the Unix time `since`.
+///
+/// # Errors
+/// Returns [`TestingError::ProcessFailed`] if Docker cannot be reached or does
+/// not return the logs.
+pub(crate) async fn container_logs_since(
+    container_id: &str,
+    since: i32,
+) -> Result<String, TestingError> {
+    let docker = docker_client_instance()
+        .await
+        .map_err(|e| TestingError::ProcessFailed(format!("Failed to reach Docker: {e}")))?;
+    let options = LogsOptionsBuilder::new()
+        .stdout(true)
+        .stderr(true)
+        .since(since)
+        .build();
+    let mut logs = docker.logs(container_id, Some(options));
+    let mut output = Vec::new();
+    while let Some(frame) = logs.next().await {
+        match frame.map_err(|e| {
+            TestingError::ProcessFailed(format!("Failed to read the logs of {container_id}: {e}"))
+        })? {
+            LogOutput::StdErr { message }
+            | LogOutput::StdOut { message }
+            | LogOutput::Console { message } => output.extend_from_slice(&message),
+            LogOutput::StdIn { .. } => {}
+        }
+    }
+    Ok(String::from_utf8_lossy(&output).into_owned())
 }
 
 /// Seconds since the Unix epoch.

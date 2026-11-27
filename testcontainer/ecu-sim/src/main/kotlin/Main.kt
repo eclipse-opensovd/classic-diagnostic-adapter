@@ -15,6 +15,7 @@ import ecu.addCanEcu
 import ecu.addDoipEntity
 import ecu.addSimCanEcu
 import ecu.canNetwork
+import ecu.configureBroadcastAddress
 import library.can.socketcand.SocketcandTransport
 import webserver.startEmbeddedWebserver
 
@@ -35,6 +36,7 @@ fun main() {
         networkInterface = networkInterfaceEnv
         networkMode = NetworkMode.AUTO
         localPort = doipPort
+        configureBroadcastAddress(System.getenv("SIM_BROADCAST_ADDRESS"))
 
         println("DoIP Local Address: $networkInterface:$localPort")
         println("DoIP Broadcast Address: $broadcastAddress")

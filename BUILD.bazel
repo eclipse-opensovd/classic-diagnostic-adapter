@@ -138,3 +138,9 @@ alias(
     actual = "//cda-main:opensovd-cda",
     visibility = ["//visibility:public"],
 )
+
+filegroup(
+    name = "requirements_docs",
+    srcs = ["docs/conf.py"] + glob(["docs/02_requirements/*.rst"]),
+    visibility = ["//visibility:public"],
+)
