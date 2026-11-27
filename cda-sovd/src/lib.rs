@@ -15,8 +15,8 @@ use std::{sync::Arc, time::Duration};
 
 use aide::{axum::routing, swagger::Swagger};
 use axum::{
-    Json,
     http::{self, Request},
+    response::IntoResponse as _,
 };
 use cda_comm_doip::DoipGatewaySetupError;
 use cda_interfaces::{
@@ -39,6 +39,7 @@ use tokio::net::TcpListener;
 use tokio::net::UnixListener;
 use tower::{Layer, ServiceExt as TowerServiceExt};
 use tower_http::{normalize_path::NormalizePathLayer, trace::TraceLayer};
+use tracing::Instrument as _;
 
 /// Public API surface re-exported from the crate-internal `sovd` module.
 pub use crate::sovd::{
@@ -215,7 +216,9 @@ where
 {
     #[cfg(feature = "doip-direct-connect")]
     let doip_connect_enabled = resources.doip_connect.is_some();
-    let vehicle_router = build_vehicle_routes::<T, M, S>(config, resources).await;
+    let vehicle_router = build_vehicle_routes::<T, M, S>(config, resources)
+        .await
+        .map_err(|e| DoipGatewaySetupError::ServerError(e.to_string()))?;
 
     dynamic_router
         .register_bulk_data_category(sovd::apps::sovd2uds::bulk_data::FLASHFILES_PATH)
@@ -242,6 +245,15 @@ where
     Ok(handle)
 }
 
+/// Building the vehicle routes was cancelled, because the runtime is shutting down.
+#[derive(Debug, thiserror::Error)]
+#[error("Building the vehicle routes was cancelled")]
+pub struct VehicleRoutesCancelled;
+
+/// Builds the SOVD routes of the vehicle and its ECUs.
+///
+/// # Errors
+/// Returns [`VehicleRoutesCancelled`] if the runtime shuts down while the routes are built.
 #[allow(
     clippy::implicit_hasher,
     reason = "Type alias doesn't allow specifying hasher"
@@ -249,26 +261,43 @@ where
 pub async fn build_vehicle_routes<T, M, S>(
     config: VehicleConfig,
     resources: VehicleResources<T, M>,
-) -> aide::axum::ApiRouter
+) -> Result<dynamic_router::ApiRoutes, VehicleRoutesCancelled>
 where
     T: UdsEcu + SchemaProvider + Clone + Send + Sync + 'static,
     M: FileManager + Send + Sync + 'static,
     S: SecurityPluginLoader,
 {
-    sovd::route::<T, M, S>(
-        config.functional_group_config,
-        config.components_config,
-        &resources.ecu_uds,
-        sovd::FlashConfig {
-            files_path: config.flash_files_path,
-            functional_class_default: config.flash_functional_class_default,
-        },
-        resources.file_managers,
-        resources.locks,
-        resources.communication_access,
-        resources.doip_connect,
-    )
-    .await
+    // aide collects the schema definitions of the documentation in a thread-local context.
+    // Build and finish the routes on one thread, so the definitions are not split across
+    // threads when the task moves to another thread at an `.await` (e.g. during a runtime
+    // update, which runs in a request task).
+    let runtime = tokio::runtime::Handle::current();
+    // The blocking thread does not inherit the current span, keep it for the logs.
+    let span = tracing::Span::current();
+    let build = move || {
+        dynamic_router::reset_openapi_generation();
+        runtime.block_on(
+            sovd::route::<T, M, S>(
+                config.functional_group_config,
+                config.components_config,
+                &resources.ecu_uds,
+                sovd::FlashConfig {
+                    files_path: config.flash_files_path,
+                    functional_class_default: config.flash_functional_class_default,
+                },
+                resources.file_managers,
+                resources.locks,
+                resources.communication_access,
+                resources.doip_connect,
+            )
+            .instrument(span),
+        )
+    };
+    match tokio::task::spawn_blocking(build).await {
+        Ok(routes) => Ok(routes),
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        Err(_) => Err(VehicleRoutesCancelled),
+    }
 }
 
 /// Mounts the runtime-update HTTP routes onto the dynamic router and returns a handle to them.
@@ -298,7 +327,9 @@ where
     let operations_router =
         sovd::apps::sovd2uds::operations::runtimefilesupdate::routes::<S, P, L>(route_state);
     let router = bulk_data_router.merge(operations_router);
-    let handle = dynamic_router.add_routes(router.into()).await;
+    let handle = dynamic_router
+        .add_routes(aide::axum::ApiRouter::from(router))
+        .await;
     for path in sovd::apps::sovd2uds::bulk_data::runtimefiles::CATEGORY_PATHS {
         dynamic_router.register_bulk_data_category(path).await;
     }
@@ -417,13 +448,24 @@ pub async fn add_openapi_routes(dynamic_router: &DynamicRouter) {
                 routing::get(move |ExtractHost(host): ExtractHost| {
                     let dr = dr.clone();
                     async move {
-                        let mut api = (*dr.get_openapi().await).clone();
                         let server_url = format!("http://{host}");
-                        let _ = openapi::api_docs(
-                            aide::transform::TransformOpenApi::new(&mut api),
-                            server_url,
-                        );
-                        Json(api)
+                        match dr
+                            .openapi_json(|api| openapi::api_docs(api, server_url))
+                            .await
+                        {
+                            Ok(json) => (
+                                [(
+                                    http::header::CONTENT_TYPE,
+                                    http::HeaderValue::from_static("application/json"),
+                                )],
+                                json,
+                            )
+                                .into_response(),
+                            Err(e) => {
+                                tracing::error!(error = %e, "Failed to build openapi.json");
+                                http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                            }
+                        }
                     }
                 })
                 .into();
@@ -476,8 +518,8 @@ where
             .make_span_with(|request: &axum::http::Request<_>| {
                 tracing::info_span!(
                         "request",
-                    method = ?request.method(),
-                        path = request.uri().to_string(),
+                    method = %request.method(),
+                        path = %request.uri(),
                         status_code = tracing::field::Empty,
                         latency = tracing::field::Empty,
                         error = tracing::field::Empty,
@@ -496,14 +538,14 @@ where
                  latency: std::time::Duration,
                  span: &tracing::Span| {
                     span.record("status_code", response.status().as_u16());
-                    span.record("latency", format!("{latency:?}"));
+                    span.record("latency", tracing::field::debug(latency));
                 },
             )
             .on_failure(
                 |error: tower_http::classify::ServerErrorsFailureClass,
                  latency: std::time::Duration,
                  span: &tracing::Span| {
-                    span.record("latency", format!("{latency:?}"));
+                    span.record("latency", tracing::field::debug(latency));
                     if let tower_http::classify::ServerErrorsFailureClass::StatusCode(status) =
                         error
                     {

@@ -90,7 +90,6 @@ impl Strings {
     }
 
     /// Get a `StringId` for a given `String` value, inserting it if it does not exist.
-    #[tracing::instrument(skip(self), fields(string_length = value.len()))]
     pub fn get_or_insert(&self, value: &str) -> StringId {
         if let Some(id) = self.lookup.read().get(value) {
             return *id;

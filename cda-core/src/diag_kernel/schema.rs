@@ -585,7 +585,7 @@ fn map_dynamic_length_field_to_schema(
     Ok(items_schema.map(|items| serde_json::json!({ "type": "array", "items": items })))
 }
 
-#[tracing::instrument(skip_all,
+#[tracing::instrument(level = "debug", skip_all,
     fields(
         dlt_context = dlt_ctx!("CORE"),
     )
@@ -625,7 +625,7 @@ fn map_dop_field_to_schema(
     }
 }
 
-#[tracing::instrument(skip_all,
+#[tracing::instrument(level = "debug", skip_all,
     fields(
         dlt_context = dlt_ctx!("CORE"),
     )

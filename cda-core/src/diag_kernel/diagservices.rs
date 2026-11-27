@@ -227,7 +227,7 @@ impl DiagServiceResponseStruct {
     /// # Errors
     /// Returns `Err` in case any currently unsupported Nesting of containers or if serde
     /// internally has an error when calling serialize on the elements.
-    #[tracing::instrument(skip(self), fields(service_name = %self.service.name))]
+    #[tracing::instrument(level = "debug", skip(self), fields(service_name = %self.service.name))]
     pub fn serialize_to_json(
         self,
         binary_encoding: BinaryEncoding,

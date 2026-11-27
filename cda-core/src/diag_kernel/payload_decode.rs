@@ -243,8 +243,10 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
                 raw_uds_payload,
                 mapping_errors,
             );
-            tracing::Span::current()
-                .record("output", format!("Response: {:?}", resp.response_type));
+            let span = tracing::Span::current();
+            if !span.is_disabled() {
+                span.record("output", format!("Response: {:?}", resp.response_type));
+            }
 
             Ok(resp)
         } else {
@@ -486,7 +488,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         )
     }
 
-    #[tracing::instrument(skip_all,
+    #[tracing::instrument(level = "debug", skip_all,
         fields(
             dlt_context = dlt_ctx!("CORE"),
         )
@@ -981,7 +983,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all,
+    #[tracing::instrument(level = "debug", skip_all,
         fields(
             dlt_context = dlt_ctx!("CORE"),
         )
@@ -1200,7 +1202,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all,
+    #[tracing::instrument(level = "debug", skip_all,
         fields(
             dlt_context = dlt_ctx!("CORE"),
         )
@@ -1609,7 +1611,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all,
+    #[tracing::instrument(level = "debug", skip_all,
         fields(
             dlt_context = dlt_ctx!("CORE"),
         )

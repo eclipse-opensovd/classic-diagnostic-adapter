@@ -37,7 +37,13 @@ impl DbCache {
 
 pub(in crate::diag_kernel) enum CacheLocation {
     Variant(usize),
-    ParentRef(usize),
+    /// Service inherited via parent refs: `service` indexes the `diag_services` of the
+    /// `layer`-th entry of [`get_parent_ref_diag_layers_with_refs_recursive`]. Kept as
+    /// direct indices, so a cache hit does not need to collect all inherited services again.
+    ParentRef {
+        layer: usize,
+        service: usize,
+    },
 }
 
 struct CachedService {
@@ -293,17 +299,51 @@ impl<S: SecurityPlugin> EcuManager<S> {
             return Some((service, CacheLocation::Variant(idx)));
         }
 
-        // Search in Parent Refs
-        if let Some((idx, service)) = self.get_variant_parent_ref_services().and_then(|services| {
-            services
-                .iter()
-                .enumerate()
-                .find_map(|(idx, s)| predicate(s).then_some((idx, s.clone())))
-        }) {
-            return Some((service, CacheLocation::ParentRef(idx)));
+        // Search in Parent Refs, in the same order and with the same not-inherited filtering
+        // as `get_parent_ref_services_recursive`.
+        for (layer, (parent_ref, diag_layer)) in self.variant_parent_ref_layers().enumerate() {
+            let Some(services) = diag_layer.diag_services() else {
+                continue;
+            };
+            let not_inherited = parent_ref.not_inherited_diag_comm_short_names();
+            let found = services.iter().enumerate().find_map(|(idx, s)| {
+                let service = datatypes::DiagService(s);
+                let inherited = service
+                    .diag_comm()
+                    .and_then(|dc| dc.short_name())
+                    .is_none_or(|name| {
+                        not_inherited.is_none_or(|names| !names.iter().any(|n| n == name))
+                    });
+                (inherited && predicate(&service)).then_some((idx, service))
+            });
+            if let Some((service_idx, service)) = found {
+                return Some((
+                    service,
+                    CacheLocation::ParentRef {
+                        layer,
+                        service: service_idx,
+                    },
+                ));
+            }
         }
 
         None
+    }
+
+    /// Parent ref layers of the current variant. Falls back to the base variant if no variant
+    /// has been identified yet, which allows service lookups during variant detection.
+    fn variant_parent_ref_layers(
+        &self,
+    ) -> impl Iterator<Item = (datatypes::ParentRef<'_>, datatypes::DiagLayer<'_>)> {
+        self.variant()
+            .or_else(|| self.diag_database.base_variant().ok())
+            .and_then(|v| v.parent_refs())
+            .into_iter()
+            .flat_map(|parent_refs| {
+                get_parent_ref_diag_layers_with_refs_recursive(
+                    parent_refs.iter().map(datatypes::ParentRef::from),
+                )
+            })
     }
 
     fn get_services_from_diag_layer_and_parent_refs<'a, F>(
@@ -510,9 +550,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 .and_then(|dl| dl.diag_services())
                 .map(|s| s.get(*idx))
                 .map(datatypes::DiagService),
-            CacheLocation::ParentRef(idx) => self
-                .get_variant_parent_ref_services()
-                .and_then(|services| services.get(*idx).cloned()),
+            CacheLocation::ParentRef { layer, service } => self
+                .variant_parent_ref_layers()
+                .nth(*layer)
+                .and_then(|(_, diag_layer)| diag_layer.diag_services())
+                .filter(|services| *service < services.len())
+                .map(|services| datatypes::DiagService(services.get(*service))),
         }
     }
 
@@ -536,7 +579,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
         get_name: impl Fn(&T) -> Option<&str>,
     ) -> Option<Vec<T>> {
         let all_items: Vec<T> = get_parent_ref_diag_layers_with_refs_recursive(parent_refs)
-            .into_iter()
             .filter_map(|(parent_ref, diag_layer)| {
                 let not_inherited_names: Vec<&str> = parent_ref
                     .not_inherited_diag_comm_short_names()
@@ -608,36 +650,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
             },
             |service| service.diag_comm().and_then(|dc| dc.short_name()),
         )
-    }
-
-    /// Retrieves `DiagServices` inherited from the current variants parent references.
-    /// Falls back to the base variant if no variant has been identified yet, which allows
-    /// service lookups during variant detection.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let inherited_services: Option<Vec<datatypes::DiagService>> =
-    ///     ecu_manager.get_variant_parent_ref_services();
-    /// if let Some(services) = inherited_services {
-    ///     for service in &services {
-    ///         println!("{:?}", service.diag_comm().and_then(|dc| dc.short_name()));
-    ///     }
-    /// }
-    /// ```
-    pub(in crate::diag_kernel) fn get_variant_parent_ref_services(
-        &self,
-    ) -> Option<Vec<datatypes::DiagService<'_>>> {
-        self.variant()
-            // This is necessary, so we are able to lookup services
-            // _before_ a variant has been found i.e. for variant detection.
-            .or_else(|| self.diag_database.base_variant().ok())
-            .and_then(|v| v.parent_refs())
-            .and_then(|parent_refs| {
-                Self::get_parent_ref_services_recursive(
-                    parent_refs.iter().map(datatypes::ParentRef::from),
-                )
-            })
     }
 
     /// Collects all `DiagLayers` from the current variant and its parent references.
@@ -726,86 +738,76 @@ pub(in crate::diag_kernel) fn get_parent_ref_diag_layers_recursive<'a>(
     parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
 ) -> Vec<datatypes::DiagLayer<'a>> {
     get_parent_ref_diag_layers_with_refs_recursive(parent_refs)
-        .into_iter()
         .map(|(_, diag_layer)| diag_layer)
         .collect()
 }
 
-/// Recursively resolves parent references and returns `(ParentRef, DiagLayer)` pairs.
+/// Recursively resolves parent references and yields `(ParentRef, DiagLayer)` pairs.
+/// The pairs are resolved lazily, so callers that stop early do not resolve the rest.
 /// Uses a stack-based traversal to handle the parent reference hierarchy:
-/// - **`FunctionalGroup`**: extracts the `DiagLayer` and pushes its nested `ParentRef`s
+/// - **`FunctionalGroup`**: yields the `DiagLayer` and pushes its nested `ParentRef`s
 ///   onto the stack for further traversal.
-/// - **`Variant`**: extracts the `DiagLayer` and pushes its nested `ParentRef`s
+/// - **`Variant`**: yields the `DiagLayer` and pushes its nested `ParentRef`s
 ///   onto the stack for further traversal.
-/// - **`Protocol`**: extracts the `DiagLayer` and pushes its nested `ParentRef`
+/// - **`Protocol`**: yields the `DiagLayer` and pushes its nested `ParentRef`
 ///   items onto the stack for further traversal.
-/// - **`EcuSharedData`**: extracts the `DiagLayer` (leaf node, no `parent_refs`).
+/// - **`EcuSharedData`**: yields the `DiagLayer` (leaf node, no `parent_refs`).
 ///
 /// # Example
 ///
 /// ```ignore
-/// let pairs: Vec<(datatypes::ParentRef, datatypes::DiagLayer)> =
-///     EcuManager::get_parent_ref_diag_layers_with_refs_recursive(
-///         parent_refs.iter().map(datatypes::ParentRef),
-///     );
-/// for (parent_ref, diag_layer) in &pairs {
+/// for (parent_ref, diag_layer) in get_parent_ref_diag_layers_with_refs_recursive(
+///     parent_refs.iter().map(datatypes::ParentRef),
+/// ) {
 ///     println!("ref type: {:?}, layer: {:?}", parent_ref.ref_type(), diag_layer.short_name());
 /// }
 /// ```
 fn get_parent_ref_diag_layers_with_refs_recursive<'a>(
     parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
-) -> Vec<(datatypes::ParentRef<'a>, datatypes::DiagLayer<'a>)> {
-    let mut result = Vec::new();
-    let mut stack: Vec<datatypes::ParentRef<'a>> =
-        parent_refs.into_iter().map(Into::into).collect();
+) -> impl Iterator<Item = (datatypes::ParentRef<'a>, datatypes::DiagLayer<'a>)> {
+    let mut stack: Vec<datatypes::ParentRef<'a>> = parent_refs.map(Into::into).collect();
 
-    while let Some(parent_ref) = stack.pop() {
-        match parent_ref.ref_type().try_into() {
-            Ok(datatypes::ParentRefType::FunctionalGroup) => {
-                if let Some(fg) = parent_ref.ref__as_functional_group() {
-                    if let Some(nested_refs) = fg.parent_refs() {
-                        stack.extend(nested_refs.iter().map(datatypes::ParentRef));
-                    }
-                    if let Some(dl) = fg.diag_layer() {
-                        result.push((parent_ref, datatypes::DiagLayer(dl)));
-                    }
+    std::iter::from_fn(move || {
+        while let Some(parent_ref) = stack.pop() {
+            let diag_layer = match parent_ref.ref_type().try_into() {
+                Ok(datatypes::ParentRefType::FunctionalGroup) => {
+                    parent_ref.ref__as_functional_group().and_then(|fg| {
+                        if let Some(nested_refs) = fg.parent_refs() {
+                            stack.extend(nested_refs.iter().map(datatypes::ParentRef));
+                        }
+                        fg.diag_layer()
+                    })
                 }
-            }
-            Ok(datatypes::ParentRefType::EcuSharedData) => {
-                if let Some(dl) = parent_ref
+                Ok(datatypes::ParentRefType::EcuSharedData) => parent_ref
                     .ref__as_ecu_shared_data()
-                    .and_then(|esd| esd.diag_layer())
-                {
-                    result.push((parent_ref, datatypes::DiagLayer(dl)));
+                    .and_then(|esd| esd.diag_layer()),
+                Ok(datatypes::ParentRefType::Protocol) => {
+                    parent_ref.ref__as_protocol().and_then(|p| {
+                        if let Some(nested_refs) = p.parent_refs() {
+                            stack.extend(nested_refs.iter().map(datatypes::ParentRef));
+                        }
+                        p.diag_layer()
+                    })
                 }
-            }
-            Ok(datatypes::ParentRefType::Protocol) => {
-                if let Some(p) = parent_ref.ref__as_protocol() {
-                    if let Some(nested_refs) = p.parent_refs() {
-                        stack.extend(nested_refs.iter().map(datatypes::ParentRef));
-                    }
-                    if let Some(dl) = p.diag_layer() {
-                        result.push((parent_ref, datatypes::DiagLayer(dl)));
-                    }
+                Ok(datatypes::ParentRefType::Variant) => {
+                    parent_ref.ref__as_variant().and_then(|v| {
+                        if let Some(nested_refs) = v.parent_refs() {
+                            stack.extend(nested_refs.iter().map(datatypes::ParentRef));
+                        }
+                        v.diag_layer()
+                    })
                 }
-            }
-            Ok(datatypes::ParentRefType::Variant) => {
-                if let Some(v) = parent_ref.ref__as_variant() {
-                    if let Some(nested_refs) = v.parent_refs() {
-                        stack.extend(nested_refs.iter().map(datatypes::ParentRef));
-                    }
-                    if let Some(dl) = v.diag_layer() {
-                        result.push((parent_ref, datatypes::DiagLayer(dl)));
-                    }
+                _ => {
+                    tracing::error!("Unsupported ParentRefType in ECU shared service lookup.");
+                    None
                 }
-            }
-            _ => {
-                tracing::error!("Unsupported ParentRefType in ECU shared service lookup.");
+            };
+            if let Some(dl) = diag_layer {
+                return Some((parent_ref, datatypes::DiagLayer(dl)));
             }
         }
-    }
-
-    result
+        None
+    })
 }
 
 #[cfg(test)]
@@ -860,6 +862,102 @@ mod tests {
             result.is_ok(),
             "Expected lookup to ignore cache from previous variant, got: {result:?}"
         );
+    }
+
+    /// Inherited services are cached by parent layer and service index. A cache hit must
+    /// resolve to the same service as the initial search, also for a service in a later
+    /// parent layer, and not-inherited services must stay hidden.
+    #[tokio::test]
+    async fn inherited_service_lookup_uses_parent_ref_location() {
+        use cda_interfaces::{DiagCommType, Protocol, service_ids};
+
+        use crate::diag_kernel::test_utils::{
+            ecu_manager_builder::new_ecu_manager,
+            mdd_type_builder::{create_sid_only_request, new_diag_comm, new_diag_service},
+        };
+
+        let protocol_name = Protocol::default().to_string();
+        let mut b = EcuDataBuilder::new();
+        let protocol = b.create_protocol(&protocol_name, None, None, None);
+        macro_rules! rdbi_service {
+            ($name:expr) => {{
+                let diag_comm = new_diag_comm!(b, $name, protocol);
+                let request = create_sid_only_request!(b, service_ids::READ_DATA_BY_IDENTIFIER);
+                new_diag_service!(b, diag_comm, request, vec![], vec![])
+            }};
+        }
+        macro_rules! shared_ref {
+            ($name:expr, $services:expr, $not_inherited:expr) => {{
+                let layer = b.create_diag_layer(DiagLayerParams {
+                    short_name: $name,
+                    diag_services: Some($services),
+                    ..Default::default()
+                });
+                let shared = b.create_ecu_shared_data(layer);
+                b.create_parent_ref_with_not_inherited(
+                    DataFormatParentRefType::EcuSharedData,
+                    Some(DataFormatParentRefType::tag_as_ecu_shared_data(shared)),
+                    $not_inherited,
+                )
+            }};
+        }
+
+        let first_services = vec![rdbi_service!("FirstA"), rdbi_service!("Hidden")];
+        let second_services = vec![rdbi_service!("SecondA"), rdbi_service!("SecondB")];
+        let own_services = vec![rdbi_service!("Own")];
+        let first_ref = shared_ref!("FirstShared", first_services, &["Hidden"]);
+        let second_ref = shared_ref!("SecondShared", second_services, &[]);
+
+        let cp_ref = b.create_com_param_ref(None, None, None, Some(protocol), None);
+        let variant_layer = b.create_diag_layer(DiagLayerParams {
+            short_name: crate::diag_kernel::test_utils::ecu_manager_builder::TEST_DIAG_LAYER,
+            com_param_refs: Some(vec![cp_ref]),
+            diag_services: Some(own_services),
+            ..Default::default()
+        });
+        let variant =
+            b.create_variant(variant_layer, true, None, Some(vec![first_ref, second_ref]));
+        let db = b.finish(EcuDataParams {
+            ecu_name: "TestEcu",
+            revision: "1",
+            version: "1.0.0",
+            variants: Some(vec![variant]),
+            ..Default::default()
+        });
+        let ecu_manager = new_ecu_manager(db);
+
+        let short_name = |service: &datatypes::DiagService<'_>| {
+            service
+                .diag_comm()
+                .and_then(|dc| dc.short_name())
+                .map(str::to_owned)
+        };
+        for name in ["Own", "FirstA", "SecondA", "SecondB"] {
+            let diag_comm = DiagComm::new(name, DiagCommType::Data);
+            // first lookup searches and caches the location, second one is served from the cache
+            for attempt in ["search", "cache"] {
+                let service = ecu_manager
+                    .lookup_diag_service(&diag_comm, None, None)
+                    .await
+                    .unwrap_or_else(|e| panic!("{name} ({attempt}) not found: {e:?}"));
+                assert_eq!(
+                    short_name(&service).as_deref(),
+                    Some(name),
+                    "{name} ({attempt}) resolved to the wrong service"
+                );
+            }
+        }
+
+        let hidden = DiagComm::new("Hidden", DiagCommType::Data);
+        for attempt in ["search", "cache"] {
+            assert!(
+                ecu_manager
+                    .lookup_diag_service(&hidden, None, None)
+                    .await
+                    .is_err(),
+                "not-inherited service must not be found ({attempt})"
+            );
+        }
     }
 
     /// Tests that `get_parent_ref_diag_layers_with_refs_recursive` correctly resolves a
@@ -962,7 +1060,6 @@ mod tests {
         let names: Vec<_> = get_parent_ref_diag_layers_with_refs_recursive(
             parent_refs.iter().map(datatypes::ParentRef),
         )
-        .into_iter()
         .filter_map(|(_, dl)| dl.short_name().map(str::to_owned))
         .collect();
 

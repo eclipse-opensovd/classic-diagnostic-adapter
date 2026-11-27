@@ -399,11 +399,30 @@ impl<'a> EcuDataBuilder<'a> {
         ref_type: dataformat::ParentRefType,
         ref_: Option<UnionWIPOffset<dataformat::ParentRefTypeUnionValue>>,
     ) -> WIPOffset<dataformat::ParentRef<'a>> {
+        self.create_parent_ref_with_not_inherited(ref_type, ref_, &[])
+    }
+
+    /// Like [`Self::create_parent_ref`], but excludes the given diag comms from inheritance.
+    pub fn create_parent_ref_with_not_inherited(
+        &mut self,
+        ref_type: dataformat::ParentRefType,
+        ref_: Option<UnionWIPOffset<dataformat::ParentRefTypeUnionValue>>,
+        not_inherited_diag_comm_short_names: &[&str],
+    ) -> WIPOffset<dataformat::ParentRef<'a>> {
+        let not_inherited_diag_comm_short_names = (!not_inherited_diag_comm_short_names.is_empty())
+            .then(|| {
+                let names: Vec<_> = not_inherited_diag_comm_short_names
+                    .iter()
+                    .map(|name| self.fbb.create_string(name))
+                    .collect();
+                self.fbb.create_vector(&names)
+            });
         dataformat::ParentRef::create(
             &mut self.fbb,
             &dataformat::ParentRefArgs {
                 ref_type,
                 ref_: ref_.map(|u| u.value_offset()),
+                not_inherited_diag_comm_short_names,
                 ..Default::default()
             },
         )

@@ -47,6 +47,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 pub mod config;
 pub mod error;
@@ -1085,6 +1086,8 @@ impl<T: EcuAddresses + DoipComParams> PhysicalTransport for DoipDiagGateway<T> {
                         "Handled DOIP request timing breakdown"
                     );
                 }
+                // Keep the request's DOIP span (and its DLT context) for the task's logs.
+                .instrument(tracing::Span::current())
             }
         );
 
@@ -2102,7 +2105,7 @@ async fn send_with_retries(
     Ok(())
 }
 
-#[tracing::instrument(skip_all,
+#[tracing::instrument(level = "debug", skip_all,
     fields(dlt_context = dlt_ctx!("DOIP"))
 )]
 async fn try_send_transport_response(

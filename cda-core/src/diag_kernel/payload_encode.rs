@@ -162,7 +162,10 @@ impl<S: SecurityPlugin> PayloadEncoder for EcuManager<S> {
 
         let (new_session, new_security) =
             self.lookup_state_transition_by_diagcomm_for_active(&(mapped_dc.into()));
-        tracing::Span::current().record("output", util::tracing::print_hex(&uds, 10));
+        let span = tracing::Span::current();
+        if !span.is_disabled() {
+            span.record("output", util::tracing::print_hex(&uds, 10));
+        }
         Ok(ServicePayload {
             data: uds,
             source_address: self.tester_address,

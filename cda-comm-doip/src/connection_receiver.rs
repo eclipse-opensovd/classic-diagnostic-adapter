@@ -18,6 +18,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::{broadcast, mpsc, watch},
 };
+use tracing::Instrument as _;
 
 use crate::{
     ConnectionError, DiagnosticResponse, EcuActivityReporter, GatewaySetup,
@@ -75,6 +76,7 @@ pub(super) async fn handle_send_pending(
 }
 
 #[tracing::instrument(
+        level = "debug",
         skip_all,
         fields(dlt_context = dlt_ctx!("DOIP"))
     )]
@@ -117,6 +119,7 @@ pub(super) fn handle_generic_nack() {
 /// Thin coordinator: delegates to `handle_ok_response` or
 /// `handle_connection_error` so each branch has its own focused function.
 #[tracing::instrument(
+        level = "debug",
         skip_all,
         fields(dlt_context = dlt_ctx!("DOIP"))
     )]
@@ -143,6 +146,7 @@ pub(super) async fn handle_response(
 
 /// Handles all variants of a successfully decoded [`DiagnosticResponse`].
 #[tracing::instrument(
+        level = "debug",
         skip_all,
         fields(dlt_context = dlt_ctx!("DOIP"))
     )]
@@ -271,54 +275,69 @@ where
         reset_tx,
     } = channels;
 
-    cda_interfaces::spawn_named!(&format!("gateway-receiver-{}", gateway_id.ip), async move {
-        'receive: loop {
-            if outtx.iter().all(|(_, tx)| tx.receiver_count() == 0) {
-                tracing::debug!("All out channels closed. Shutting down connection");
-                break;
-            }
+    // The loop runs as long as the connection, so it gets its own root span instead of
+    // keeping the span of the caller open. The DLT context is set for everything it logs.
+    let span = tracing::info_span!(
+        parent: None,
+        "doip_gateway_receiver",
+        gateway_ip = %gateway_id.ip,
+        gateway_name = %gateway_id.name,
+        dlt_context = dlt_ctx!("DOIP"),
+    );
+    span.follows_from(tracing::Span::current());
 
-            // wait for a message to be received or a send request
-            // Tokio is randomizing which branch takes precedence when both are ready.
-            // this is good here because it prevents send / receive starvation by
-            // not prioritizing one of the branches.
-            tokio::select! {
-                send_pending_result = send_pending_rx.changed() => {
-                    if let Err(()) = handle_send_pending(
-                        &gateway_id.name,
-                        &gateway_id.ip,
-                        &mut send_pending_rx,
-                        send_pending_result
-                    ).await {
-                        break 'receive;
-                    }
-                },
+    cda_interfaces::spawn_named!(
+        &format!("gateway-receiver-{}", gateway_id.ip),
+        async move {
+            'receive: loop {
+                if outtx.iter().all(|(_, tx)| tx.receiver_count() == 0) {
+                    tracing::debug!("All out channels closed. Shutting down connection");
+                    break;
+                }
 
-                response = async {
-                    let Ok(mut conn_mtx) = gateway_conn.lock_read().await else {
-                        return None;
-                    };
-                    let conn = conn_mtx.get_reader();
-
-                    // we can wait without actual timeout because this will be
-                    // interrupted by the send_pending_rx when someone wants to send
-                    // data on the connection
-                    Some(try_read(Duration::MAX, conn).await)
-                } => {
-                    if let Some(response) = response {
-                        handle_response(
+                // wait for a message to be received or a send request
+                // Tokio is randomizing which branch takes precedence when both are ready.
+                // this is good here because it prevents send / receive starvation by
+                // not prioritizing one of the branches.
+                tokio::select! {
+                    send_pending_result = send_pending_rx.changed() => {
+                        if let Err(()) = handle_send_pending(
                             &gateway_id.name,
                             &gateway_id.ip,
-                            &outtx,
-                            &reset_tx,
-                            &activity,
-                            response,
-                        ).await;
+                            &mut send_pending_rx,
+                            send_pending_result
+                        ).await {
+                            break 'receive;
+                        }
+                    },
+
+                    response = async {
+                        let Ok(mut conn_mtx) = gateway_conn.lock_read().await else {
+                            return None;
+                        };
+                        let conn = conn_mtx.get_reader();
+
+                        // we can wait without actual timeout because this will be
+                        // interrupted by the send_pending_rx when someone wants to send
+                        // data on the connection
+                        Some(try_read(Duration::MAX, conn).await)
+                    } => {
+                        if let Some(response) = response {
+                            handle_response(
+                                &gateway_id.name,
+                                &gateway_id.ip,
+                                &outtx,
+                                &reset_tx,
+                                &activity,
+                                response,
+                            ).await;
+                        }
                     }
                 }
             }
         }
-    })
+        .instrument(span)
+    )
 }
 
 /// Identity of a `DoIP` gateway (IP address and ECU name).
