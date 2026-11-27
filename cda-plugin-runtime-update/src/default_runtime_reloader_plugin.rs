@@ -143,7 +143,8 @@ where
         }
         let current_locks = self.lock_provider.current_locks().await;
 
-        let vehicle_router = cda_sovd::build_vehicle_routes::<_, _, SecurityLoader>(
+        // Nothing is replaced if the routes cannot be built, the current routes stay.
+        let vehicle_router = match cda_sovd::build_vehicle_routes::<_, _, SecurityLoader>(
             cda_sovd::VehicleConfig {
                 flash_files_path: self.flash_files_path.clone(),
                 flash_functional_class_default: self.flash_functional_class_default.clone(),
@@ -158,7 +159,17 @@ where
                 doip_connect: self.doip_connect.clone(),
             },
         )
-        .await;
+        .await
+        {
+            Ok(vehicle_router) => vehicle_router,
+            Err(e) => {
+                new_gateway.shutdown().await;
+                new_uds.shutdown().await;
+                return Err(ReloadError::ReplacementFailure(format!(
+                    "Failed to build vehicle routes: {e}"
+                )));
+            }
+        };
 
         if let Err(e) = self
             .dynamic_router

@@ -810,7 +810,7 @@ pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: Securi
         .await
         .layer(middleware::from_fn(security_plugin_middleware::<S>))
         .with_state(uds.clone());
-    ApiRoutes::new(router, ecu_docs)
+    ApiRoutes::finish(router, ecu_docs)
 }
 
 async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoader>(
@@ -1498,8 +1498,10 @@ pub(crate) mod static_data {
                 }),
             )
             .with_state(data);
+        // Finish the documentation before the first `.await`, see `DynamicRouter::add_routes`.
+        let routes = crate::dynamic_router::ApiRoutes::from(router);
         dynamic_router.register_data_resource(path, category).await;
-        dynamic_router.add_routes(router).await;
+        dynamic_router.add_routes(routes).await;
     }
 
     async fn get<T: StaticData>(

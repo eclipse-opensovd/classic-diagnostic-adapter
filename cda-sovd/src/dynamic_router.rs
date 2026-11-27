@@ -115,29 +115,57 @@ impl BulkDataCategories {
 }
 
 /// Insertion order determines override precedence in the fallback chain.
-type RouteGroups = Arc<RwLock<IndexMap<u64, RouteGroup>>>;
+type RouteGroups = Arc<RwLock<IndexMap<u64, ApiRoutes>>>;
 
-/// Routes to register with a [`DynamicRouter`].
+/// A route group to register with a [`DynamicRouter`]: its request-handling router and its
+/// finished `OpenAPI` documentation.
 ///
-/// Besides an [`ApiRouter`] it can carry the already serialized documentation of nested
-/// routers, see [`FinishedDocs`].
+/// The documentation is split off and finished on creation, so recompositions only clone
+/// the cheap axum router instead of the whole [`ApiRouter`] including its documentation.
+/// It is kept as serialized JSON, which is several times smaller than in memory and only
+/// needed when `openapi.json` is requested.
 pub struct ApiRoutes {
-    router: ApiRouter,
-    finished_paths: Vec<Box<[u8]>>,
+    router: axum::Router,
+    /// Serialized [`Paths`]: those of the router itself, then those of nested routers
+    /// finished with [`FinishedDocs::nest`].
+    paths_json: Vec<Box<[u8]>>,
+    /// Serialized schemas (`#/components/schemas`) referenced by the paths.
+    schemas_json: Option<Box<[u8]>>,
 }
 
 impl ApiRoutes {
-    pub(crate) fn new(router: ApiRouter, finished_docs: FinishedDocs) -> Self {
+    /// Finishes the documentation of `router` and of the routers nested into it through
+    /// `nested`.
+    ///
+    /// aide collects the schema definitions in a thread-local context, so this has to run
+    /// on the thread that built the routes, without an `.await` in between that could move
+    /// the task to another thread.
+    pub(crate) fn finish(router: ApiRouter, nested: FinishedDocs) -> Self {
+        let mut api = OpenApi::default();
+        let router = router.finish_api(&mut api);
+        // `finish_api` resets the generation context, including its configuration.
+        configure_openapi_generation();
+        let schemas_json = api
+            .components
+            .filter(|components| !components.schemas.is_empty())
+            .and_then(|components| serialize_json(&components.schemas, "schemas"));
+        let paths_json = api
+            .paths
+            .and_then(|paths| serialize_json(&paths, "paths"))
+            .into_iter()
+            .chain(nested.0)
+            .collect();
         Self {
             router,
-            finished_paths: finished_docs.0,
+            paths_json,
+            schemas_json,
         }
     }
 }
 
 impl From<ApiRouter> for ApiRoutes {
     fn from(router: ApiRouter) -> Self {
-        Self::new(router, FinishedDocs::default())
+        Self::finish(router, FinishedDocs::default())
     }
 }
 
@@ -187,9 +215,16 @@ fn finish_nested(path: &str, routes: ApiRouter) -> (axum::Router, Option<Box<[u8
                 .collect(),
             extensions: paths.extensions,
         };
-        serialize_paths(&nested)
+        serialize_json(&nested, "paths")
     });
     (router, paths_json)
+}
+
+/// Starts a fresh `OpenAPI` generation context on the current thread, dropping schema
+/// definitions left over from routes built earlier on it.
+pub(crate) fn reset_openapi_generation() {
+    aide::generate::reset_context();
+    configure_openapi_generation();
 }
 
 /// Configures aide's thread-local `OpenAPI` generation context.
@@ -213,38 +248,13 @@ fn nested_route_path(path: &str, route: &str) -> String {
     }
 }
 
-fn serialize_paths(paths: &Paths) -> Option<Box<[u8]>> {
-    serde_json::to_vec(paths)
-        .inspect_err(|e| tracing::error!(error = %e, "Failed to serialize OpenAPI paths"))
+fn serialize_json<T: serde::Serialize>(value: &T, what: &str) -> Option<Box<[u8]>> {
+    serde_json::to_vec(value)
+        .inspect_err(
+            |e| tracing::error!(error = %e, what, "Failed to serialize OpenAPI documentation"),
+        )
         .ok()
         .map(Vec::into_boxed_slice)
-}
-
-/// A route group split into its request-handling router and its `OpenAPI` paths.
-///
-/// The [`ApiRouter`] is split once on registration, so recompositions only clone the
-/// cheap axum router instead of the whole [`ApiRouter`] including its documentation.
-/// The paths are kept as serialized JSON, which is several times smaller than the
-/// in-memory [`Paths`] and only needs to be parsed when `openapi.json` is requested.
-struct RouteGroup {
-    router: axum::Router,
-    /// Serialized [`Paths`]: those of the router itself, then those of nested routers
-    /// finished with [`FinishedDocs::nest`].
-    paths_json: Vec<Box<[u8]>>,
-}
-
-impl From<ApiRoutes> for RouteGroup {
-    fn from(routes: ApiRoutes) -> Self {
-        let mut api = OpenApi::default();
-        let router = routes.router.finish_api(&mut api);
-        let paths_json = api
-            .paths
-            .and_then(|paths| serialize_paths(&paths))
-            .into_iter()
-            .chain(routes.finished_paths)
-            .collect();
-        Self { router, paths_json }
-    }
 }
 
 /// An opaque handle to a route group registered with a [`DynamicRouter`].
@@ -394,11 +404,17 @@ impl DynamicRouter {
     ///
     /// Retain the returned handle if you will need to hot-swap these routes at runtime
     /// (e.g., replacing vehicle routes after an MDD database reload).
+    ///
+    /// An [`ApiRouter`] is finished into [`ApiRoutes`] before anything is awaited. aide
+    /// collects the schema definitions in a thread-local context, so build the router on the
+    /// calling thread with no `.await` between building it and calling this, or its schemas
+    /// can be missing from `openapi.json`.
     pub async fn add_routes(&self, routes: impl Into<ApiRoutes>) -> RouteHandle {
+        let routes = routes.into();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         {
             let mut groups = self.route_groups.write().await;
-            groups.insert(id, routes.into().into());
+            groups.insert(id, routes);
         }
         self.recompose().await;
         RouteHandle { id }
@@ -414,16 +430,19 @@ impl DynamicRouter {
     /// # Errors
     ///
     /// Returns [`RouteGroupNotFound`] if the handle refers to a group that was already removed.
+    ///
+    /// See [`add_routes`](Self::add_routes) on where to build an [`ApiRouter`].
     pub async fn replace_routes(
         &self,
         handle: &RouteHandle,
         routes: impl Into<ApiRoutes>,
     ) -> Result<(), RouteGroupNotFound> {
+        let routes = routes.into();
         {
             let mut groups = self.route_groups.write().await;
             match groups.entry(handle.id) {
                 indexmap::map::Entry::Occupied(mut entry) => {
-                    let _ = entry.insert(routes.into().into());
+                    let _ = entry.insert(routes);
                 }
                 indexmap::map::Entry::Vacant(_) => {
                     return Err(RouteGroupNotFound { id: handle.id });
@@ -820,54 +839,108 @@ mod tests {
         assert_eq!(get_path_description(&api, "/bar").as_deref(), Some("a bar"));
     }
 
+    // Two different types with the same name: the schema generator numbers them (`Item`,
+    // `Item2`) if they are documented with the same generator.
+    mod first {
+        #[derive(serde::Serialize, schemars::JsonSchema)]
+        pub(super) struct Item {
+            pub(super) a: u8,
+        }
+    }
+    mod second {
+        #[derive(serde::Serialize, schemars::JsonSchema)]
+        pub(super) struct Item {
+            pub(super) b: String,
+        }
+    }
+
+    fn first_item_route(path: &str) -> ApiRouter {
+        ApiRouter::new().api_route(
+            path,
+            routing::get_with(
+                || async { axum::Json(first::Item { a: 1 }) },
+                |op| op.description("first"),
+            ),
+        )
+    }
+
+    fn second_item_route(path: &str) -> ApiRouter {
+        ApiRouter::new().api_route(
+            path,
+            routing::get_with(
+                || async {
+                    axum::Json(second::Item {
+                        b: "second".to_owned(),
+                    })
+                },
+                |op| op.description("second"),
+            ),
+        )
+    }
+
+    /// Returns the schema a `$ref` of the response of `GET path` resolves to.
+    fn response_schema<'d>(doc: &'d serde_json::Value, path: &str) -> &'d serde_json::Value {
+        let reference = doc
+            .get("paths")
+            .and_then(|paths| paths.get(path))
+            .and_then(|item| {
+                item.pointer("/get/responses/200/content/application~1json/schema/$ref")
+            })
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("no schema reference for {path}"));
+        let name = reference.trim_start_matches("#/components/schemas/");
+        doc.get("components")
+            .and_then(|components| components.get("schemas"))
+            .and_then(|schemas| schemas.get(name))
+            .unwrap_or_else(|| panic!("{reference} of {path} does not resolve"))
+    }
+
+    /// Returns every schema reference of `doc` that has no schema.
+    fn unresolved_schema_refs(doc: &serde_json::Value) -> Vec<String> {
+        fn collect<'v>(value: &'v serde_json::Value, refs: &mut Vec<&'v str>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, value) in map {
+                        match (key.as_str(), value.as_str()) {
+                            ("$ref", Some(reference)) => refs.push(reference),
+                            _ => collect(value, refs),
+                        }
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for value in values {
+                        collect(value, refs);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut refs = Vec::new();
+        collect(doc, &mut refs);
+        let schemas = doc.pointer("/components/schemas");
+        refs.into_iter()
+            .filter(|reference| {
+                reference
+                    .strip_prefix("#/components/schemas/")
+                    .is_none_or(|name| schemas.and_then(|s| s.get(name)).is_none())
+            })
+            .map(str::to_owned)
+            .collect()
+    }
+
     #[tokio::test]
     async fn finished_nested_docs_match_nest_api_service() {
-        // Two different types with the same name: the schema generator numbers them
-        // (`Item`, `Item2`), which only stays consistent with a shared generator.
-        mod first {
-            #[derive(serde::Serialize, schemars::JsonSchema)]
-            pub(super) struct Item {
-                pub(super) a: u8,
-            }
-        }
-        mod second {
-            #[derive(serde::Serialize, schemars::JsonSchema)]
-            pub(super) struct Item {
-                pub(super) b: String,
-            }
-        }
-        fn main_routes() -> ApiRouter {
-            ApiRouter::new().api_route(
-                "/components",
-                routing::get_with(
-                    || async { axum::Json(first::Item { a: 1 }) },
-                    |op| op.description("list"),
-                ),
-            )
-        }
         fn ecu_routes() -> ApiRouter {
-            ApiRouter::new()
-                .api_route(
-                    "/",
-                    routing::get_with(|| async { "root" }, |op| op.description("root")),
-                )
-                .api_route(
-                    "/data/{id}",
-                    routing::get_with(
-                        || async {
-                            axum::Json(second::Item {
-                                b: "data".to_owned(),
-                            })
-                        },
-                        |op| op.description("data"),
-                    ),
-                )
+            second_item_route("/data/{id}").api_route(
+                "/",
+                routing::get_with(|| async { "root" }, |op| op.description("root")),
+            )
         }
 
         let expected = {
             let dr = DynamicRouter::new();
             dr.add_routes(
-                main_routes()
+                first_item_route("/components")
                     .nest_api_service("/components/a", ecu_routes())
                     .nest_api_service("/components/b", ecu_routes()),
             )
@@ -877,19 +950,33 @@ mod tests {
 
         let dr = DynamicRouter::new();
         let mut docs = FinishedDocs::default();
-        let router = docs.nest(main_routes(), "/components/a", ecu_routes());
+        let router = docs.nest(
+            first_item_route("/components"),
+            "/components/a",
+            ecu_routes(),
+        );
         let router = docs.nest(router, "/components/b", ecu_routes());
-        dr.add_routes(ApiRoutes::new(router, docs)).await;
+        dr.add_routes(ApiRoutes::finish(router, docs)).await;
 
         let actual = serde_json::to_value(openapi(&dr).await).unwrap();
-        assert!(
-            actual.to_string().contains("#/components/schemas/Item2"),
-            "expected numbered schema names in {actual}"
-        );
         assert_eq!(actual, expected);
+        assert_eq!(unresolved_schema_refs(&actual), Vec::<String>::new());
+        assert!(
+            response_schema(&actual, "/components")
+                .pointer("/properties/a")
+                .is_some()
+        );
+        for path in ["/components/a/data/{id}", "/components/b/data/{id}"] {
+            assert!(
+                response_schema(&actual, path)
+                    .pointer("/properties/b")
+                    .is_some(),
+                "{path}"
+            );
+        }
         for (path, body) in [
             ("/components/a", "root"),
-            ("/components/b/data/x", r#"{"b":"data"}"#),
+            ("/components/b/data/x", r#"{"b":"second"}"#),
         ] {
             let resp = dr
                 .get_router()
@@ -903,13 +990,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn openapi_json_renames_conflicting_schemas_of_separate_groups() {
+        let dr = DynamicRouter::new();
+        // Each group is documented on its own, so both name their type `Item`.
+        dr.add_routes(first_item_route("/first")).await;
+        dr.add_routes(second_item_route("/second")).await;
+
+        let doc: serde_json::Value =
+            serde_json::from_slice(&dr.openapi_json(|api| api).await.unwrap()).unwrap();
+
+        assert_eq!(unresolved_schema_refs(&doc), Vec::<String>::new());
+        assert!(
+            response_schema(&doc, "/first")
+                .pointer("/properties/a")
+                .is_some()
+        );
+        assert!(
+            response_schema(&doc, "/second")
+                .pointer("/properties/b")
+                .is_some()
+        );
+        assert_eq!(
+            doc.pointer("/components/schemas")
+                .and_then(serde_json::Value::as_object)
+                .map(serde_json::Map::len),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
     async fn openapi_json_applies_document_transform() {
         let dr = DynamicRouter::new();
-        dr.add_routes(ApiRouter::new().api_route(
-            "/foo",
-            routing::get_with(|| async { "foo" }, |op| op.description("foo")),
-        ))
-        .await;
+        dr.add_routes(first_item_route("/first")).await;
 
         let doc: serde_json::Value = serde_json::from_slice(
             &dr.openapi_json(|api| api.title("CDA").version("1.0"))
@@ -923,11 +1035,7 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("CDA")
         );
-        assert_eq!(
-            doc.pointer("/paths/~1foo/get/description")
-                .and_then(serde_json::Value::as_str),
-            Some("foo")
-        );
+        assert!(doc.pointer("/paths/~1first/get").is_some());
     }
 
     #[tokio::test]
