@@ -11,11 +11,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use http::{Method, StatusCode};
+use std::time::Duration;
+
+use http::{HeaderValue, Method, StatusCode, header};
 
 use crate::{
     sovd::{COMPONENTS_FLXC1000_DATA, COMPONENTS_FLXC1000_DATA_VINDATAIDENTIFIER},
-    util::{ecusim, http::send_authenticated_cda_request, test_env::TestEnv},
+    util::{
+        ecusim,
+        http::{
+            extract_field_from_json, response_to_json, send_authenticated_cda_request,
+            send_cda_request,
+        },
+        locks::{self, create_lock, lock_operation},
+        test_env::TestEnv,
+    },
 };
 
 /// Tests that CDA correctly rejects ECU responses where the DID (Data Identifier)
@@ -119,7 +129,88 @@ async fn test_short_ecu_response_returns_error() {
         "Expected 400 Bad Request when ECU responds with truncated payload, got: {result:?}"
     );
 
+    let mut raw_headers = test_env.auth_header().await.unwrap();
+    raw_headers.insert(
+        header::ACCEPT,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    let raw_result = send_cda_request(
+        &test_env.config,
+        &format!("{COMPONENTS_FLXC1000_DATA}/fluxcapacitorpowerconsumption"),
+        StatusCode::BAD_REQUEST,
+        Method::GET,
+        None,
+        Some(&raw_headers),
+        None,
+    )
+    .await;
+
+    assert!(
+        raw_result.is_ok(),
+        "Expected 400 Bad Request for truncated octet-stream response, got: {raw_result:?}"
+    );
+
     ecusim::clear_interceptor(&test_env.ecu_sim, "FLXC1000", "truncated_response")
         .await
         .expect("Failed to remove interceptor");
+}
+
+/// A positive Write DID response contains only the positive SID and the echoed DID.
+/// Those bytes confirm the UDS operation but are not application data for the client,
+/// so the raw-response path should still return `204 No Content`.
+#[tokio::test]
+async fn test_write_did_positive_echo_returns_204_without_accept_header() {
+    let test_env = TestEnv::builder().await.unwrap();
+    let ecu_lock = create_lock(
+        Duration::from_secs(60),
+        locks::COMPONENTS_FLXC1000_LOCKS,
+        StatusCode::CREATED,
+        &test_env,
+    )
+    .await;
+    let lock_id =
+        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+    lock_operation(
+        locks::COMPONENTS_FLXC1000_LOCKS,
+        Some(&lock_id),
+        &test_env,
+        StatusCode::OK,
+        Method::GET,
+    )
+    .await;
+
+    ecusim::set_interceptor(
+        &test_env.ecu_sim,
+        "FLXC1000",
+        "write_did_positive_echo",
+        "2ef190[]",
+        "6ef190",
+    )
+    .await
+    .expect("Failed to install Write DID response interceptor");
+
+    let mut headers = test_env.auth_header().await.unwrap();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    let result = send_cda_request(
+        &test_env.config,
+        COMPONENTS_FLXC1000_DATA_VINDATAIDENTIFIER,
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        Some("TESTVIN1234567890"),
+        Some(&headers),
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Expected 204 No Content for a positive Write DID echo, got: {result:?}"
+    );
+
+    ecusim::clear_interceptor(&test_env.ecu_sim, "FLXC1000", "write_did_positive_echo")
+        .await
+        .expect("Failed to remove Write DID response interceptor");
 }

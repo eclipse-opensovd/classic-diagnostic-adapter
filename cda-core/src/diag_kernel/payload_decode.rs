@@ -163,6 +163,11 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             })
         }) {
             let response_type = response.response_type().try_into()?;
+            // Use MDD metadata so raw responses need not be decoded just to choose the HTTP status.
+            let data_semantic = &self.database_naming_convention.semantics.data;
+            let service_id_rq_semantic = &self.database_naming_convention.semantics.service_id_rq;
+            let has_application_data = response_type == datatypes::ResponseType::Positive
+                && response_has_application_data(&params, data_semantic, service_id_rq_semantic);
             // in case of a positive response update potential session or security access changes
             if response_type == datatypes::ResponseType::Positive {
                 let (new_session, new_security) =
@@ -187,13 +192,29 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             .to_vec();
 
             if response_type == datatypes::ResponseType::Positive && !map_to_json {
+                // Raw responses skip parameter decoding, so validate known fixed DATA extents.
+                // Variable or unresolved layouts have no fixed size here and currently bypass
+                // truncation validation.
+                let fixed_data_size =
+                    super::param_metadata::raw_response_layout(&params, data_semantic)?
+                        .and_then(|layout| layout.fixed_data_size);
+                if let Some(expected) = fixed_data_size
+                    && raw_uds_payload.len() < expected
+                {
+                    return Err(DiagServiceError::NotEnoughData {
+                        expected,
+                        actual: raw_uds_payload.len(),
+                    });
+                }
                 return Ok(DiagServiceResponseStruct {
                     service: diag_service.clone(),
                     data: raw_uds_payload,
                     mapped_data: None,
                     response_type: DiagServiceResponseType::Positive,
+                    has_application_data,
                 });
             }
+
             let mut mapping_errors = Vec::new();
             // Params are decoded in database order. A param without
             // BYTE-POSITION (ISO 22901-1 §7.4.8) starts where the preceding
@@ -240,6 +261,7 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
                 diag_service,
                 data,
                 response_type,
+                has_application_data,
                 raw_uds_payload,
                 mapping_errors,
             );
@@ -251,15 +273,19 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             // Returning a response here, because even valid databases may not define a
             // response for a service.
             tracing::warn!("No matching response found for SID: {sid}");
+            let response_type = if *response_first_byte == service_ids::NEGATIVE_RESPONSE {
+                DiagServiceResponseType::Negative
+            } else {
+                DiagServiceResponseType::Positive
+            };
             Ok(DiagServiceResponseStruct {
                 service: diag_service.clone(),
                 data: payload.data.clone(),
                 mapped_data: None,
-                response_type: if *response_first_byte == service_ids::NEGATIVE_RESPONSE {
-                    DiagServiceResponseType::Negative
-                } else {
-                    DiagServiceResponseType::Positive
-                },
+                response_type,
+                // The SID is protocol overhead; retain longer unknown responses conservatively.
+                has_application_data: response_type == DiagServiceResponseType::Positive
+                    && payload.data.len() > 1,
             })
         }
     }
@@ -337,6 +363,7 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
                 data: raw_uds_payload,
                 mapped_data: None,
                 response_type: DiagServiceResponseType::Positive,
+                has_application_data: true,
             });
         }
 
@@ -344,6 +371,7 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             diag_service,
             data,
             datatypes::ResponseType::Positive,
+            true,
             raw_uds_payload,
             mapping_errors,
         );
@@ -366,11 +394,14 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
                 ))));
             }
         };
+        let has_application_data =
+            response_type == DiagServiceResponseType::Positive && response.data.len() > 1;
         Ok(DiagServiceResponseStruct {
             service: diag_comm,
             data: response.data,
             mapped_data: None,
             response_type,
+            has_application_data,
         })
     }
 }
@@ -2068,6 +2099,7 @@ fn create_diag_service_response(
     diag_service: &cda_interfaces::DiagComm,
     data: HashMap<String, DiagDataTypeContainer>,
     response_type: datatypes::ResponseType,
+    has_application_data: bool,
     raw_uds_payload: Vec<u8>,
     mapping_errors: Vec<FieldParseError>,
 ) -> DiagServiceResponseStruct {
@@ -2081,6 +2113,7 @@ fn create_diag_service_response(
                     errors: mapping_errors,
                 }),
                 response_type: DiagServiceResponseType::Negative,
+                has_application_data: false,
             }
         }
         datatypes::ResponseType::Positive => DiagServiceResponseStruct {
@@ -2091,7 +2124,63 @@ fn create_diag_service_response(
                 errors: mapping_errors,
             }),
             response_type: DiagServiceResponseType::Positive,
+            has_application_data,
         },
+    }
+}
+
+fn response_has_application_data(
+    params: &[datatypes::Parameter<'_>],
+    data_semantic: &str,
+    service_id_rq_semantic: &str,
+) -> bool {
+    params.iter().any(|param| {
+        parameter_has_application_data(
+            &param.param_type(),
+            param.semantic(),
+            data_semantic,
+            service_id_rq_semantic,
+        )
+    })
+}
+
+fn parameter_has_application_data(
+    param_type: &Result<datatypes::ParamType, DiagServiceError>,
+    semantic: Option<&str>,
+    data_semantic: &str,
+    service_id_rq_semantic: &str,
+) -> bool {
+    is_application_data_semantic(semantic, data_semantic, service_id_rq_semantic)
+        && parameter_type_has_application_data(param_type, semantic, data_semantic)
+}
+
+fn is_application_data_semantic(
+    semantic: Option<&str>,
+    data_semantic: &str,
+    service_id_rq_semantic: &str,
+) -> bool {
+    // Exclude the configured request service ID, but retain other semantics because
+    // the semantic list can be extended by manufacturers.
+    semantic.is_none_or(|value| value == data_semantic || value != service_id_rq_semantic)
+}
+
+fn parameter_type_has_application_data(
+    param_type: &Result<datatypes::ParamType, DiagServiceError>,
+    semantic: Option<&str>,
+    data_semantic: &str,
+) -> bool {
+    match param_type {
+        Ok(datatypes::ParamType::CodedConst | datatypes::ParamType::PhysConst) => {
+            semantic == Some(data_semantic)
+        }
+        Ok(
+            datatypes::ParamType::MatchingRequestParam
+            | datatypes::ParamType::NrcConst
+            | datatypes::ParamType::Reserved
+            | datatypes::ParamType::System,
+        ) => false,
+        // Preserve unknown parameter types rather than silently dropping response content.
+        Ok(_) | Err(_) => true,
     }
 }
 
@@ -2133,6 +2222,86 @@ mod tests {
             new_session: None,
             new_security: None,
         }
+    }
+
+    #[test]
+    fn response_data_classifier_ignores_non_data_semantics() {
+        assert!(is_application_data_semantic(
+            Some("DATA"),
+            "DATA",
+            "SERVICE-ID-RQ"
+        ));
+        assert!(is_application_data_semantic(
+            Some("MANUFACTURER-DATA"),
+            "DATA",
+            "SERVICE-ID-RQ"
+        ));
+        assert!(is_application_data_semantic(None, "DATA", "SERVICE-ID-RQ"));
+        assert!(is_application_data_semantic(
+            Some("DID"),
+            "DATA",
+            "SERVICE-ID-RQ"
+        ));
+        assert!(!is_application_data_semantic(
+            Some("SERVICE-ID-RQ"),
+            "DATA",
+            "SERVICE-ID-RQ"
+        ));
+        assert!(parameter_type_has_application_data(
+            &Ok(datatypes::ParamType::Value),
+            Some("MANUFACTURER-DATA"),
+            "DATA"
+        ));
+        assert!(parameter_has_application_data(
+            &Ok(datatypes::ParamType::Value),
+            Some("DID"),
+            "DATA",
+            "SERVICE-ID-RQ",
+        ));
+        assert!(parameter_type_has_application_data(
+            &Ok(datatypes::ParamType::CodedConst),
+            Some("DATA"),
+            "DATA"
+        ));
+        assert!(parameter_type_has_application_data(
+            &Ok(datatypes::ParamType::PhysConst),
+            Some("DATA"),
+            "DATA"
+        ));
+        assert!(!parameter_type_has_application_data(
+            &Ok(datatypes::ParamType::CodedConst),
+            Some("MANUFACTURER-DATA"),
+            "DATA"
+        ));
+        assert!(!parameter_type_has_application_data(
+            &Ok(datatypes::ParamType::PhysConst),
+            Some("SERVICE-ID-RQ"),
+            "DATA"
+        ));
+        assert!(!parameter_type_has_application_data(
+            &Ok(datatypes::ParamType::MatchingRequestParam),
+            Some("DATA"),
+            "DATA"
+        ));
+    }
+
+    #[test]
+    fn response_data_classifier_ignores_reserved_padding() {
+        let sid_is_application_data = parameter_has_application_data(
+            &Ok(datatypes::ParamType::CodedConst),
+            Some("SERVICE-ID-RQ"),
+            "DATA",
+            "SERVICE-ID-RQ",
+        );
+        let padding_is_application_data = parameter_has_application_data(
+            &Ok(datatypes::ParamType::Reserved),
+            None,
+            "DATA",
+            "SERVICE-ID-RQ",
+        );
+
+        assert!(!sid_is_application_data);
+        assert!(!padding_is_application_data);
     }
 
     async fn assert_uds_converts_to_json(
@@ -2509,6 +2678,59 @@ mod tests {
             result.unwrap().response_type,
             DiagServiceResponseType::Negative
         );
+    }
+
+    #[tokio::test]
+    async fn test_unknown_positive_response_sid_only_has_no_application_data() {
+        let (ecu_manager, service, sid, _) = create_ecu_manager_with_struct_service(1);
+        let response_sid = sid.saturating_add(cda_interfaces::UDS_ID_RESPONSE_BITMASK);
+
+        let sid_only = ecu_manager
+            .convert_from_uds(&service, &create_payload(vec![response_sid]), false, None)
+            .await
+            .expect("SID-only positive response should use the fallback");
+        assert_eq!(sid_only.response_type, DiagServiceResponseType::Positive);
+        assert!(!sid_only.has_application_data);
+        assert_eq!(sid_only.data, vec![response_sid]);
+
+        let longer_response = ecu_manager
+            .convert_from_uds(
+                &service,
+                &create_payload(vec![response_sid, 0xA5]),
+                false,
+                None,
+            )
+            .await
+            .expect("Longer positive response should use the fallback");
+        assert_eq!(
+            longer_response.response_type,
+            DiagServiceResponseType::Positive
+        );
+        assert!(longer_response.has_application_data);
+        assert_eq!(longer_response.data, vec![response_sid, 0xA5]);
+    }
+
+    #[tokio::test]
+    async fn raw_response_with_truncated_fixed_data_returns_not_enough_data() {
+        let (ecu_manager, service, response_sid) =
+            create_ecu_manager_with_phys_const_normal_dop_service();
+        let error = ecu_manager
+            .convert_from_uds(
+                &service,
+                &create_payload(vec![response_sid, 0xF1, 0x90]),
+                false,
+                None,
+            )
+            .await
+            .expect_err("missing fixed-size DATA bytes must be rejected");
+
+        assert!(matches!(
+            error,
+            DiagServiceError::NotEnoughData {
+                expected: 1,
+                actual: 0
+            }
+        ));
     }
 
     #[tokio::test]
