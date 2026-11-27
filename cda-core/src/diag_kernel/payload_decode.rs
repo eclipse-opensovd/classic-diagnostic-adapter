@@ -239,18 +239,19 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
                 },
                 |offset| offset as usize,
             );
-            let raw_uds_payload = uds_payload
-                .data()?
-                .get(base_offset..)
-                .ok_or(DiagServiceError::BadPayload(
+            let full_payload = uds_payload.data()?;
+            if base_offset > full_payload.len() {
+                return Err(DiagServiceError::BadPayload(
                     "Payload offset out of bounds".to_owned(),
-                ))?
-                .to_vec();
+                ));
+            }
+            let full_payload = full_payload.to_vec();
 
             if raw_only {
                 return Ok(DiagServiceResponseStruct {
                     service: diag_service.clone(),
-                    data: raw_uds_payload,
+                    payload: full_payload,
+                    raw_offset: base_offset,
                     mapped_data: None,
                     response_type: DiagServiceResponseType::Positive,
                 });
@@ -260,7 +261,8 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
                 diag_service,
                 data,
                 response_type,
-                raw_uds_payload,
+                full_payload,
+                base_offset,
                 mapping_errors,
             );
             tracing::Span::current()
@@ -273,7 +275,8 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             tracing::warn!("No matching response found for SID: {sid}");
             Ok(DiagServiceResponseStruct {
                 service: diag_service.clone(),
-                data: payload.data.clone(),
+                payload: payload.data.clone(),
+                raw_offset: 0,
                 mapped_data: None,
                 response_type: if *response_first_byte == service_ids::NEGATIVE_RESPONSE {
                     DiagServiceResponseType::Negative
@@ -354,7 +357,8 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
         if !map_to_json {
             return Ok(DiagServiceResponseStruct {
                 service: diag_service.clone(),
-                data: raw_uds_payload,
+                payload: raw_uds_payload,
+                raw_offset: 0,
                 mapped_data: None,
                 response_type: DiagServiceResponseType::Positive,
             });
@@ -365,6 +369,7 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             data,
             datatypes::ResponseType::Positive,
             raw_uds_payload,
+            0,
             mapping_errors,
         );
 
@@ -388,7 +393,8 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
         };
         Ok(DiagServiceResponseStruct {
             service: diag_comm,
-            data: response.data,
+            payload: response.data,
+            raw_offset: 0,
             mapped_data: None,
             response_type,
         })
@@ -603,6 +609,22 @@ impl<S: SecurityPlugin> EcuManager<S> {
             walk.data.remove(&name);
         }
         Ok(walk)
+    }
+
+    /// Byte position of each response parameter in `bytes`, by index, as the
+    /// response decode determines them. `None` if it cannot be determined.
+    ///
+    /// # Errors
+    /// Returns an error if the database description is invalid.
+    pub(in crate::diag_kernel) fn response_param_positions(
+        &self,
+        service: &datatypes::DiagService<'_>,
+        params: &[datatypes::Parameter<'_>],
+        bytes: &[u8],
+    ) -> Result<Vec<Option<usize>>, DiagServiceError> {
+        Ok(self
+            .walk_response_params(service, params, bytes, None, |_| false, |_| false)?
+            .positions)
     }
 
     #[allow(
@@ -2397,14 +2419,16 @@ fn create_diag_service_response(
     diag_service: &cda_interfaces::DiagComm,
     data: HashMap<String, DiagDataTypeContainer>,
     response_type: datatypes::ResponseType,
-    raw_uds_payload: Vec<u8>,
+    payload: Vec<u8>,
+    raw_offset: usize,
     mapping_errors: Vec<FieldParseError>,
 ) -> DiagServiceResponseStruct {
     match response_type {
         datatypes::ResponseType::Negative | datatypes::ResponseType::GlobalNegative => {
             DiagServiceResponseStruct {
                 service: diag_service.clone(),
-                data: raw_uds_payload,
+                payload,
+                raw_offset,
                 mapped_data: Some(MappedResponseData {
                     data,
                     errors: mapping_errors,
@@ -2414,7 +2438,8 @@ fn create_diag_service_response(
         }
         datatypes::ResponseType::Positive => DiagServiceResponseStruct {
             service: diag_service.clone(),
-            data: raw_uds_payload,
+            payload,
+            raw_offset,
             mapped_data: Some(MappedResponseData {
                 data,
                 errors: mapping_errors,

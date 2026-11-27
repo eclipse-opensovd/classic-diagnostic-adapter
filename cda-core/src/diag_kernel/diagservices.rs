@@ -27,7 +27,10 @@ use crate::diag_kernel::{DiagDataValue, iso_14229_nrc, operations};
 #[derive(Debug, Clone)]
 pub struct DiagServiceResponseStruct {
     pub service: DiagComm,
-    pub data: Vec<u8>,
+    /// The complete response payload.
+    pub payload: Vec<u8>,
+    /// Offset in `payload` at which the raw data starts.
+    pub raw_offset: usize,
     pub mapped_data: Option<MappedResponseData>,
     pub response_type: DiagServiceResponseType,
 }
@@ -84,7 +87,8 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
     fn empty_positive(service: DiagComm) -> Self {
         Self {
             service,
-            data: Vec::new(),
+            payload: Vec::new(),
+            raw_offset: 0,
             mapped_data: None,
             response_type: DiagServiceResponseType::Positive,
         }
@@ -98,7 +102,11 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
     }
 
     fn get_raw(&self) -> &[u8] {
-        &self.data
+        self.payload.get(self.raw_offset..).unwrap_or_default()
+    }
+
+    fn get_payload(&self) -> &[u8] {
+        &self.payload
     }
 
     fn into_json(
@@ -114,7 +122,7 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
             errors: _,
         }) = &self.mapped_data
         else {
-            return extract_nrc_from_raw_data(&self.data);
+            return extract_nrc_from_raw_data(self.get_raw());
         };
         let nrc_code = mapped_data
             .get("NRC")
@@ -161,7 +169,7 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
     }
 
     fn is_empty(&self) -> bool {
-        self.data.is_empty()
+        self.get_raw().is_empty()
     }
 
     fn get_dtcs(&self) -> Result<Vec<(DtcField, DtcRecord)>, DiagServiceError> {

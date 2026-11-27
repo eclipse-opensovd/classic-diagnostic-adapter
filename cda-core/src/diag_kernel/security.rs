@@ -177,11 +177,11 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
     fn authentication_return_value(
         &self,
         sub_function: AuthenticationSubFunction,
-        raw_response: &[u8],
+        response_payload: &[u8],
     ) -> Result<Option<u64>, DiagServiceError> {
         // The decoding is a SID 0x29 specific database lookup, it lives in
         // `authentication.rs` together with the other Authentication lookups.
-        self.decode_authentication_return_value(sub_function, raw_response)
+        self.decode_authentication_return_value(sub_function, response_payload)
     }
 }
 

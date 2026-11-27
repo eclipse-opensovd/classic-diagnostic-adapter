@@ -34,7 +34,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         &self,
         ecu_name: &str,
         sub_function: AuthenticationSubFunction,
-        raw_response: &[u8],
+        response_payload: &[u8],
         expiration: Option<Duration>,
     ) -> Result<(AuthenticationState, bool), DiagServiceError> {
         let ecu = self.uds_ecu_db(ecu_name)?.read().await;
@@ -46,7 +46,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             return Ok((state, false));
         }
 
-        let completes = match ecu.authentication_return_value(sub_function, raw_response) {
+        let completes = match ecu.authentication_return_value(sub_function, response_payload) {
             Ok(Some(value)) => return_value_completes_authentication(sub_function, value),
             Ok(None) => {
                 tracing::warn!(
@@ -146,7 +146,7 @@ impl<S: EcuGateway, T: EcuManager> UdsAuthentication for UdsManager<S, T> {
                     .authentication_state_after_positive(
                         ecu_name,
                         sub_function,
-                        response.get_raw(),
+                        response.get_payload(),
                         expiration,
                     )
                     .await?;
