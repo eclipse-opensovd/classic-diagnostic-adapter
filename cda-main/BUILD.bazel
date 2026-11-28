@@ -9,6 +9,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+load("@cda_crates//:defs.bzl", "crate_deps")
 load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars")
 load("//bazel:rust_crate.bzl", "workspace_rust_binary", "workspace_rust_library")
 
@@ -29,7 +30,6 @@ workspace_rust_library(
         "clap",
         "figment",
         "futures",
-        "mimalloc",
         "schemars",
         "serde",
         "serde_json",
@@ -44,8 +44,10 @@ workspace_rust_library(
         "config-optional",
         "health",
         "mbedtls",
-        "systemd-notify",
     ] + select({
+        "@platforms//os:linux": ["systemd-notify"],
+        "//conditions:default": [],
+    }) + select({
         "//:can_enabled": ["can"],
         "//conditions:default": [],
     }),
@@ -78,7 +80,10 @@ workspace_rust_library(
         "//cda-storage:cda_storage",
         "//cda-tracing:cda_tracing",
         "//cda-transport-router:cda_transport_router",
-    ],
+    ] + select({
+        "//bazel:qnx": [],
+        "//conditions:default": crate_deps(["mimalloc"]),
+    }),
 )
 
 workspace_rust_binary(

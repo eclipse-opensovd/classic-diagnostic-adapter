@@ -36,6 +36,12 @@ We will use **mimalloc** as the default memory allocator for the Classic Diagnos
 
 The performance advantages of mimalloc outweigh the increased memory overhead. While the system allocator demonstrates better memory efficiency, the ~29% execution time improvement provided by mimalloc is critical for diagnostic operations where response time directly impacts user experience and system throughput.
 
+QNX targets (``target_os = "nto"`` or ``target_os = "qnx"``) deliberately use
+``std::alloc::System`` instead. Normal builds on other platforms retain mimalloc,
+and ``heap_profiling`` builds continue to use the system allocator unchanged.
+QNX performance and resident memory usage (RSS) may differ and have not been
+benchmarked; the macOS results below do not guarantee QNX behavior.
+
 Rationale
 ---------
 

@@ -15,6 +15,8 @@ module(
     bazel_compatibility = [">=8.6.0"],
 )
 
+bazel_dep(name = "bazel_skylib", version = "1.9.2")
+bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "rules_rust", version = "0.68.1")
 single_version_override(
     module_name = "rules_rust",
@@ -45,14 +47,28 @@ register_toolchains(
 )
 
 cda_crate_universe = use_extension(
-    "@rules_rust//crate_universe:extensions.bzl",
+    "//bazel:cda_crate_extension.bzl",
     "crate",
+)
+cda_crate_universe.render_config(
+    platforms_template = "@classic-diagnostic-adapter//bazel:{triple}",
 )
 cda_crate_universe.from_cargo(
     name = "cda_crates",
     cargo_lockfile = "//:Cargo.lock",
     manifests = ["//:Cargo.toml"],
     skip_cargo_lockfile_overwrite = True,
+    supported_platform_triples = [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-nto-qnx710",
+        "wasm32-unknown-unknown",
+        "wasm32-wasip1",
+        "x86_64-pc-nto-qnx710",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-nixos-gnu",
+    ],
 )
 use_repo(
     cda_crate_universe,
