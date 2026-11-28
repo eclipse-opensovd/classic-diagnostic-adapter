@@ -15,6 +15,7 @@ module(
     bazel_compatibility = [">=8.6.0"],
 )
 
+bazel_dep(name = "bazel_skylib", version = "1.9.2")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "rules_rust", version = "0.68.1")
 single_version_override(
@@ -46,8 +47,11 @@ register_toolchains(
 )
 
 cda_crate_universe = use_extension(
-    "@rules_rust//crate_universe:extensions.bzl",
+    "//bazel:cda_crate_extension.bzl",
     "crate",
+)
+cda_crate_universe.render_config(
+    platforms_template = "@classic-diagnostic-adapter//bazel:{triple}",
 )
 cda_crate_universe.from_cargo(
     name = "cda_crates",
