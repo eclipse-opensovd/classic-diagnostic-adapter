@@ -57,8 +57,6 @@ figment = { workspace = true, features = ["env", "toml"] }
 toml = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
-# allocator
-mimalloc = { git = "https://github.com/theswiftfox/mimalloc.git", rev = "f1b43de8bcd208a4b0c9469a87fe0920b540da40" }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -80,6 +78,10 @@ tracing-subscriber = { workspace = true, features = [
   "parking_lot",
   "std",
 ] }
+
+# allocator
+[target.'cfg(not(any(target_os = "nto", target_os = "qnx")))'.dependencies]
+mimalloc = { git = "https://github.com/theswiftfox/mimalloc.git", rev = "f1b43de8bcd208a4b0c9469a87fe0920b540da40" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

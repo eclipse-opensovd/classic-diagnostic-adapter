@@ -56,14 +56,19 @@ pub use error::AppError;
 pub use setup::Setup;
 
 // Valgrind and other profiling tools intercept the system allocator, whereas mimalloc
-// manages allocations internally. Keep mimalloc in normal builds but omit it
+// manages allocations internally. Keep mimalloc in normal non-QNX builds but omit it
 // from profiling builds so allocation call stacks remain visible.
-#[cfg(not(heap_profiling))]
+#[cfg(not(any(heap_profiling, target_os = "nto", target_os = "qnx")))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// QNX deliberately uses the system allocator instead of mimalloc.
+#[cfg(all(not(heap_profiling), any(target_os = "nto", target_os = "qnx")))]
+#[global_allocator]
+static GLOBAL: std::alloc::System = std::alloc::System;
+
 /// Environment variable to override the purge delay of mimalloc in milliseconds.
-#[cfg(not(heap_profiling))]
+#[cfg(not(any(heap_profiling, target_os = "nto", target_os = "qnx")))]
 const MIMALLOC_PURGE_DELAY_ENV: &str = "MIMALLOC_PURGE_DELAY";
 
 /// Configures mimalloc to return unused memory to the OS immediately.
@@ -74,7 +79,7 @@ const MIMALLOC_PURGE_DELAY_ENV: &str = "MIMALLOC_PURGE_DELAY";
 /// cuts the resident memory after startup roughly in half.
 /// Can be overridden with the `MIMALLOC_PURGE_DELAY` environment variable.
 fn configure_allocator() {
-    #[cfg(not(heap_profiling))]
+    #[cfg(not(any(heap_profiling, target_os = "nto", target_os = "qnx")))]
     if std::env::var_os(MIMALLOC_PURGE_DELAY_ENV).is_none() {
         mimalloc::options::option_set(mimalloc::options::MiOption::PurgeDelay, 0);
     }

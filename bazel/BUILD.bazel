@@ -9,7 +9,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-load("@rules_rust//rust/platform:triple_mappings.bzl", "triple_to_constraint_set")
+load("@rules_rust//rust/platform:triple_mappings.bzl", "system_to_constraints", "triple_to_constraint_set")
 
 exports_files([
     "build_metadata.env",
@@ -18,6 +18,13 @@ exports_files([
     "check_mbedtls_revision.py",
     "rust_crate.bzl",
 ])
+
+# Resolve the QNX OS label through the selected upstream or consumer rules_rust.
+config_setting(
+    name = "qnx",
+    constraint_values = system_to_constraints("nto"),
+    visibility = ["//visibility:public"],
+)
 
 # rules_rust 0.68.1 can map QNX triples but does not declare the x86_64 setting.
 # Reuse the selected rules_rust mappings, including consumer-specific QNX ABIs.
