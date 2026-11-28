@@ -44,8 +44,10 @@ workspace_rust_library(
         "config-optional",
         "health",
         "mbedtls",
-        "systemd-notify",
     ] + select({
+        "@platforms//os:linux": ["systemd-notify"],
+        "//conditions:default": [],
+    }) + select({
         "//:can_enabled": ["can"],
         "//conditions:default": [],
     }),
